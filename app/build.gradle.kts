@@ -10,8 +10,8 @@ android {
         applicationId = "com.miokzz.horizoncam.gl"
         minSdk = 29
         targetSdk = 36
-        versionCode = 41
-        versionName = "0.4.1-gltest"
+        versionCode = 50
+        versionName = "0.5.0"
     }
 
     buildTypes {

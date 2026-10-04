@@ -2,10 +2,8 @@ package com.miokzz.horizoncam
 
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.max
-import kotlin.math.sin
+import kotlin.math.sqrt
 
 class HorizonState {
     private val currentRoll = AtomicReference(0f)
@@ -19,6 +17,8 @@ class HorizonState {
             referenceRoll.compareAndSet(null, currentRoll.get())
         }
     }
+
+    fun currentRollDegrees(): Float = currentRoll.get()
 
     fun recalibrate() {
         referenceRoll.set(currentRoll.get())
@@ -41,14 +41,15 @@ class HorizonState {
     }
 
     /**
-     * Uniform zoom needed so a rotated rectangular frame keeps covering
-     * the entire output viewport without black corners.
+     * Constant overscan for a full 360-degree roll.
+     *
+     * Using a fixed value prevents the "breathing" FOV from dynamic crop.
+     * For a rectangular viewport, the worst case over every angle is:
+     * sqrt(1 + max(aspect, 1/aspect)^2).
      */
-    fun safeCropScale(aspectRatio: Float = 16f / 9f): Float {
-        val radians = Math.toRadians(correctionDegrees().toDouble())
-        val c = abs(cos(radians)).toFloat()
-        val s = abs(sin(radians)).toFloat()
-        return max(c + s / aspectRatio, c + s * aspectRatio).coerceIn(1f, 2.25f)
+    fun fixedCropScale(aspectRatio: Float = 16f / 9f): Float {
+        val a = max(aspectRatio, 1f / aspectRatio).coerceAtLeast(1f)
+        return (sqrt(1f + a * a) * 1.015f).coerceIn(1f, 2.20f)
     }
 
     private fun wrap(value: Float): Float {

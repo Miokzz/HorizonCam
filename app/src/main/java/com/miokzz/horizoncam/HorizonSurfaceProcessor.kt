@@ -116,7 +116,7 @@ class HorizonSurfaceProcessor(
             val aspect = if (size.height == 0) 16f / 9f else size.width.toFloat() / size.height.toFloat()
             buildVertexMatrix(
                 state.correctionDegrees(),
-                state.safeCropScale(aspect),
+                state.fixedCropScale(aspect),
                 aspect,
                 vertexMatrix
             )
