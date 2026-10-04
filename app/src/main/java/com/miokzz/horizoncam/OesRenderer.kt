@@ -44,7 +44,7 @@ internal class OesRenderer {
 
         val fragmentShader = """
             #extension GL_OES_EGL_image_external : require
-            precision mediump float;
+            precision highp float;
             varying vec2 vTextureCoord;
             uniform samplerExternalOES uTexture;
             void main() {

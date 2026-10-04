@@ -33,7 +33,7 @@ class HorizonGlEffect private constructor(
             val thread = HandlerThread("HorizonCam-GL").apply { start() }
             val handler = Handler(thread.looper)
             val executor = Executor { command -> handler.post(command) }
-            val processor = HorizonSurfaceProcessor(state, handler, executor)
+            val processor = HorizonSurfaceProcessor(state, handler, executor, onError)
             return HorizonGlEffect(
                 processor,
                 thread,

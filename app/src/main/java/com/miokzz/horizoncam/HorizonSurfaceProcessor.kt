@@ -17,7 +17,8 @@ import kotlin.math.sin
 class HorizonSurfaceProcessor(
     private val state: HorizonState,
     private val glHandler: Handler,
-    private val glExecutor: Executor
+    private val glExecutor: Executor,
+    private val onRenderError: (Throwable) -> Unit
 ) : SurfaceProcessor, SurfaceTexture.OnFrameAvailableListener {
 
     private data class OutputTarget(
@@ -43,6 +44,8 @@ class HorizonSurfaceProcessor(
     private val canonicalAspect = 16f / 9f
     @Volatile private var sensorFrameAgeMs = 0f
     @Volatile private var timestampsMatched = false
+    @Volatile private var errorCount = 0
+    private var lastErrorAtMs = 0L
     @Volatile private var registeredTargets = 0
     @Volatile private var renderedFrames = 0L
 
@@ -52,7 +55,7 @@ class HorizonSurfaceProcessor(
         val v = if (mask and CameraEffect.VIDEO_CAPTURE != 0) 1 else 0
         val sync = if (timestampsMatched) "SYNC" else "LATEST"
         return "P" + p + " V" + v + " F" + renderedFrames +
-            " " + sync + " " + sensorFrameAgeMs.toInt() + "ms"
+            " E" + errorCount + " " + sync + " " + sensorFrameAgeMs.toInt() + "ms"
     }
 
     override fun onInputSurface(request: SurfaceRequest) {
@@ -152,13 +155,35 @@ class HorizonSurfaceProcessor(
                 target.info.updateTransformMatrix(target.transform, cameraTextureMatrix)
 
                 val size = target.info.size
-                egl.draw(target.surface, size.width, size.height, timestamp) {
-                    renderer.draw(target.transform, vertexMatrix)
+                try {
+                    egl.draw(target.surface, size.width, size.height, timestamp) {
+                        renderer.draw(target.transform, vertexMatrix)
+                    }
+                } catch (surfaceError: Throwable) {
+                    // A video encoder can close its Surface while the preview
+                    // remains active (and vice versa). One output failure must
+                    // not kill the CameraX GL thread or the other output.
+                    reportRenderError(surfaceError)
+                    outputs.remove(target.info)
+                    runCatching { egl.unregister(target.surface) }
+                    runCatching { target.info.close() }
+                    registeredTargets = outputs.keys.fold(0) { mask, key -> mask or key.targets }
                 }
             }
             renderedFrames++
         } catch (t: Throwable) {
-            throw RuntimeException("Horizon GL frame processing failed", t)
+            // Log and expose an explicit error; do not crash the GL looper.
+            reportRenderError(t)
+        }
+    }
+
+    private fun reportRenderError(error: Throwable) {
+        errorCount++
+        android.util.Log.e("HorizonCamGL", "GPU processing failed", error)
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastErrorAtMs > 1800L) {
+            lastErrorAtMs = now
+            onRenderError(error)
         }
     }
 
