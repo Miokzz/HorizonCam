@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.miokzz.horizoncam"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.miokzz.horizoncam"
