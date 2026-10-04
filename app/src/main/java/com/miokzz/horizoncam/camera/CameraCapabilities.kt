@@ -4,6 +4,8 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.util.Range
+import android.util.Size
+import android.media.MediaRecorder
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.DynamicRange
@@ -17,6 +19,7 @@ data class CameraCapabilities(
     val fhd: Boolean,
     val uhd: Boolean,
     val fps60: Boolean,
+    val uhd60: Boolean,
     val flash: Boolean
 ) {
     data class LensRecord(
@@ -44,6 +47,19 @@ data class CameraCapabilities(
             )
             val fps60 = ranges?.any { it.lower <= 60 && it.upper >= 60 } == true
             val flash = info.hasFlashUnit()
+            val map = camera2.getCameraCharacteristic(
+                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+            )
+            val videoSize = Size(3840, 2160)
+            val exposes4k = map?.getOutputSizes(MediaRecorder::class.java)
+                ?.any { it.width == videoSize.width && it.height == videoSize.height } == true
+            val minNs = if (exposes4k) runCatching {
+                map?.getOutputMinFrameDuration(MediaRecorder::class.java, videoSize)
+            }.getOrNull() else null
+            // Conservative: only advertise 4K60 if Camera2 declares a
+            // sufficiently fast output stream. GPU/effect may still fall back.
+            val uhd60 = supported.contains(Quality.UHD) && fps60 &&
+                minNs != null && minNs in 1L..16_666_666L
 
             val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val lenses = manager.cameraIdList.mapNotNull { lensId ->
@@ -73,6 +89,7 @@ data class CameraCapabilities(
                 supported.contains(Quality.FHD),
                 supported.contains(Quality.UHD),
                 fps60,
+                uhd60,
                 flash
             )
         }
