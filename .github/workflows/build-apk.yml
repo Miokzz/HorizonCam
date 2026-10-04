@@ -51,7 +51,7 @@ jobs:
           key: horizoncam-debug-keystore-v1
 
       - name: Build debug APK
-        run: gradle --stacktrace :app:testDebugUnitTest :app:assembleDebug
+        run: gradle --stacktrace :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
       - name: Save persistent debug signing key
         if: success() && steps.debug-key-restore.outputs.cache-hit != 'true'
@@ -60,10 +60,43 @@ jobs:
           path: ~/.android/debug.keystore
           key: horizoncam-debug-keystore-v1
 
+      - name: Verify debug APK signature
+        shell: bash
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs \
+            app/build/outputs/apk/debug/app-debug.apk
+          sha256sum app/build/outputs/apk/debug/app-debug.apk
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: HorizonCam-S24-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorizonCam-Validation
+          path: |
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Build reproducible source ZIP
+        if: success()
+        run: git archive --format=zip --output=HorizonCam-source.zip HEAD
+
+      - name: Upload Android Studio source
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorizonCam-Android-Studio-source
+          path: HorizonCam-source.zip
           if-no-files-found: error
           retention-days: 30
