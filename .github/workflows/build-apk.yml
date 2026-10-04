@@ -90,7 +90,13 @@ jobs:
 
       - name: Build reproducible source ZIP
         if: success()
-        run: git archive --format=zip --output=HorizonCam-source.zip HEAD
+        shell: bash
+        run: |
+          # Git contains the project; Gradle generates the official wrapper
+          # scripts/JAR from the verified 9.6 distribution installed in CI.
+          gradle wrapper --gradle-version '9.6.0'
+          git archive --format=zip --output=HorizonCam-source.zip HEAD
+          zip -q -u HorizonCam-source.zip gradlew gradlew.bat gradle/wrapper/gradle-wrapper.jar
 
       - name: Upload Android Studio source
         if: success()
