@@ -13,6 +13,10 @@ import android.view.Surface
 import android.widget.FrameLayout
 import android.provider.MediaStore
 import android.util.Range
+import android.util.Rational
+import android.hardware.camera2.CameraCharacteristics
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.core.ViewPort
 import android.view.ScaleGestureDetector
 import android.view.WindowManager
 import android.widget.Toast
@@ -95,8 +99,8 @@ class MainActivity : AppCompatActivity() {
         binding.fpsButton.text = "30"
         binding.statusText.text = "H LOCK"
 
-        gravitySensor = GravityRollSensor(this) { roll ->
-            horizonState.updateRoll(roll)
+        gravitySensor = GravityRollSensor(this) { reading ->
+            horizonState.pushRoll(reading.timestampNs, reading.rollDegrees.toFloat())
             val time = android.os.SystemClock.uptimeMillis()
             if (time - lastDiagnosticsAt > 240L) {
                 lastDiagnosticsAt = time
@@ -183,6 +187,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        gravitySensor.release()
         recording?.stop()
         recording = null
         cameraProvider?.unbindAll()
@@ -259,10 +264,13 @@ class MainActivity : AppCompatActivity() {
             halCanStabilize && requestedQuality == Quality.FHD && fps == 30
         )
 
-        // Both camera outputs intentionally use a FIXED landscape target.
-        // Display/UI rotation must never change the video aspect or metadata.
+        val outputRotation = if (horizonState.isEnabled()) {
+            Surface.ROTATION_90
+        } else {
+            binding.previewView.display?.rotation ?: Surface.ROTATION_0
+        }
         val preview = Preview.Builder()
-            .setTargetRotation(Surface.ROTATION_90)
+            .setTargetRotation(outputRotation)
             .apply { if (eis) setPreviewStabilizationEnabled(true) }
             .build()
             .also {
@@ -279,7 +287,7 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         val capture = VideoCapture.Builder(recorder)
-            .setTargetRotation(Surface.ROTATION_90)
+            .setTargetRotation(outputRotation)
             .setTargetFrameRate(Range(fps, fps))
             .apply { if (eis) setVideoStabilizationEnabled(true) }
             .build()
@@ -295,9 +303,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // A shared CameraX crop/viewport is essential: PREVIEW and VIDEO
+        // must receive the same optics, then the GL shader uses one matrix.
+        val viewPort = ViewPort.Builder(Rational(16, 9), outputRotation)
+            .setScaleType(ViewPort.FILL_CENTER)
+            .build()
         val group = UseCaseGroup.Builder()
             .addUseCase(preview)
             .addUseCase(capture)
+            .setViewPort(viewPort)
             .addEffect(effect)
             .build()
 
@@ -307,6 +321,13 @@ class MainActivity : AppCompatActivity() {
             previewUseCase = preview
             videoCapture = capture
             camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group)
+            val source = runCatching {
+                Camera2CameraInfo.from(camera!!.cameraInfo)
+                    .getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+            }.getOrNull()
+            horizonState.setCameraRealtimeTimestamp(
+                source == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+            )
             nativeEisActive = eis
             cameraStarting = false
             updateStatusText()
@@ -387,16 +408,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun startRecording() {
         val capture = videoCapture ?: return
-        // The S26 horizontal-lock mode is designed to start in landscape.
-        // We do not silently switch output into a portrait recording.
-        if (horizonState.isEnabled() && !horizonState.isLandscapePose()) {
-            Toast.makeText(
-                this,
-                "H Lock: gire o aparelho para paisagem antes de gravar.",
-                Toast.LENGTH_LONG
-            ).show()
-            return
-        }
+        // Unlike the Samsung tutorial's recommended starting grip, this
+        // implementation permits REC in either pose. H Lock always encodes
+        // a consistent landscape output and never calibrates on REC.
         horizonState.startRecording()
 
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
@@ -557,7 +571,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateStatusText() {
         if (showDiagnostics) {
             val gpu = horizonEffect?.processor?.diagnostics() ?: "P0 V0 F0"
-            binding.statusText.text = "v0.9 " + gpu +
+            binding.statusText.text = "v1.0 " + gpu +
                 (if (nativeEisActive) " EIS" else " GPU") + " / " +
                 String.format(Locale.US, "%.0f", horizonState.correctionDegrees()) + "°"
         } else {
