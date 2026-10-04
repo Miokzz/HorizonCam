@@ -48,7 +48,19 @@ class HorizonPreviewTextureView @JvmOverloads constructor(
         bufferHeight = request.resolution.height
         request.setTransformationInfoListener(mainExecutor) { info ->
             if (waiting === request || active?.request === request) {
-                baseRotation = info.rotationDegrees
+                // A processed CameraX Surface does not always have the
+                // native camera transform. Do not apply the camera rotation
+                // a second time when the Surface already carries it.
+                baseRotation = if (info.hasCameraTransform()) {
+                    -when (info.targetRotation) {
+                        Surface.ROTATION_90 -> 90
+                        Surface.ROTATION_180 -> 180
+                        Surface.ROTATION_270 -> 270
+                        else -> 0
+                    }
+                } else {
+                    info.rotationDegrees
+                }
                 updatePreviewTransform()
             }
         }

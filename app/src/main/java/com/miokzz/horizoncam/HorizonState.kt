@@ -2,7 +2,6 @@ package com.miokzz.horizoncam
 
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.round
 import kotlin.math.sqrt
@@ -25,9 +24,11 @@ class HorizonState {
         roll.set(next)
         if (initialized.compareAndSet(false, true)) {
             outputCardinal.set(nearestCardinal(next))
-        } else if (!recording.get() && abs(wrap(next - outputCardinal.get())) > 55f) {
-            outputCardinal.set(nearestCardinal(next))
         }
+        // A rotation of the device is NOT a new video orientation.
+        // The output orientation is changed only when the Android display
+        // actually changes its orientation (via alignToScreenOrientation).
+        // This avoids snapping the preview at arbitrary roll thresholds.
     }
 
     fun alignToScreenOrientation() {
@@ -41,7 +42,8 @@ class HorizonState {
 
     fun stopRecording() {
         recording.set(false)
-        alignToScreenOrientation()
+        // Keep the last stabilized output until the UI actually rotates.
+        // Aligning immediately here can flip the view by 180 degrees.
     }
 
     fun isEnabled() = enabled.get()

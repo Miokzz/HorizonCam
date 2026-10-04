@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var videoCapture: VideoCapture<Recorder>? = null
+    private var previewUseCase: Preview? = null
     private var recording: Recording? = null
 
     private var requestedQuality = Quality.FHD
@@ -236,6 +237,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun restartCamera() {
+        previewUseCase = null
         cameraProvider?.unbindAll()
         horizonEffect?.close()
         horizonEffect = null
@@ -288,6 +290,7 @@ class MainActivity : AppCompatActivity() {
         try {
             horizonEffect?.close()
             horizonEffect = effect
+            previewUseCase = preview
             videoCapture = capture
             camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group)
             cameraStarting = false
@@ -478,9 +481,14 @@ class MainActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateControlsForOrientation()
+
         if (recording == null) {
+            // Do not unbind the camera. Rebinding destroys all GPU outputs and
+            // visibly freezes the viewfinder every time the UI rotates.
+            val rotation = binding.previewView.display?.rotation ?: Surface.ROTATION_0
             horizonState.alignToScreenOrientation()
-            restartCamera()
+            previewUseCase?.targetRotation = rotation
+            videoCapture?.targetRotation = rotation
         }
     }
 

@@ -14,16 +14,36 @@ class HorizonStateTest {
         state.updateRoll(-90f)
         assertEquals(180f, state.correctionDegrees(), 0.01f)
         state.stopRecording()
+        // After REC ends the horizon stays where it was until UI orientation changes.
+        assertEquals(180f, state.correctionDegrees(), 0.01f)
+        state.alignToScreenOrientation()
         assertEquals(0f, state.correctionDegrees(), 0.01f)
     }
 
-    @Test fun autoOrientationBeforeRecordingNeedsNoTap() {
+    @Test fun noSnapAtArbitrary55DegreeThreshold() {
         val state = HorizonState()
         state.updateRoll(0f)
         state.updateRoll(30f)
         assertEquals(-30f, state.correctionDegrees(), 0.01f)
+        state.updateRoll(56f)
+        assertEquals(-56f, state.correctionDegrees(), 0.01f)
+        state.updateRoll(89f)
+        assertEquals(-89f, state.correctionDegrees(), 0.01f)
+        // Real screen rotation updates the target orientation.
+        state.alignToScreenOrientation()
+        assertEquals(1f, state.correctionDegrees(), 0.01f)
+    }
+
+    @Test fun captureDoesNotReorientMidTake() {
+        val state = HorizonState()
+        state.updateRoll(-90f)
+        state.alignToScreenOrientation()
+        state.startRecording()
+        state.updateRoll(30f)
+        state.alignToScreenOrientation()
+        assertEquals(-120f, state.correctionDegrees(), 0.01f)
         state.updateRoll(90f)
-        assertEquals(0f, state.correctionDegrees(), 0.01f)
+        assertEquals(-180f, state.correctionDegrees(), 0.01f)
     }
 
     @Test fun cropIsFixedForEveryRoll() {
