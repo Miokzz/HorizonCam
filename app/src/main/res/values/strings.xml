@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Horizon Cam</string>
+    <string name="record">REC</string>
+    <string name="stop">STOP</string>
+    <string name="lock">LOCK</string>
+    <string name="locked">LOCKED</string>
+    <string name="quality_4k">4K</string>
+    <string name="quality_fhd">1080p</string>
+    <string name="fps_30">30</string>
+    <string name="fps_60">60</string>
+    <string name="zoom_06">0.6×</string>
+    <string name="zoom_1">1×</string>
+    <string name="zoom_2">2×</string>
+    <string name="zoom_3">3×</string>
+    <string name="need_permissions">Câmera e microfone são necessários para gravar.</string>
+</resources>
