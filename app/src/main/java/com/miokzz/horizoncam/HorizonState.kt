@@ -4,7 +4,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.max
 import kotlin.math.sin
 
 class HorizonState {
@@ -35,13 +34,16 @@ class HorizonState {
         return wrap(reference - currentRoll.get())
     }
 
-    fun safeCropScale(aspectRatio: Float = 16f / 9f): Float {
+    /**
+     * Media3 MatrixTransformation works in normalized device coordinates:
+     * x and y are both -1..1. Therefore the safe zoom for a rotated frame
+     * is based on a square in NDC, not on the video's pixel aspect ratio.
+     */
+    fun safeCropScale(): Float {
         val radians = Math.toRadians(correctionDegrees().toDouble())
         val c = abs(cos(radians)).toFloat()
         val s = abs(sin(radians)).toFloat()
-        val landscape = c + aspectRatio * s
-        val portrait = c + (1f / aspectRatio) * s
-        return max(landscape, portrait).coerceIn(1f, 2.05f)
+        return (c + s).coerceIn(1f, 1.43f)
     }
 
     private fun wrap(value: Float): Float {

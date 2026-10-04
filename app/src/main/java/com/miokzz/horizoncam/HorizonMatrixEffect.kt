@@ -3,30 +3,22 @@ package com.miokzz.horizoncam
 import android.graphics.Matrix
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MatrixTransformation
-import kotlin.math.cos
-import kotlin.math.sin
 
 @UnstableApi
 class HorizonMatrixEffect(
-    private val state: HorizonState,
-    private val aspectRatio: Float = 16f / 9f
+    private val state: HorizonState
 ) : MatrixTransformation {
 
     override fun getMatrix(presentationTimeUs: Long): Matrix {
-        val degrees = state.correctionDegrees()
-        val radians = Math.toRadians(degrees.toDouble())
-        val c = cos(radians).toFloat()
-        val s = sin(radians).toFloat()
-        val scale = state.safeCropScale(aspectRatio)
+        val correction = state.correctionDegrees()
+        val scale = state.safeCropScale()
 
+        // MatrixTransformation operates in normalized device coordinates.
+        // Keep this deliberately simple: rotate around origin, then uniformly
+        // enlarge enough to keep the output frame covered.
         return Matrix().apply {
-            setValues(
-                floatArrayOf(
-                    scale * c, -scale * s / aspectRatio, 0f,
-                    scale * s * aspectRatio, scale * c, 0f,
-                    0f, 0f, 1f
-                )
-            )
+            postRotate(correction)
+            postScale(scale, scale)
         }
     }
 }
