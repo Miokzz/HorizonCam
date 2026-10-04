@@ -51,7 +51,7 @@ jobs:
           key: horizoncam-debug-keystore-v1
 
       - name: Build debug APK
-        run: gradle --stacktrace :app:assembleDebug
+        run: gradle --stacktrace :app:testDebugUnitTest :app:assembleDebug
 
       - name: Save persistent debug signing key
         if: success() && steps.debug-key-restore.outputs.cache-hit != 'true'
