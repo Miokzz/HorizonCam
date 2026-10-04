@@ -6,6 +6,21 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Bundle
+import android.net.Uri
+import android.content.Intent
+import android.media.MediaMetadataRetriever
+import android.widget.PopupMenu
+import android.widget.SeekBar
+import android.view.View
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.util.Size
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import com.miokzz.horizoncam.camera.CameraCapabilities
+import com.miokzz.horizoncam.stabilization.AngleMath
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.view.Gravity
@@ -63,6 +78,15 @@ class MainActivity : AppCompatActivity() {
     private var requestedFps = 30
     private var cameraStarting = false
     private var nativeEisActive = false
+    private var eisSupported = false
+    private var capabilities: CameraCapabilities? = null
+    private var torchEnabled = false
+    private var paused = false
+    private var lastVideoUri: Uri? = null
+    private val galleryExecutor = Executors.newSingleThreadExecutor()
+    private val prefs by lazy { getSharedPreferences("horizoncam", MODE_PRIVATE) }
+    private var soundEnabled = true
+    private lateinit var tapDetector: GestureDetector
 
     private var showDiagnostics = false
     private var lastDiagnosticsAt = 0L
@@ -99,6 +123,11 @@ class MainActivity : AppCompatActivity() {
         binding.fpsButton.text = "30"
         binding.statusText.text = "H LOCK"
 
+        soundEnabled = prefs.getBoolean("sound", true)
+        binding.gridView.visibility = if (prefs.getBoolean("grid", false)) View.VISIBLE else View.GONE
+        lastVideoUri = prefs.getString("lastVideo", null)?.let(Uri::parse)
+        lastVideoUri?.let(::showLastVideo)
+
         gravitySensor = GravityRollSensor(this) { reading ->
             horizonState.pushRoll(reading.timestampNs, reading.rollDegrees.toFloat())
             val time = android.os.SystemClock.uptimeMillis()
@@ -124,39 +153,69 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
+        tapDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(event: MotionEvent): Boolean = true
+            override fun onSingleTapUp(event: MotionEvent): Boolean {
+                if (!scaleGestureDetector.isInProgress) focusAt(event.x, event.y)
+                return true
+            }
+        })
         binding.previewView.setOnTouchListener { _, event ->
             scaleGestureDetector.onTouchEvent(event)
+            tapDetector.onTouchEvent(event)
             true
         }
 
-        binding.lockButton.setOnClickListener {
-            val active = horizonState.toggleEnabled()
-            binding.lockButton.text = if (active) "H" else "OFF"
-            binding.lockButton.setTextColor(
-                if (active) Color.rgb(255, 216, 74) else Color.WHITE
-            )
-            pulseLockButton()
-        }
+        binding.exposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val exposure = camera?.cameraInfo?.exposureState ?: return
+                val index = exposure.exposureCompensationRange.lower + progress
+                camera?.cameraControl?.setExposureCompensationIndex(index)
+            }
+            override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar?) {
+                binding.exposureSlider.postDelayed({
+                    binding.exposureSlider.visibility = View.GONE
+                }, 2500)
+            }
+        })
 
+        binding.lockButton.setOnClickListener { showStabilizationOptions() }
         binding.lockButton.setOnLongClickListener {
-            val direction = horizonState.toggleDirection()
-            Toast.makeText(
-                this,
-                if (direction > 0f) "Orientação GL normal" else "Orientação GL invertida",
-                Toast.LENGTH_SHORT
-            ).show()
+            // Diagnostics only. The app never asks the user to calibrate.
+            showDiagnostics = !showDiagnostics
+            updateStatusText()
             true
         }
+        binding.quickControlsButton.setOnClickListener { showQuickControls() }
+        binding.flashButton.setOnClickListener { toggleTorch() }
+        binding.galleryThumbnail.setOnClickListener { openLastVideo() }
+        binding.pauseButton.setOnClickListener { togglePause() }
 
         binding.qualityButton.setOnClickListener {
             if (recording != null) return@setOnClickListener
-            requestedQuality = if (requestedQuality == Quality.UHD) Quality.FHD else Quality.UHD
+            val next = if (requestedQuality == Quality.UHD) Quality.FHD else Quality.UHD
+            if (capabilities?.hasQuality(next) == false) {
+                toast("Resolução indisponível nesta câmera.")
+                return@setOnClickListener
+            }
+            requestedQuality = next
+            if (requestedQuality == Quality.UHD && requestedFps == 60) {
+                requestedFps = 30
+                binding.fpsButton.text = "30"
+            }
             binding.qualityButton.text = if (requestedQuality == Quality.UHD) "UHD" else "FHD"
             restartCamera()
         }
 
         binding.fpsButton.setOnClickListener {
             if (recording != null) return@setOnClickListener
+            if (requestedFps == 30 &&
+                (capabilities?.fps60 == false || requestedQuality == Quality.UHD)) {
+                toast("60 FPS não foi validado nesta combinação.")
+                return@setOnClickListener
+            }
             requestedFps = if (requestedFps == 30) 60 else 30
             binding.fpsButton.text = requestedFps.toString()
             restartCamera()
@@ -193,6 +252,7 @@ class MainActivity : AppCompatActivity() {
         cameraProvider?.unbindAll()
         horizonEffect?.close()
         horizonEffect = null
+        galleryExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -260,8 +320,11 @@ class MainActivity : AppCompatActivity() {
             Preview.getPreviewCapabilities(info).isStabilizationSupported &&
                 Recorder.getVideoCapabilities(info).isStabilizationSupported
         }.getOrDefault(false)
+        eisSupported = halCanStabilize
         val eis = allowEis ?: (
-            halCanStabilize && requestedQuality == Quality.FHD && fps == 30
+            halCanStabilize &&
+            horizonState.mode() != StabilizationMode.OFF &&
+            requestedQuality == Quality.FHD && fps == 30
         )
 
         val outputRotation = if (horizonState.isEnabled()) {
@@ -330,6 +393,17 @@ class MainActivity : AppCompatActivity() {
             )
             nativeEisActive = eis
             cameraStarting = false
+            capabilities = runCatching {
+                CameraCapabilities.inspect(this, camera!!.cameraInfo)
+            }.getOrNull()
+            binding.flashButton.isEnabled = camera?.cameraInfo?.hasFlashUnit() == true
+            binding.flashButton.alpha = if (binding.flashButton.isEnabled) 1f else 0.35f
+            if (torchEnabled) camera?.cameraControl?.enableTorch(true)
+            val zoomRange = camera?.cameraInfo?.zoomState?.value
+            if (zoomRange != null) {
+                selectedZoom = selectedZoom.coerceIn(zoomRange.minZoomRatio, zoomRange.maxZoomRatio)
+                camera?.cameraControl?.setZoomRatio(selectedZoom)
+            }
             updateStatusText()
             updateZoomAvailability()
             updateZoomUi(selectedZoom)
@@ -340,6 +414,11 @@ class MainActivity : AppCompatActivity() {
                 // Some devices report HAL stabilization but cannot combine it
                 // with an external GPU effect. Rebind without HAL EIS.
                 nativeEisActive = false
+                if (horizonState.mode() == StabilizationMode.STEADY) {
+                    horizonState.setMode(StabilizationMode.OFF)
+                    binding.lockButton.text = "OFF"
+                    toast("Estabilização nativa indisponível nesta combinação.")
+                }
                 bindCameraWithFallback(fps, false)
             } else if (fps == 60) {
                 requestedFps = 30
@@ -412,6 +491,8 @@ class MainActivity : AppCompatActivity() {
         // implementation permits REC in either pose. H Lock always encodes
         // a consistent landscape output and never calibrates on REC.
         horizonState.startRecording()
+        paused = false
+        binding.pauseButton.text = "Ⅱ"
 
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
             .format(System.currentTimeMillis())
@@ -429,7 +510,8 @@ class MainActivity : AppCompatActivity() {
 
         val pending = capture.output.prepareRecording(this, options)
         val withAudio =
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            if (soundEnabled &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED
             ) {
                 pending.withAudioEnabled()
@@ -445,6 +527,16 @@ class MainActivity : AppCompatActivity() {
                 is VideoRecordEvent.Start -> {
                     binding.timerText.visibility = android.view.View.VISIBLE
                     binding.timerText.text = "00:00"
+                }
+
+                is VideoRecordEvent.Pause -> {
+                    paused = true
+                    binding.pauseButton.text = "▶"
+                }
+
+                is VideoRecordEvent.Resume -> {
+                    paused = false
+                    binding.pauseButton.text = "Ⅱ"
                 }
 
                 is VideoRecordEvent.Status -> {
@@ -468,11 +560,9 @@ class MainActivity : AppCompatActivity() {
                             Toast.LENGTH_LONG
                         ).show()
                     } else {
-                        Toast.makeText(
-                            this,
-                            "Vídeo salvo em Movies/HorizonCam",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        val saved = event.outputResults.outputUri
+                        verifySavedVideo(saved)
+                        toast("Vídeo salvo em Movies/HorizonCam")
                     }
                 }
             }
@@ -497,12 +587,18 @@ class MainActivity : AppCompatActivity() {
 
         binding.timerText.visibility =
             if (isRecording) android.view.View.VISIBLE else android.view.View.GONE
+        binding.pauseButton.visibility =
+            if (isRecording) View.VISIBLE else View.GONE
+        binding.recordButton.contentDescription =
+            if (isRecording) "Parar gravação" else "Iniciar gravação"
         updateStatusText()
     }
 
     private fun setSettingsEnabled(enabled: Boolean) {
         binding.qualityButton.isEnabled = enabled
         binding.fpsButton.isEnabled = enabled
+        binding.lockButton.isEnabled = enabled
+        binding.quickControlsButton.isEnabled = enabled
     }
 
     private fun pulseLockButton() {
@@ -524,9 +620,14 @@ class MainActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         updateControlsForOrientation()
 
-        // Camera streams remain at Surface.ROTATION_90 while UI rotates.
-        // Rebinding or calling setTargetRotation here would change the
-        // output geometry and produce portrait MP4s / jumping previews.
+        // Never rebind while rotating the phone. For ordinary video modes,
+        // the metadata follows screen orientation when not recording.
+        // Horizontal Lock uses an absolute landscape reference instead.
+        if (recording == null && !horizonState.isEnabled()) {
+            val rotation = binding.previewView.display?.rotation ?: Surface.ROTATION_0
+            previewUseCase?.targetRotation = rotation
+            videoCapture?.targetRotation = rotation
+        }
     }
 
     private fun updateControlsForOrientation() {
@@ -555,6 +656,20 @@ class MainActivity : AppCompatActivity() {
         status.topMargin = if (portrait) dp(74) else dp(18)
         binding.statusText.layoutParams = status
 
+        val thumb = binding.galleryThumbnail.layoutParams as FrameLayout.LayoutParams
+        thumb.gravity = if (portrait) Gravity.BOTTOM or Gravity.START
+                        else Gravity.START or Gravity.CENTER_VERTICAL
+        thumb.marginStart = dp(18)
+        thumb.bottomMargin = if (portrait) dp(82) else 0
+        binding.galleryThumbnail.layoutParams = thumb
+
+        val pause = binding.pauseButton.layoutParams as FrameLayout.LayoutParams
+        pause.gravity = if (portrait) Gravity.BOTTOM or Gravity.END
+                        else Gravity.END or Gravity.CENTER_VERTICAL
+        pause.marginEnd = if (portrait) dp(40) else dp(129)
+        pause.bottomMargin = if (portrait) dp(78) else 0
+        binding.pauseButton.layoutParams = pause
+
         val timer = binding.timerText.layoutParams as FrameLayout.LayoutParams
         timer.topMargin = if (portrait) dp(115) else dp(62)
         binding.timerText.layoutParams = timer
@@ -575,10 +690,245 @@ class MainActivity : AppCompatActivity() {
                 (if (nativeEisActive) " EIS" else " GPU") + " / " +
                 String.format(Locale.US, "%.0f", horizonState.correctionDegrees()) + "°"
         } else {
-            binding.statusText.text = if (recording != null) "● REC"
-                else if (horizonState.isEnabled() && !horizonState.isLandscapePose())
-                    "GIRE ↻ 16:9"
-                else "H LOCK"
+            binding.statusText.text = when {
+                recording != null -> "● REC"
+                horizonState.mode() == StabilizationMode.HORIZONTAL_LOCK -> "H LOCK 360°"
+                horizonState.mode() == StabilizationMode.STEADY -> "SUPER STEADY"
+                else -> "VIDEO"
+            }
+        }
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun haptic() {
+        binding.root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+    }
+
+    /** Each entry is backed by the selected pipeline, not a cosmetic toggle. */
+    private fun showStabilizationOptions() {
+        if (recording != null) return
+        PopupMenu(this, binding.lockButton).apply {
+            menu.add(0, 1, 0, "Desligado")
+            menu.add(0, 2, 1, "Super Steady")
+            menu.add(0, 3, 2, "Horizontal Lock 360°")
+            setOnMenuItemClickListener { item ->
+                val requested = when (item.itemId) {
+                    1 -> StabilizationMode.OFF
+                    2 -> StabilizationMode.STEADY
+                    else -> StabilizationMode.HORIZONTAL_LOCK
+                }
+                if (requested == StabilizationMode.STEADY && !eisSupported) {
+                    toast("Super Steady nativo não disponível nesta câmera.")
+                    return@setOnMenuItemClickListener true
+                }
+                if (horizonState.mode() != requested) {
+                    horizonState.setMode(requested)
+                    pulseLockButton()
+                    haptic()
+                    binding.lockButton.text = when (requested) {
+                        StabilizationMode.OFF -> "OFF"
+                        StabilizationMode.STEADY -> "STEADY"
+                        StabilizationMode.HORIZONTAL_LOCK -> "360°"
+                    }
+                    binding.lockButton.setTextColor(
+                        if (requested == StabilizationMode.OFF) Color.WHITE
+                        else Color.rgb(255, 216, 74)
+                    )
+                    restartCamera()
+                }
+                true
+            }
+            show()
+        }
+    }
+
+    private fun showQuickControls() {
+        PopupMenu(this, binding.quickControlsButton).apply {
+            menu.add(0, 101, 0,
+                if (binding.gridView.visibility == View.VISIBLE) "Ocultar grade" else "Mostrar grade")
+            menu.add(0, 102, 1,
+                if (soundEnabled) "Áudio: ligado" else "Áudio: desligado")
+            menu.add(0, 103, 2,
+                if (showDiagnostics) "Ocultar diagnóstico" else "Exibir diagnóstico")
+            menu.add(0, 104, 3, "Lentes e capacidades")
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    101 -> {
+                        val show = binding.gridView.visibility != View.VISIBLE
+                        binding.gridView.visibility = if (show) View.VISIBLE else View.GONE
+                        prefs.edit().putBoolean("grid", show).apply()
+                    }
+                    102 -> {
+                        soundEnabled = !soundEnabled
+                        prefs.edit().putBoolean("sound", soundEnabled).apply()
+                    }
+                    103 -> {
+                        showDiagnostics = !showDiagnostics
+                        updateStatusText()
+                    }
+                    104 -> {
+                        val cap = capabilities
+                        if (cap != null) {
+                            val fovs = cap.availableLenses.joinToString { lens ->
+                                val fov = lens.approximateHorizontalFovDegrees
+                                lens.id + ":" + (if (fov == null) "?" else "%.0f°".format(fov))
+                            }
+                            toast("Camera2: ${cap.cameraId} • FOV: ${fovs.ifBlank { "indisponível" }}")
+                        } else toast("A câmera ainda não abriu.")
+                    }
+                }
+                haptic()
+                true
+            }
+            show()
+        }
+    }
+
+    private fun toggleTorch() {
+        val cam = camera ?: return
+        if (!cam.cameraInfo.hasFlashUnit()) {
+            toast("Esta lente não oferece lanterna.")
+            return
+        }
+        torchEnabled = !torchEnabled
+        cam.cameraControl.enableTorch(torchEnabled)
+        binding.flashButton.setIconTint(
+            ColorStateList.valueOf(
+                if (torchEnabled) Color.rgb(255, 216, 74) else Color.WHITE
+            )
+        )
+        haptic()
+    }
+
+    /**
+     * Maps the presentation-only center crop and canonical GL correction
+     * approximately back into the logical CameraX surface.
+     */
+    private fun focusAt(x: Float, y: Float) {
+        val cam = camera ?: return
+        val vw = binding.previewView.width.toFloat().coerceAtLeast(1f)
+        val vh = binding.previewView.height.toFloat().coerceAtLeast(1f)
+        val videoAspect = 16.0 / 9.0
+        val viewAspect = vw / vh
+        var cx = 2.0 * x / vw - 1.0
+        var cy = 1.0 - 2.0 * y / vh
+        if (videoAspect > viewAspect) cx *= viewAspect / videoAspect
+        else cy *= videoAspect / viewAspect
+
+        val model = horizonState.frameGeometry(android.os.SystemClock.elapsedRealtimeNanos())
+        val inverse = AngleMath.correctionMatrix(
+            model.rotationDegrees.toDouble(),
+            model.cropScale.toDouble(),
+            videoAspect
+        ).inverse()
+        val sensorPoint = inverse.apply(cx, cy)
+        val nx = (0.5 + sensorPoint.first / 2.0).coerceIn(0.05, 0.95).toFloat()
+        val ny = (0.5 - sensorPoint.second / 2.0).coerceIn(0.05, 0.95).toFloat()
+        val point = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(nx, ny)
+        val action = FocusMeteringAction.Builder(
+            point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+        ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
+        cam.cameraControl.startFocusAndMetering(action)
+
+        val indicator = binding.focusIndicator
+        indicator.animate().cancel()
+        indicator.translationX = x - vw / 2f
+        indicator.translationY = y - vh / 2f
+        indicator.alpha = 1f
+        indicator.visibility = View.VISIBLE
+        indicator.postDelayed({
+            indicator.animate().alpha(0f).setDuration(250).withEndAction {
+                indicator.visibility = View.GONE
+            }.start()
+        }, 900)
+
+        val exposure = cam.cameraInfo.exposureState
+        val range = exposure.exposureCompensationRange
+        if (range.upper > range.lower && exposure.isExposureCompensationSupported) {
+            binding.exposureSlider.max = range.upper - range.lower
+            binding.exposureSlider.progress = exposure.exposureCompensationIndex - range.lower
+            binding.exposureSlider.visibility = View.VISIBLE
+        }
+        haptic()
+    }
+
+    private fun togglePause() {
+        val active = recording ?: return
+        if (paused) active.resume() else active.pause()
+        paused = !paused
+        binding.pauseButton.text = if (paused) "▶" else "Ⅱ"
+        binding.pauseButton.contentDescription =
+            if (paused) "Retomar gravação" else "Pausar gravação"
+        haptic()
+    }
+
+    private fun showLastVideo(uri: Uri) {
+        galleryExecutor.execute {
+            val bitmap = runCatching {
+                contentResolver.loadThumbnail(uri, Size(144, 144), null)
+            }.getOrNull()
+            if (bitmap != null) runOnUiThread {
+                if (!isDestroyed && !isFinishing) {
+                    binding.galleryThumbnail.setImageBitmap(bitmap)
+                }
+            }
+        }
+    }
+
+    private fun openLastVideo() {
+        val uri = lastVideoUri ?: run {
+            toast("Nenhum vídeo gravado ainda.")
+            return
+        }
+        runCatching {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "video/mp4")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(intent)
+        }.onFailure { toast("Não foi possível abrir o vídeo.") }
+    }
+
+    private fun verifySavedVideo(uri: Uri) {
+        if (uri == Uri.EMPTY) return
+        lastVideoUri = uri
+        prefs.edit().putString("lastVideo", uri.toString()).apply()
+        showLastVideo(uri)
+        galleryExecutor.execute {
+            val result = runCatching {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(this, uri)
+                    val width = retriever.extractMetadata(
+                        MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH
+                    )?.toIntOrNull() ?: 0
+                    val height = retriever.extractMetadata(
+                        MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT
+                    )?.toIntOrNull() ?: 0
+                    val rotation = retriever.extractMetadata(
+                        MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION
+                    )?.toIntOrNull() ?: 0
+                    Triple(width, height, rotation)
+                } finally {
+                    retriever.release()
+                }
+            }.getOrNull()
+            result?.let { (w,h,r) ->
+                val effectiveWidth = if (r % 180 == 0) w else h
+                val effectiveHeight = if (r % 180 == 0) h else w
+                android.util.Log.i(
+                    "HorizonCamMetadata",
+                    "encoded=${w}x${h} rotation=${r} display=${effectiveWidth}x${effectiveHeight}"
+                )
+                if (horizonState.isEnabled() && effectiveWidth < effectiveHeight) {
+                    runOnUiThread {
+                        toast("Aviso: MP4 saiu vertical. Diagnóstico registrado no Logcat.")
+                    }
+                }
+            }
         }
     }
 
