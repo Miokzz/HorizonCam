@@ -40,6 +40,9 @@ class HorizonSurfaceProcessor(
 
     private val cameraTextureMatrix = FloatArray(16)
     private val vertexMatrix = FloatArray(16)
+    private val canonicalAspect = 16f / 9f
+    @Volatile private var sensorFrameAgeMs = 0f
+    @Volatile private var timestampsMatched = false
     @Volatile private var registeredTargets = 0
     @Volatile private var renderedFrames = 0L
 
@@ -47,7 +50,9 @@ class HorizonSurfaceProcessor(
         val mask = registeredTargets
         val p = if (mask and CameraEffect.PREVIEW != 0) 1 else 0
         val v = if (mask and CameraEffect.VIDEO_CAPTURE != 0) 1 else 0
-        return "P" + p + " V" + v + " F" + renderedFrames
+        val sync = if (timestampsMatched) "SYNC" else "LATEST"
+        return "P" + p + " V" + v + " F" + renderedFrames +
+            " " + sync + " " + sensorFrameAgeMs.toInt() + "ms"
     }
 
     override fun onInputSurface(request: SurfaceRequest) {
@@ -125,32 +130,29 @@ class HorizonSurfaceProcessor(
             surfaceTexture.getTransformMatrix(cameraTextureMatrix)
             val timestamp = surfaceTexture.timestamp
 
-            // Snapshot because an output can reach end-of-life while a frame is being handled.
-            val targets = outputs.values.toList()
+            // Compute the canonical orientation/crop exactly ONCE for each
+            // camera frame, synchronized with the sensor's timestamp.
+            // Preview and encoder receive the SAME geometry. CameraX's
+            // SurfaceOutput matrices handle only each destination's static
+            // crop/rotation metadata.
+            val frame = state.frameGeometry(timestamp, canonicalAspect)
+            sensorFrameAgeMs = frame.sensorAgeMs
+            timestampsMatched = frame.timestampValid
+            buildVertexMatrix(
+                frame.rotationDegrees,
+                frame.cropScale,
+                canonicalAspect,
+                vertexMatrix
+            )
 
+            val targets = outputs.values.toList()
             for (target in targets) {
                 if (!outputs.containsKey(target.info)) continue
 
                 target.info.updateTransformMatrix(target.transform, cameraTextureMatrix)
 
                 val size = target.info.size
-                val aspect =
-                    if (size.height == 0) 16f / 9f
-                    else size.width.toFloat() / size.height.toFloat()
-
-                buildVertexMatrix(
-                    state.correctionDegrees(),
-                    state.fixedCropScale(aspect),
-                    aspect,
-                    vertexMatrix
-                )
-
-                egl.draw(
-                    target.surface,
-                    size.width,
-                    size.height,
-                    timestamp
-                ) {
+                egl.draw(target.surface, size.width, size.height, timestamp) {
                     renderer.draw(target.transform, vertexMatrix)
                 }
             }

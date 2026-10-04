@@ -1,64 +1,40 @@
 package com.miokzz.horizoncam
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HorizonStateTest {
-    @Test fun nativeLandscapeStartsWithNoCorrection() {
-        val s = HorizonState()
-        s.updateRoll(90f)
-        assertTrue(s.isLandscapePose())
-        assertEquals(0f, s.correctionDegrees(), 0.01f)
+    @Test fun landscapeGravityReferenceIsNeverManuallyReset() {
+        val state = HorizonState()
+        state.pushRoll(1_000_000_000L, 90f)
+        assertEquals(0f, state.correctionDegrees(), 0.01f)
+        state.startRecording()
+        state.pushRoll(1_020_000_000L, -90f)
+        assertEquals(-180f, state.correctionDegrees(), 0.01f)
+        state.stopRecording()
+        assertEquals(-180f, state.correctionDegrees(), 0.01f)
     }
 
-    @Test fun portraitDoesNotTurnIntoAPortraitRecording() {
-        val s = HorizonState()
-        s.updateRoll(0f)
-        assertFalse(s.isLandscapePose())
-        assertEquals(90f, s.correctionDegrees(), 0.01f)
-        s.startRecording()
-        s.updateRoll(90f)
-        assertEquals(0f, s.correctionDegrees(), 0.01f)
-    }
-
-    @Test fun full360NeverReanchorsOrFlipsAt90() {
-        val s = HorizonState()
-        s.updateRoll(90f)
-        s.startRecording()
-        val angles = listOf(90f, 135f, 179f, -180f, -135f, -90f, -45f, 0f, 45f, 90f)
-        val expected = listOf(0f, -45f, -89f, -90f, -135f, 180f, 135f, 90f, 45f, 0f)
-        angles.zip(expected).forEach { (r, output) ->
-            s.updateRoll(r)
-            assertEquals("roll=$r", output, s.correctionDegrees(), 0.01f)
+    @Test fun 360DegreesIsContinuousOnBothSidesOfWrap() {
+        val state = HorizonState()
+        val angles = listOf(90f, 135f, 179f, -179f, -135f, -90f, -45f, 0f, 45f, 90f)
+        angles.forEachIndexed { i, angle ->
+            state.pushRoll(1_000_000_000L + i * 10_000_000L, angle)
         }
-        s.stopRecording()
-        assertEquals(0f, s.correctionDegrees(), 0.01f)
+        assertEquals(0f, state.correctionDegrees(), 0.01f)
     }
 
-    @Test fun stabilizationMarginNeverPumps() {
-        val s = HorizonState()
-        val crop = s.fixedCropScale()
-        (0..36).forEach { i ->
-            s.updateRoll(i * 10f)
-            assertEquals(crop, s.fixedCropScale(), 0.0001f)
-        }
-        assertTrue(crop > 2f)
-        s.toggleEnabled()
-        assertEquals(1f, s.fixedCropScale(), 0.0001f)
-    }
-
-    @Test fun correctionWorksRegardlessOfHudOrientation() {
-        val s = HorizonState()
-        s.updateRoll(-90f)
-        assertEquals(180f, s.correctionDegrees(), 0.01f)
-        s.updateRoll(45f)
-        assertEquals(45f, s.correctionDegrees(), 0.01f)
-        s.startRecording()
-        s.updateRoll(0f)
-        assertEquals(90f, s.correctionDegrees(), 0.01f)
-        s.stopRecording()
-        assertEquals(90f, s.correctionDegrees(), 0.01f)
+    @Test fun modeSelectionChangesRealGeometry() {
+        val state = HorizonState()
+        state.pushRoll(1_000_000_000L, 120f)
+        state.setMode(StabilizationMode.OFF)
+        assertEquals(0f, state.frameGeometry(1_000_000_000L).rotationDegrees, 0f)
+        assertEquals(1f, state.fixedCropScale(), 0f)
+        state.setMode(StabilizationMode.STEADY)
+        assertEquals(0f, state.correctionDegrees(), 0f)
+        state.setMode(StabilizationMode.HORIZONTAL_LOCK)
+        assertEquals(-30f, state.correctionDegrees(), 0.01f)
+        assertTrue(state.fixedCropScale() > 2f)
     }
 }

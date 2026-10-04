@@ -1,7 +1,6 @@
 package com.miokzz.horizoncam
 
 import android.content.Context
-import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.util.AttributeSet
@@ -10,42 +9,41 @@ import android.view.TextureView
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
 import androidx.core.content.ContextCompat
-import kotlin.math.min
+import kotlin.math.max
 
 /**
- * Viewfinder for a fixed 16:9 landscape GPU output.
- *
- * SurfaceOutput.updateTransformMatrix() already performs CameraX's camera
- * rotation/crop in OpenGL. This TextureView must NOT rotate that image a second
- * time or react to changes in Android's UI orientation.
+ * Fullscreen center-crop viewfinder for the already GPU-stabilized output.
+ * It NEVER applies an extra sensor/display rotation. Aspect correction is
+ * presentation-only, so the recorded frame is untouched.
  */
 class HorizonPreviewTextureView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
 ) : TextureView(context, attrs), Preview.SurfaceProvider, TextureView.SurfaceTextureListener {
+
     private data class Active(val request: SurfaceRequest, val surface: Surface, val texture: SurfaceTexture)
     private val main = ContextCompat.getMainExecutor(context)
     private var waiting: SurfaceRequest? = null
     private var active: Active? = null
-    private var releaseWhenFree: SurfaceTexture? = null
-    private var viewfinderAspect = 16f / 9f
+    private var destroyLater: SurfaceTexture? = null
+    private var bufferWidth = 1920
+    private var bufferHeight = 1080
 
     init {
         surfaceTextureListener = this
         isOpaque = true
-        setBackgroundColor(Color.BLACK)
     }
 
     override fun onSurfaceRequested(request: SurfaceRequest) {
         waiting?.willNotProvideSurface()
         waiting = request
+        bufferWidth = request.resolution.width
+        bufferHeight = request.resolution.height
         request.addRequestCancellationListener(main) {
             if (waiting === request) waiting = null
         }
-        // Keep a landscape canvas even if the activity is currently portrait.
-        // No setTransformationInfoListener: GPU applies the camera transform.
-        drawFittedLandscape()
         tryProvide()
+        updateTransformForLayout()
     }
 
     private fun tryProvide() {
@@ -58,52 +56,60 @@ class HorizonPreviewTextureView @JvmOverloads constructor(
         val current = Active(request, surface, texture)
         active = current
         waiting = null
-        drawFittedLandscape()
+        updateTransformForLayout()
         request.provideSurface(surface, main) {
             surface.release()
             if (active === current) active = null
-            if (releaseWhenFree === texture) {
+            if (destroyLater === texture) {
                 texture.release()
-                releaseWhenFree = null
+                destroyLater = null
             }
             tryProvide()
         }
     }
 
     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
-        drawFittedLandscape()
         tryProvide()
+        updateTransformForLayout()
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
-        drawFittedLandscape()
+        updateTransformForLayout()
     }
 
     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
         waiting?.willNotProvideSurface()
         waiting = null
         return if (active?.texture === texture) {
-            releaseWhenFree = texture
+            destroyLater = texture
             false
         } else true
     }
 
     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
 
-    private fun drawFittedLandscape() {
-        val vw = width.toFloat()
-        val vh = height.toFloat()
-        if (vw <= 0f || vh <= 0f) return
-
-        // Surface texture normally fills the entire view, regardless of source
-        // aspect ratio. In portrait this creates false portrait framing.
-        // Compress it into a centered 16:9 landscape viewport, without
-        // stretching or re-rotating CameraX's already corrected GPU image.
-        val contentW = min(vw, vh * viewfinderAspect)
-        val contentH = contentW / viewfinderAspect
-        val transform = Matrix().apply {
-            setScale(contentW / vw, contentH / vh, vw / 2f, vh / 2f)
+    /**
+     * A landscape video cannot fill a portrait display without cropping.
+     * Center crop is a presentation choice. There are no black letterboxes,
+     * texture stretching, UI rotation hacks or field-of-view "breathing".
+     */
+    private fun updateTransformForLayout() {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val srcAspect = (bufferWidth.toFloat() / bufferHeight.coerceAtLeast(1))
+        val dstAspect = w / h
+        val sx: Float
+        val sy: Float
+        if (srcAspect >= dstAspect) {
+            sx = srcAspect / dstAspect
+            sy = 1f
+        } else {
+            sx = 1f
+            sy = dstAspect / srcAspect
         }
-        setTransform(transform)
+        val matrix = Matrix()
+        matrix.setScale(sx, sy, w / 2f, h / 2f)
+        setTransform(matrix)
     }
 }
