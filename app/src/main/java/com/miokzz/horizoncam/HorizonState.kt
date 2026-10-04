@@ -1,82 +1,66 @@
 package com.miokzz.horizoncam
 
-import android.view.Surface
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.round
 import kotlin.math.sqrt
 
+/**
+ * The output's orientation is selected automatically, then frozen for recording.
+ * Phone roll remains gravity-relative throughout the take.
+ */
 class HorizonState {
-    private val currentRoll = AtomicReference(0f)
+    private val roll = AtomicReference(0f)
+    private val outputCardinal = AtomicReference(0f)
+    private val initialized = AtomicBoolean(false)
+    private val recording = AtomicBoolean(false)
     private val enabled = AtomicBoolean(true)
-    private val direction = AtomicReference(1f)
-    private val landscapeAnchor = AtomicReference(90f)
+    private val sign = AtomicReference(1f)
 
     fun updateRoll(degrees: Float) {
-        currentRoll.set(wrap(degrees))
-    }
-
-    fun setLandscapeAnchor(displayRotation: Int) {
-        val anchor = when (displayRotation) {
-            Surface.ROTATION_90 -> 90f
-            Surface.ROTATION_270 -> -90f
-            Surface.ROTATION_180 -> 180f
-            else -> 90f
+        if (!degrees.isFinite()) return
+        val next = wrap(degrees)
+        roll.set(next)
+        if (initialized.compareAndSet(false, true)) {
+            outputCardinal.set(nearestCardinal(next))
+        } else if (!recording.get() && abs(wrap(next - outputCardinal.get())) > 55f) {
+            outputCardinal.set(nearestCardinal(next))
         }
-        landscapeAnchor.set(anchor)
     }
 
-    fun setEnabled(value: Boolean) {
-        enabled.set(value)
+    fun alignToScreenOrientation() {
+        if (!recording.get()) outputCardinal.set(nearestCardinal(roll.get()))
     }
 
-    fun isEnabled(): Boolean = enabled.get()
-
-    fun toggleEnabled(): Boolean {
-        val next = !enabled.get()
-        enabled.set(next)
-        return next
+    fun startRecording() {
+        alignToScreenOrientation()
+        recording.set(true)
     }
 
-    fun toggleDirection(): Float {
-        val next = -direction.get()
-        direction.set(next)
-        return next
+    fun stopRecording() {
+        recording.set(false)
+        alignToScreenOrientation()
     }
 
-    /**
-     * Absolute device roll relative to our fixed landscape output.
-     * No manual calibration is involved.
-     */
-    fun deviceToLandscapeDegrees(): Float {
-        return wrap((landscapeAnchor.get() - currentRoll.get()) * direction.get())
-    }
+    fun isEnabled() = enabled.get()
+    fun toggleEnabled(): Boolean = (!enabled.get()).also { enabled.set(it) }
+    fun toggleDirection(): Float = (-sign.get()).also { sign.set(it) }
+    fun currentRoll() = roll.get()
 
-    /**
-     * Rotation applied to the camera image when Horizon Lock is active.
-     */
     fun correctionDegrees(): Float {
-        return if (enabled.get()) deviceToLandscapeDegrees() else 0f
+        if (!enabled.get()) return 0f
+        return wrap((outputCardinal.get() - roll.get()) * sign.get())
     }
 
-    /**
-     * Samsung-style UI orientation: snap to 0/90/180/270 instead of
-     * continuously tilting every control with tiny hand movements.
-     */
-    fun hudRotationDegrees(): Float {
-        val raw = deviceToLandscapeDegrees()
-        return wrap(round(raw / 90f) * 90f)
-    }
-
-    /**
-     * Fixed overscan for a full 360-degree roll.
-     * The crop does not breathe while the phone rotates.
-     */
     fun fixedCropScale(aspectRatio: Float = 16f / 9f): Float {
+        if (!enabled.get()) return 1f
         val a = max(aspectRatio, 1f / aspectRatio).coerceAtLeast(1f)
         return (sqrt(1f + a * a) * 1.015f).coerceIn(1f, 2.20f)
     }
+
+    private fun nearestCardinal(value: Float): Float = wrap(round(value / 90f) * 90f)
 
     private fun wrap(value: Float): Float {
         var v = value
