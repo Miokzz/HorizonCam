@@ -78,9 +78,7 @@
             android:textColor="@color/white"
             android:textSize="13sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="20dp"
-            app:insetBottom="0dp"
-            app:insetTop="0dp" />
+            app:cornerRadius="20dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/fpsButton"
@@ -95,9 +93,7 @@
             android:textColor="@color/white"
             android:textSize="13sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="20dp"
-            app:insetBottom="0dp"
-            app:insetTop="0dp" />
+            app:cornerRadius="20dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/lockButton"
@@ -113,9 +109,7 @@
             android:textSize="12sp"
             android:textStyle="bold"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="20dp"
-            app:insetBottom="0dp"
-            app:insetTop="0dp" />
+            app:cornerRadius="20dp" />
     </LinearLayout>
 
     <LinearLayout
@@ -140,9 +134,7 @@
             android:textColor="@color/white"
             android:textSize="12sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="20dp"
-            app:insetBottom="0dp"
-            app:insetTop="0dp" />
+            app:cornerRadius="20dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/zoom1Button"
@@ -157,9 +149,7 @@
             android:textColor="@color/white"
             android:textSize="12sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="20dp"
-            app:insetBottom="0dp"
-            app:insetTop="0dp" />
+            app:cornerRadius="20dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/zoom2Button"
@@ -174,9 +164,7 @@
             android:textColor="@color/white"
             android:textSize="12sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="20dp"
-            app:insetBottom="0dp"
-            app:insetTop="0dp" />
+            app:cornerRadius="20dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/zoom3Button"
@@ -191,9 +179,7 @@
             android:textColor="@color/white"
             android:textSize="12sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="20dp"
-            app:insetBottom="0dp"
-            app:insetTop="0dp" />
+            app:cornerRadius="20dp" />
     </LinearLayout>
 
     <TextView
