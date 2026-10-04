@@ -88,6 +88,8 @@ class HorizonPreviewTextureView @JvmOverloads constructor(
 
     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
 
+    override fun performClick(): Boolean = super.performClick()
+
     /**
      * A landscape video cannot fill a portrait display without cropping.
      * Center crop is a presentation choice. There are no black letterboxes,

@@ -7,6 +7,7 @@
 
     <com.miokzz.horizoncam.HorizonPreviewTextureView
         android:id="@+id/previewView"
+        android:contentDescription="Prévia da câmera. Toque para focar e ajustar exposição."
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 

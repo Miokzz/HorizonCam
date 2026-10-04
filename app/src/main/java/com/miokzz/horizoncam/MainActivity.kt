@@ -96,6 +96,8 @@ class MainActivity : AppCompatActivity() {
     private var showDiagnostics = false
     private var lastDiagnosticsAt = 0L
     private var selectedZoom = 1f
+    private var lastFocusTapX: Float? = null
+    private var lastFocusTapY: Float? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -161,10 +163,22 @@ class MainActivity : AppCompatActivity() {
         tapDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDown(event: MotionEvent): Boolean = true
             override fun onSingleTapUp(event: MotionEvent): Boolean {
-                if (!scaleGestureDetector.isInProgress) focusAt(event.x, event.y)
+                if (!scaleGestureDetector.isInProgress) {
+                    lastFocusTapX = event.x
+                    lastFocusTapY = event.y
+                    binding.previewView.performClick()
+                }
                 return true
             }
         })
+        binding.previewView.setOnClickListener {
+            focusAt(
+                lastFocusTapX ?: binding.previewView.width / 2f,
+                lastFocusTapY ?: binding.previewView.height / 2f
+            )
+            lastFocusTapX = null
+            lastFocusTapY = null
+        }
         binding.previewView.setOnTouchListener { _, event ->
             scaleGestureDetector.onTouchEvent(event)
             tapDetector.onTouchEvent(event)
