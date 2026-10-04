@@ -61,6 +61,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.abs
 
+@androidx.annotation.OptIn(markerClass = [androidx.camera.camera2.interop.ExperimentalCamera2Interop::class])
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding

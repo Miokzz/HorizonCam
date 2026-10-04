@@ -14,6 +14,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
  * camera. Physical-only IDs in a logical multicamera are deliberately not
  * advertised as independently accessible.
  */
+@androidx.annotation.OptIn(markerClass = [androidx.camera.camera2.interop.ExperimentalCamera2Interop::class])
 object PublicLensDiscovery {
     data class WideLens(val id: String, val selector: CameraSelector, val fov: Double)
 

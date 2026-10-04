@@ -12,6 +12,7 @@ import androidx.camera.core.DynamicRange
 import androidx.camera.video.Quality
 import androidx.camera.video.Recorder
 
+@androidx.annotation.OptIn(markerClass = [androidx.camera.camera2.interop.ExperimentalCamera2Interop::class])
 data class CameraCapabilities(
     val cameraId: String,
     val sensorOrientation: Int?,
