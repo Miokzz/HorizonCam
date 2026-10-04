@@ -6,7 +6,7 @@ import android.hardware.camera2.CameraManager
 import android.util.Range
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.CameraInfo
-import androidx.camera.video.DynamicRange
+import androidx.camera.core.DynamicRange
 import androidx.camera.video.Quality
 import androidx.camera.video.Recorder
 
@@ -55,7 +55,7 @@ data class CameraCapabilities(
                     )?.firstOrNull()?.toDouble()
                     val sensor = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
                     val fov = if (f != null && f > 0 && sensor != null)
-                        Math.toDegrees(2.0 * kotlin.math.atan(sensor.width / (2.0 * f)))
+                        Math.toDegrees(2.0 * kotlin.math.atan(sensor.width.toDouble() / (2.0 * f)))
                     else null
                     LensRecord(
                         lensId,
