@@ -8,6 +8,7 @@ import androidx.camera.core.ProcessingException
 import androidx.camera.core.SurfaceOutput
 import androidx.camera.core.SurfaceProcessor
 import androidx.camera.core.SurfaceRequest
+import java.util.IdentityHashMap
 import java.util.concurrent.Executor
 import kotlin.math.cos
 import kotlin.math.sin
@@ -18,6 +19,12 @@ class HorizonSurfaceProcessor(
     private val glExecutor: Executor
 ) : SurfaceProcessor, SurfaceTexture.OnFrameAvailableListener {
 
+    private data class OutputTarget(
+        val info: SurfaceOutput,
+        val surface: Surface,
+        val transform: FloatArray = FloatArray(16)
+    )
+
     private val egl = EglCore()
     private val renderer = OesRenderer()
     private var initialized = false
@@ -25,11 +32,12 @@ class HorizonSurfaceProcessor(
 
     private var inputTexture: SurfaceTexture? = null
     private var inputSurface: Surface? = null
-    private var outputInfo: SurfaceOutput? = null
-    private var outputSurface: Surface? = null
+
+    // CameraEffect(PREVIEW | VIDEO_CAPTURE) can provide multiple output surfaces.
+    // Keep all of them alive and draw each processed frame to every target.
+    private val outputs = IdentityHashMap<SurfaceOutput, OutputTarget>()
 
     private val cameraTextureMatrix = FloatArray(16)
-    private val outputTextureMatrix = FloatArray(16)
     private val vertexMatrix = FloatArray(16)
 
     override fun onInputSurface(request: SurfaceRequest) {
@@ -79,21 +87,16 @@ class HorizonSurfaceProcessor(
         try {
             ensureInitialized()
 
-            outputSurface?.let { egl.unregister(it) }
-            outputInfo?.close()
-
             val surface = surfaceOutput.getSurface(glExecutor) {
-                if (outputInfo === surfaceOutput) {
-                    outputSurface?.let { egl.unregister(it) }
-                    outputSurface = null
-                    outputInfo = null
+                val target = outputs.remove(surfaceOutput)
+                if (target != null) {
+                    egl.unregister(target.surface)
                 }
                 surfaceOutput.close()
             }
 
             egl.register(surface)
-            outputInfo = surfaceOutput
-            outputSurface = surface
+            outputs[surfaceOutput] = OutputTarget(surfaceOutput, surface)
         } catch (t: Throwable) {
             surfaceOutput.close()
             throw ProcessingException().apply { initCause(t) }
@@ -103,38 +106,43 @@ class HorizonSurfaceProcessor(
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture) {
         ensureGlThread()
         if (released || surfaceTexture !== inputTexture) return
-
-        val outInfo = outputInfo ?: return
-        val outSurface = outputSurface ?: return
+        if (outputs.isEmpty()) return
 
         try {
             surfaceTexture.updateTexImage()
             surfaceTexture.getTransformMatrix(cameraTextureMatrix)
-            outInfo.updateTransformMatrix(outputTextureMatrix, cameraTextureMatrix)
+            val timestamp = surfaceTexture.timestamp
 
-            val size = outInfo.size
-            val aspect = if (size.height == 0) 16f / 9f else size.width.toFloat() / size.height.toFloat()
-            buildVertexMatrix(
-                state.correctionDegrees(),
-                state.fixedCropScale(aspect),
-                aspect,
-                vertexMatrix
-            )
+            // Snapshot because an output can reach end-of-life while a frame is being handled.
+            val targets = outputs.values.toList()
 
-            egl.draw(
-                outSurface,
-                size.width,
-                size.height,
-                surfaceTexture.timestamp
-            ) {
-                renderer.draw(outputTextureMatrix, vertexMatrix)
-            }
-        } catch (t: Throwable) {
-            inputTexture?.let { current ->
-                if (!current.isReleased) {
-                    // CameraX will rebuild the pipeline on a new request if needed.
+            for (target in targets) {
+                if (!outputs.containsKey(target.info)) continue
+
+                target.info.updateTransformMatrix(target.transform, cameraTextureMatrix)
+
+                val size = target.info.size
+                val aspect =
+                    if (size.height == 0) 16f / 9f
+                    else size.width.toFloat() / size.height.toFloat()
+
+                buildVertexMatrix(
+                    state.correctionDegrees(),
+                    state.fixedCropScale(aspect),
+                    aspect,
+                    vertexMatrix
+                )
+
+                egl.draw(
+                    target.surface,
+                    size.width,
+                    size.height,
+                    timestamp
+                ) {
+                    renderer.draw(target.transform, vertexMatrix)
                 }
             }
+        } catch (t: Throwable) {
             throw RuntimeException("Horizon GL frame processing failed", t)
         }
     }
@@ -143,16 +151,18 @@ class HorizonSurfaceProcessor(
         glHandler.post {
             if (!released) {
                 released = true
+
                 inputTexture?.setOnFrameAvailableListener(null)
                 inputSurface?.release()
                 inputTexture?.release()
                 inputSurface = null
                 inputTexture = null
 
-                outputSurface?.let { egl.unregister(it) }
-                outputInfo?.close()
-                outputSurface = null
-                outputInfo = null
+                outputs.values.toList().forEach { target ->
+                    egl.unregister(target.surface)
+                    target.info.close()
+                }
+                outputs.clear()
 
                 if (initialized) {
                     renderer.release()
@@ -197,8 +207,6 @@ class HorizonSurfaceProcessor(
         val s = sin(radians).toFloat()
         val a = aspect.coerceAtLeast(0.01f)
 
-        // Pixel-correct 2D rotation in NDC for a non-square viewport,
-        // with uniform zoom to hide exposed corners.
         out[0] = zoom * c
         out[1] = zoom * s * a
         out[4] = -zoom * s / a

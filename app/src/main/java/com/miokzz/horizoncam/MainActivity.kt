@@ -80,12 +80,14 @@ class MainActivity : AppCompatActivity() {
         binding.previewView.scaleType = androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
         binding.qualityButton.text = "FHD"
         binding.fpsButton.text = "30"
-        binding.statusText.text = "HORIZON LOCK"
+        binding.statusText.text = "360°"
+
+        horizonState.setLandscapeAnchor(display?.rotation ?: android.view.Surface.ROTATION_90)
 
         gravitySensor = GravityRollSensor(this) { roll ->
             horizonState.updateRoll(roll)
             runOnUiThread {
-                updateRotatingHud(roll)
+                updateRotatingHud()
             }
         }
 
@@ -111,17 +113,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.lockButton.setOnClickListener {
-            horizonState.recalibrate()
-            horizonState.setEnabled(true)
+            val active = horizonState.toggleEnabled()
+            binding.lockButton.text = if (active) "H" else "OFF"
+            binding.lockButton.setTextColor(
+                if (active) Color.rgb(255, 216, 74) else Color.WHITE
+            )
             pulseLockButton()
-            Toast.makeText(this, "Horizon Lock recalibrado", Toast.LENGTH_SHORT).show()
         }
 
         binding.lockButton.setOnLongClickListener {
             val direction = horizonState.toggleDirection()
             Toast.makeText(
                 this,
-                if (direction > 0f) "Compensação normal" else "Compensação invertida",
+                if (direction > 0f) "Orientação GL normal" else "Orientação GL invertida",
                 Toast.LENGTH_SHORT
             ).show()
             true
@@ -431,7 +435,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.timerText.visibility =
             if (isRecording) android.view.View.VISIBLE else android.view.View.GONE
-        binding.statusText.text = if (isRecording) "HORIZON LOCK • REC" else "HORIZON LOCK"
+        binding.statusText.text = if (isRecording) "REC" else "360°"
     }
 
     private fun setSettingsEnabled(enabled: Boolean) {
@@ -454,17 +458,13 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
-    private fun updateRotatingHud(rawRoll: Float) {
-        if (hudReferenceRoll == null) {
-            hudReferenceRoll = rawRoll
-            lastHudRotation = 0f
-        }
-
-        var target = wrapDegrees((hudReferenceRoll ?: rawRoll) - rawRoll)
+    private fun updateRotatingHud() {
+        var target = horizonState.hudRotationDegrees()
 
         while (target - lastHudRotation > 180f) target -= 360f
         while (target - lastHudRotation < -180f) target += 360f
 
+        if (kotlin.math.abs(target - lastHudRotation) < 1f) return
         lastHudRotation = target
 
         val rotatingViews = listOf(
@@ -481,15 +481,11 @@ class MainActivity : AppCompatActivity() {
         )
 
         rotatingViews.forEach { view ->
-            view.rotation = target
+            view.animate()
+                .rotation(target)
+                .setDuration(180L)
+                .start()
         }
-    }
-
-    private fun wrapDegrees(value: Float): Float {
-        var v = value
-        while (v > 180f) v -= 360f
-        while (v < -180f) v += 360f
-        return v
     }
 
     private fun dp(value: Int): Int =
