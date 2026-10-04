@@ -145,7 +145,7 @@ class MainActivity : AppCompatActivity() {
     private fun startCamera() {
         if (cameraStarting || isFinishing || isDestroyed) return
         cameraStarting = true
-        binding.statusText.text = "HORIZON • STARTING"
+        binding.statusText.text = "HORIZON v0.3 • STARTING"
 
         val providerFuture: ListenableFuture<ProcessCameraProvider> = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
@@ -215,7 +215,7 @@ class MainActivity : AppCompatActivity() {
             videoCapture = capture
             camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group)
             cameraStarting = false
-            binding.statusText.text = "HORIZON • READY"
+            binding.statusText.text = "HORIZON v0.3 • READY"
             updateZoomAvailability()
             updateHud()
         } catch (t: Throwable) {
@@ -292,7 +292,7 @@ class MainActivity : AppCompatActivity() {
                         binding.statusText.text = "RECORD ERROR"
                         Toast.makeText(this, "Erro ao gravar: ${event.error}", Toast.LENGTH_LONG).show()
                     } else {
-                        binding.statusText.text = "HORIZON • SAVED"
+                        binding.statusText.text = "HORIZON v0.3 • SAVED"
                         Toast.makeText(this, "Salvo em Movies/HorizonCam", Toast.LENGTH_LONG).show()
                     }
                 }

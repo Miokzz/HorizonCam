@@ -43,8 +43,22 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
+      - name: Restore persistent debug signing key
+        id: debug-key-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: horizoncam-debug-keystore-v1
+
       - name: Build debug APK
         run: gradle --stacktrace :app:assembleDebug
+
+      - name: Save persistent debug signing key
+        if: success() && steps.debug-key-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: horizoncam-debug-keystore-v1
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
