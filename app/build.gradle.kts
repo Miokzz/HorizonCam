@@ -7,11 +7,11 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.miokzz.horizoncam"
+        applicationId = "com.miokzz.horizoncam.gl"
         minSdk = 29
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 41
+        versionName = "0.4.1-gltest"
     }
 
     buildTypes {
