@@ -1,72 +1,80 @@
 package com.miokzz.horizoncam
 
+import com.miokzz.horizoncam.sensors.OrientationHistory
+import com.miokzz.horizoncam.stabilization.AngleMath
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.sqrt
 
-/**
- * 360-degree roll lock anchored to a LANDSCAPE video canvas.
- *
- * Orientation of the Android activity must never re-anchor this state. In
- * particular, no auto-snapping to 0/90/180/270 during a full phone revolution.
- */
+enum class StabilizationMode { OFF, STEADY, HORIZONTAL_LOCK }
+
+data class FrameGeometry(
+    val rotationDegrees: Float,
+    val cropScale: Float,
+    val timestampValid: Boolean,
+    val sensorAgeMs: Float
+)
+
+/** No UI/display configuration may change the landscape gravity reference. */
 class HorizonState {
-    private val roll = AtomicReference(0f)
-    private val enabled = AtomicBoolean(true)
+    private val history = OrientationHistory()
+    private val mode = AtomicReference(StabilizationMode.HORIZONTAL_LOCK)
     private val inverted = AtomicBoolean(false)
     private val recording = AtomicBoolean(false)
+    private val cameraTimebaseReliable = AtomicBoolean(true)
 
     fun updateRoll(degrees: Float) {
-        if (degrees.isFinite()) roll.set(wrap(degrees))
+        pushRoll(System.nanoTime(), degrees)
     }
 
-    fun currentRoll(): Float = roll.get()
-    fun isEnabled(): Boolean = enabled.get()
-    fun isRecording(): Boolean = recording.get()
-    fun toggleEnabled(): Boolean = (!enabled.get()).also { enabled.set(it) }
+    fun pushRoll(timestampNs: Long, degrees: Float) {
+        if (degrees.isFinite()) history.append(timestampNs, degrees.toDouble())
+    }
+
+    fun setCameraRealtimeTimestamp(reliable: Boolean) {
+        cameraTimebaseReliable.set(reliable)
+    }
+
+    fun currentRoll() = AngleMath.wrap(history.latest()).toFloat()
+    fun mode() = mode.get()
+    fun setMode(value: StabilizationMode) { mode.set(value) }
+    fun isEnabled() = mode() == StabilizationMode.HORIZONTAL_LOCK
+    fun toggleEnabled(): Boolean {
+        val newMode = if (isEnabled()) StabilizationMode.OFF else StabilizationMode.HORIZONTAL_LOCK
+        setMode(newMode)
+        return isEnabled()
+    }
 
     fun toggleDirection(): Float {
         inverted.set(!inverted.get())
         return if (inverted.get()) -1f else 1f
     }
 
-    fun startRecording() {
-        recording.set(true)
+    fun startRecording() { recording.set(true) }
+    fun stopRecording() { recording.set(false) }
+    fun isRecording() = recording.get()
+    fun isLandscapePose(): Boolean = abs(abs(currentRoll()) - 90f) < 42f
+
+    fun correctionDegrees(): Float = degreesForRoll(history.latest())
+
+    fun frameGeometry(frameTimeNs: Long, aspectRatio: Float = 16f / 9f): FrameGeometry {
+        if (!isEnabled()) return FrameGeometry(0f, 1f, true, 0f)
+        val sample = history.sample(frameTimeNs, cameraTimebaseReliable.get())
+        return FrameGeometry(
+            degreesForRoll(sample.rollDegrees),
+            AngleMath.safeFixedCrop(aspectRatio.toDouble()).toFloat(),
+            sample.validTimestamp,
+            sample.ageMs.toFloat()
+        )
     }
 
-    fun stopRecording() {
-        recording.set(false)
+    /** Camera2 + CameraX renders landscape using the phone's +90 gravity roll. */
+    private fun degreesForRoll(roll: Double): Float {
+        if (!isEnabled()) return 0f
+        val answer = AngleMath.wrap(90.0 - roll)
+        return (if (inverted.get()) -answer else answer).toFloat()
     }
 
-    fun isLandscapePose(): Boolean = abs(abs(roll.get()) - 90f) <= 40f
-
-    /**
-     * Device physical roll is sampled continuously and relative to gravity.
-     * The output coordinate system NEVER changes during portrait/UI rotations.
-     * 90 degrees is the landscape-zero device angle (normal landscape grip).
-     */
-    fun correctionDegrees(): Float {
-        if (!enabled.get()) return 0f
-        val correction = wrap(90f - roll.get())
-        return if (inverted.get()) wrap(-correction) else correction
-    }
-
-    /**
-     * Same fixed overscan at every roll angle, so field of view never pumps.
-     * Not a substitute for an actual wider optical input like S26 Super Steady.
-     */
-    fun fixedCropScale(aspectRatio: Float = 16f / 9f): Float {
-        if (!enabled.get()) return 1f
-        val a = max(aspectRatio, 1f / aspectRatio).coerceAtLeast(1f)
-        return (sqrt(1f + a * a) * 1.015f).coerceIn(1f, 2.20f)
-    }
-
-    private fun wrap(value: Float): Float {
-        var v = value
-        while (v > 180f) v -= 360f
-        while (v < -180f) v += 360f
-        return v
-    }
+    fun fixedCropScale(aspectRatio: Float = 16f / 9f) =
+        if (isEnabled()) AngleMath.safeFixedCrop(aspectRatio.toDouble()).toFloat() else 1f
 }

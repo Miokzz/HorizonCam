@@ -5,59 +5,74 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import kotlin.math.atan2
-import kotlin.math.hypot
+import android.os.Handler
+import android.os.HandlerThread
+import com.miokzz.horizoncam.sensors.RollFusion
 
-/** Gyro + accelerometer fusion if TYPE_GAME_ROTATION_VECTOR is available. */
+/**
+ * Inertial sensor acquisition, separate from UI and GL threads.
+ * Gyroscope predicts short-term motion; gravity fixes long-term drift.
+ * A weak horizontal gravity projection keeps gyro prediction running.
+ */
 class GravityRollSensor(
     context: Context,
-    private val onRoll: (Float) -> Unit
+    private val onReading: (RollFusion.Reading) -> Unit
 ) : SensorEventListener {
+
     private val manager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    private val fused = manager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
-    private val fallback = manager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+    private val gyro = manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private val attitude = manager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+        ?: manager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+    private val gravity = manager.getDefaultSensor(Sensor.TYPE_GRAVITY)
         ?: manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    private val active = fused ?: fallback
+    private val fusion = RollFusion()
     private val rotation = FloatArray(9)
-    private var filteredRoll = 0f
-    private var hasRoll = false
+    private val sensorThread = HandlerThread("HorizonCam-Inertial").apply { start() }
+    private val sensorHandler = Handler(sensorThread.looper)
     private var gx = 0f
     private var gy = -9.81f
+    private var activated = false
 
     fun start() {
-        active?.let { manager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        if (activated) return
+        activated = true
+        gyro?.let { manager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST, sensorHandler) }
+        val correction = attitude ?: gravity
+        correction?.let { manager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, sensorHandler) }
     }
 
-    fun stop() { manager.unregisterListener(this) }
+    fun stop() {
+        activated = false
+        manager.unregisterListener(this)
+    }
+
+    fun release() {
+        stop()
+        sensorThread.quitSafely()
+    }
 
     override fun onSensorChanged(event: SensorEvent) {
-        val x: Float
-        val y: Float
-        if (event.sensor.type == Sensor.TYPE_GAME_ROTATION_VECTOR) {
-            SensorManager.getRotationMatrixFromVector(rotation, event.values)
-            x = -rotation[6] * 9.81f
-            y = -rotation[7] * 9.81f
-        } else {
-            val alpha = if (event.sensor.type == Sensor.TYPE_GRAVITY) 0.38f else 0.08f
-            gx += alpha * (event.values[0] - gx)
-            gy += alpha * (event.values[1] - gy)
-            x = gx
-            y = gy
+        val result = when (event.sensor.type) {
+            Sensor.TYPE_GYROSCOPE ->
+                fusion.onGyroscope(event.values[2].toDouble(), event.timestamp)
+            Sensor.TYPE_GAME_ROTATION_VECTOR, Sensor.TYPE_ROTATION_VECTOR -> {
+                SensorManager.getRotationMatrixFromVector(rotation, event.values)
+                fusion.onGravity(
+                    -rotation[6].toDouble() * 9.81,
+                    -rotation[7].toDouble() * 9.81,
+                    event.timestamp
+                )
+            }
+            Sensor.TYPE_GRAVITY, Sensor.TYPE_ACCELEROMETER -> {
+                val gain = if (event.sensor.type == Sensor.TYPE_GRAVITY) 0.5f else 0.085f
+                gx += gain * (event.values[0] - gx)
+                gy += gain * (event.values[1] - gy)
+                fusion.onGravity(gx.toDouble(), gy.toDouble(), event.timestamp)
+            }
+            else -> null
         }
-        // Avoid unstable gravity-roll when the phone points straight up/down.
-        if (hypot(x, y) < 1.3f) return
-        val angle = Math.toDegrees(atan2(x.toDouble(), -y.toDouble())).toFloat()
-        filteredRoll = wrap(if (!hasRoll) angle
-            else filteredRoll + 0.72f * wrap(angle - filteredRoll))
-        hasRoll = true
-        onRoll(filteredRoll)
+        result?.let(onReading)
     }
 
-    private fun wrap(value: Float): Float {
-        var v = value
-        while (v > 180f) v -= 360f
-        while (v < -180f) v += 360f
-        return v
-    }
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 }
