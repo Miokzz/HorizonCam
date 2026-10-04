@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import com.miokzz.horizoncam.camera.CameraCapabilities
+import com.miokzz.horizoncam.camera.PublicLensDiscovery
 import com.miokzz.horizoncam.stabilization.AngleMath
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -80,6 +81,9 @@ class MainActivity : AppCompatActivity() {
     private var nativeEisActive = false
     private var eisSupported = false
     private var capabilities: CameraCapabilities? = null
+    private var wideLens: PublicLensDiscovery.WideLens? = null
+    private var lensProbeCompleted = false
+    private var usingWide = false
     private var torchEnabled = false
     private var paused = false
     private var lastVideoUri: Uri? = null
@@ -146,8 +150,8 @@ class MainActivity : AppCompatActivity() {
                     val target = (zoomState.zoomRatio * detector.scaleFactor)
                         .coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
                     cam.cameraControl.setZoomRatio(target)
-                    selectedZoom = target
-                    updateZoomUi(target)
+                    selectedZoom = if (usingWide) target * 0.6f else target
+                    updateZoomUi(selectedZoom)
                     return true
                 }
             }
@@ -200,6 +204,11 @@ class MainActivity : AppCompatActivity() {
                 toast("Resolução indisponível nesta câmera.")
                 return@setOnClickListener
             }
+            if (horizonState.mode() == StabilizationMode.STEADY &&
+                next == Quality.UHD) {
+                toast("Super Steady disponível somente em FHD/30 neste pipeline.")
+                return@setOnClickListener
+            }
             requestedQuality = next
             if (requestedQuality == Quality.UHD && requestedFps == 60) {
                 requestedFps = 30
@@ -212,7 +221,9 @@ class MainActivity : AppCompatActivity() {
         binding.fpsButton.setOnClickListener {
             if (recording != null) return@setOnClickListener
             if (requestedFps == 30 &&
-                (capabilities?.fps60 == false || requestedQuality == Quality.UHD)) {
+                (capabilities?.fps60 == false ||
+                    requestedQuality == Quality.UHD ||
+                    horizonState.mode() == StabilizationMode.STEADY)) {
                 toast("60 FPS não foi validado nesta combinação.")
                 return@setOnClickListener
             }
@@ -315,8 +326,22 @@ class MainActivity : AppCompatActivity() {
         val provider = cameraProvider ?: return
         provider.unbindAll()
 
+        if (!lensProbeCompleted) {
+            wideLens = runCatching {
+                PublicLensDiscovery.findAccessibleUltrawide(this, provider)
+            }.getOrNull()
+            lensProbeCompleted = true
+            if (horizonState.isEnabled() && wideLens != null) {
+                usingWide = true
+                selectedZoom = 0.6f
+            }
+        }
+        val selector = if (usingWide) wideLens?.selector
+            ?: CameraSelector.DEFAULT_BACK_CAMERA
+        else CameraSelector.DEFAULT_BACK_CAMERA
+
         val halCanStabilize = runCatching {
-            val info = provider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
+            val info = provider.getCameraInfo(selector)
             Preview.getPreviewCapabilities(info).isStabilizationSupported &&
                 Recorder.getVideoCapabilities(info).isStabilizationSupported
         }.getOrDefault(false)
@@ -383,7 +408,7 @@ class MainActivity : AppCompatActivity() {
             horizonEffect = effect
             previewUseCase = preview
             videoCapture = capture
-            camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group)
+            camera = provider.bindToLifecycle(this, selector, group)
             val source = runCatching {
                 Camera2CameraInfo.from(camera!!.cameraInfo)
                     .getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
@@ -401,8 +426,10 @@ class MainActivity : AppCompatActivity() {
             if (torchEnabled) camera?.cameraControl?.enableTorch(true)
             val zoomRange = camera?.cameraInfo?.zoomState?.value
             if (zoomRange != null) {
-                selectedZoom = selectedZoom.coerceIn(zoomRange.minZoomRatio, zoomRange.maxZoomRatio)
-                camera?.cameraControl?.setZoomRatio(selectedZoom)
+                val opticalZoom = if (usingWide) 1f
+                    else selectedZoom.coerceIn(zoomRange.minZoomRatio, zoomRange.maxZoomRatio)
+                camera?.cameraControl?.setZoomRatio(opticalZoom)
+                selectedZoom = if (usingWide) 0.6f else opticalZoom
             }
             updateStatusText()
             updateZoomAvailability()
@@ -410,7 +437,14 @@ class MainActivity : AppCompatActivity() {
         } catch (t: Throwable) {
             effect.close()
 
-            if (eis) {
+            if (usingWide) {
+                // A physically accessible camera may still reject an encoder
+                // or GPU/VideoCapture combination. Never strand the preview.
+                usingWide = false
+                selectedZoom = 1f
+                toast("Ultra-wide não aceitou este modo. Usando a câmera principal.")
+                bindCameraWithFallback(fps)
+            } else if (eis) {
                 // Some devices report HAL stabilization but cannot combine it
                 // with an external GPU effect. Rebind without HAL EIS.
                 nativeEisActive = false
@@ -443,28 +477,54 @@ class MainActivity : AppCompatActivity() {
 
     private fun setZoom(requested: Float) {
         val cam = camera ?: return
-        val state = cam.cameraInfo.zoomState.value ?: return
-        val value = requested.coerceIn(state.minZoomRatio, state.maxZoomRatio)
-        selectedZoom = value
-        cam.cameraControl.setZoomRatio(value)
-        updateZoomUi(value)
+        val zoomState = cam.cameraInfo.zoomState.value ?: return
 
-        if (requested < state.minZoomRatio - 0.01f) {
-            Toast.makeText(
-                this,
-                "A lente atual começa em ${"%.1f".format(state.minZoomRatio)}×",
-                Toast.LENGTH_SHORT
-            ).show()
+        // Optical lens changes require a new CameraX session unless both
+        // physical cameras are exposed as one logical zoom stream.
+        if (requested <= 0.61f && wideLens != null && !usingWide) {
+            if (recording != null) {
+                toast("Não é possível trocar a lente física durante REC.")
+                return
+            }
+            usingWide = true
+            selectedZoom = 0.6f
+            restartCamera()
+            return
+        }
+        if (requested >= 0.95f && usingWide) {
+            if (recording != null) {
+                toast("Não é possível trocar a lente física durante REC.")
+                return
+            }
+            usingWide = false
+            selectedZoom = requested
+            restartCamera()
+            return
+        }
+
+        val actual = if (usingWide) {
+            (requested / 0.6f).coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
+        } else {
+            requested.coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
+        }
+        cam.cameraControl.setZoomRatio(actual)
+        selectedZoom = if (usingWide) actual * 0.6f else actual
+        updateZoomUi(selectedZoom)
+
+        if (!usingWide && requested < zoomState.minZoomRatio - 0.01f) {
+            toast("A lente ultra-wide não é acessível pela API pública.")
         }
     }
 
     private fun updateZoomAvailability() {
         val state = camera?.cameraInfo?.zoomState?.value ?: return
-        binding.zoom06Button.isEnabled = state.minZoomRatio <= 0.61f
-        binding.zoom06Button.alpha = if (binding.zoom06Button.isEnabled) 1f else 0.35f
-        binding.zoom2Button.isEnabled = state.maxZoomRatio >= 2f
+        val supportsUltra = wideLens != null ||
+            (!usingWide && state.minZoomRatio <= 0.61f)
+        binding.zoom06Button.isEnabled = supportsUltra
+        binding.zoom06Button.alpha = if (supportsUltra) 1f else 0.35f
+        binding.zoom2Button.isEnabled = usingWide || state.maxZoomRatio >= 2f
         binding.zoom2Button.alpha = if (binding.zoom2Button.isEnabled) 1f else 0.35f
-        binding.zoom3Button.isEnabled = state.maxZoomRatio >= 3f
+        binding.zoom3Button.isEnabled = usingWide || state.maxZoomRatio >= 3f
         binding.zoom3Button.alpha = if (binding.zoom3Button.isEnabled) 1f else 0.35f
     }
 
@@ -475,7 +535,6 @@ class MainActivity : AppCompatActivity() {
             2f to binding.zoom2Button,
             3f to binding.zoom3Button
         )
-
         buttons.forEach { (value, button) ->
             val selected = abs(zoom - value) < 0.22f
             button.backgroundTintList = ColorStateList.valueOf(
@@ -623,10 +682,10 @@ class MainActivity : AppCompatActivity() {
         // Never rebind while rotating the phone. For ordinary video modes,
         // the metadata follows screen orientation when not recording.
         // Horizontal Lock uses an absolute landscape reference instead.
-        if (recording == null && !horizonState.isEnabled()) {
-            val rotation = binding.previewView.display?.rotation ?: Surface.ROTATION_0
-            previewUseCase?.targetRotation = rotation
-            videoCapture?.targetRotation = rotation
+        if (recording == null && horizonState.mode() != StabilizationMode.HORIZONTAL_LOCK) {
+            // Normal video follows display rotation. ViewPort cannot rotate
+            // after binding, so it must be rebuilt in conventional modes.
+            restartCamera()
         }
     }
 
@@ -725,7 +784,21 @@ class MainActivity : AppCompatActivity() {
                     return@setOnMenuItemClickListener true
                 }
                 if (horizonState.mode() != requested) {
+                    if (requested == StabilizationMode.STEADY) {
+                        requestedQuality = Quality.FHD
+                        requestedFps = 30
+                        binding.qualityButton.text = "FHD"
+                        binding.fpsButton.text = "30"
+                    }
                     horizonState.setMode(requested)
+                    if (requested != StabilizationMode.HORIZONTAL_LOCK && usingWide) {
+                        usingWide = false
+                        selectedZoom = 1f
+                    } else if (requested == StabilizationMode.HORIZONTAL_LOCK &&
+                        wideLens != null && selectedZoom <= 1f) {
+                        usingWide = true
+                        selectedZoom = 0.6f
+                    }
                     pulseLockButton()
                     haptic()
                     binding.lockButton.text = when (requested) {
