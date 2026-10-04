@@ -8,47 +8,53 @@
     <com.miokzz.horizoncam.HorizonPreviewTextureView
         android:id="@+id/previewView"
         android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <com.miokzz.horizoncam.ui.CameraGridView
+        android:id="@+id/gridView"
+        android:layout_width="match_parent"
         android:layout_height="match_parent"
-        app:implementationMode="compatible"
-        app:scaleType="fillCenter" />
+        android:visibility="gone" />
 
     <View
         android:layout_width="match_parent"
-        android:layout_height="96dp"
+        android:layout_height="130dp"
         android:layout_gravity="top"
-        android:background="@drawable/top_scrim" />
+        android:background="@drawable/top_scrim"
+        android:clickable="false" />
 
     <View
         android:layout_width="match_parent"
-        android:layout_height="150dp"
+        android:layout_height="172dp"
         android:layout_gravity="bottom"
-        android:background="@drawable/bottom_scrim" />
+        android:background="@drawable/bottom_scrim"
+        android:clickable="false" />
 
     <TextView
         android:id="@+id/statusText"
         android:layout_width="wrap_content"
         android:layout_height="36dp"
         android:layout_gravity="top|start"
-        android:layout_marginStart="22dp"
-        android:layout_marginTop="18dp"
+        android:layout_marginStart="18dp"
+        android:layout_marginTop="68dp"
         android:background="@drawable/camera_pill"
         android:gravity="center"
-        android:paddingHorizontal="14dp"
-        android:text="HORIZON LOCK"
+        android:minWidth="74dp"
+        android:paddingHorizontal="12dp"
+        android:text="H LOCK"
         android:textColor="@color/horizon_yellow"
-        android:textSize="13sp"
+        android:textSize="12sp"
         android:textStyle="bold" />
 
     <TextView
         android:id="@+id/timerText"
         android:layout_width="wrap_content"
-        android:layout_height="36dp"
-        android:layout_gravity="top|start"
-        android:layout_marginStart="22dp"
-        android:layout_marginTop="62dp"
+        android:layout_height="34dp"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="71dp"
         android:background="@drawable/camera_pill"
         android:gravity="center"
-        android:minWidth="72dp"
+        android:minWidth="74dp"
         android:paddingHorizontal="12dp"
         android:text="00:00"
         android:textColor="@color/record_red"
@@ -58,74 +64,124 @@
 
     <LinearLayout
         android:id="@+id/topControls"
-        android:layout_width="wrap_content"
-        android:layout_height="52dp"
+        android:layout_width="match_parent"
+        android:layout_height="54dp"
         android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="12dp"
         android:gravity="center"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:paddingHorizontal="10dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/flashButton"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="46dp"
+            android:layout_height="42dp"
+            android:contentDescription="Flash"
+            android:text=""
+            android:minWidth="0dp"
+            android:padding="10dp"
+            app:icon="@drawable/ic_torch"
+            app:iconGravity="textStart"
+            app:iconTint="@color/white"
+            app:iconPadding="0dp"
+            app:iconSize="22dp"
+            app:backgroundTint="@color/hud_black"
+            app:cornerRadius="23dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/qualityButton"
             style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="64dp"
-            android:layout_height="40dp"
-            android:layout_marginHorizontal="3dp"
+            android:layout_width="61dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="6dp"
             android:minWidth="0dp"
-            android:paddingHorizontal="8dp"
             android:text="FHD"
             android:textAllCaps="false"
             android:textColor="@color/white"
             android:textSize="13sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="24dp" />
+            app:cornerRadius="22dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/fpsButton"
             style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="58dp"
-            android:layout_height="40dp"
-            android:layout_marginHorizontal="3dp"
+            android:layout_width="51dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="6dp"
             android:minWidth="0dp"
-            android:paddingHorizontal="8dp"
             android:text="30"
             android:textAllCaps="false"
             android:textColor="@color/white"
             android:textSize="13sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="24dp" />
+            app:cornerRadius="22dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/lockButton"
             style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="92dp"
-            android:layout_height="40dp"
-            android:layout_marginHorizontal="3dp"
+            android:layout_width="73dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="6dp"
             android:minWidth="0dp"
-            android:paddingHorizontal="8dp"
-            android:text="H"
+            android:text="360°"
             android:textAllCaps="false"
             android:textColor="@color/horizon_yellow"
-            android:textSize="12sp"
+            android:textSize="13sp"
             android:textStyle="bold"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="24dp" />
+            app:cornerRadius="22dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/quickControlsButton"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="46dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="6dp"
+            android:contentDescription="Controles rápidos"
+            android:minWidth="0dp"
+            android:padding="10dp"
+            android:text=""
+            app:icon="@drawable/ic_more"
+            app:iconGravity="textStart"
+            app:iconTint="@color/white"
+            app:iconPadding="0dp"
+            app:iconSize="22dp"
+            app:backgroundTint="@color/hud_black"
+            app:cornerRadius="23dp" />
     </LinearLayout>
+
+    <View
+        android:id="@+id/focusIndicator"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_gravity="center"
+        android:background="@drawable/focus_ring"
+        android:visibility="gone" />
+
+    <SeekBar
+        android:id="@+id/exposureSlider"
+        android:layout_width="200dp"
+        android:layout_height="40dp"
+        android:layout_gravity="center"
+        android:layout_marginTop="130dp"
+        android:progressTint="@color/horizon_yellow"
+        android:thumbTint="@color/horizon_yellow"
+        android:visibility="gone" />
 
     <LinearLayout
         android:id="@+id/zoomControls"
         android:layout_width="wrap_content"
         android:layout_height="48dp"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="22dp"
+        android:layout_marginBottom="25dp"
         android:gravity="center"
         android:orientation="horizontal">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/zoom06Button"
             style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="52dp"
-            android:layout_height="40dp"
+            android:layout_width="54dp"
+            android:layout_height="42dp"
             android:layout_marginHorizontal="3dp"
             android:minWidth="0dp"
             android:padding="0dp"
@@ -134,13 +190,12 @@
             android:textColor="@color/white"
             android:textSize="12sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="24dp" />
-
+            app:cornerRadius="22dp" />
         <com.google.android.material.button.MaterialButton
             android:id="@+id/zoom1Button"
             style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="52dp"
-            android:layout_height="40dp"
+            android:layout_width="54dp"
+            android:layout_height="42dp"
             android:layout_marginHorizontal="3dp"
             android:minWidth="0dp"
             android:padding="0dp"
@@ -149,13 +204,12 @@
             android:textColor="@color/white"
             android:textSize="12sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="24dp" />
-
+            app:cornerRadius="22dp" />
         <com.google.android.material.button.MaterialButton
             android:id="@+id/zoom2Button"
             style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="52dp"
-            android:layout_height="40dp"
+            android:layout_width="54dp"
+            android:layout_height="42dp"
             android:layout_marginHorizontal="3dp"
             android:minWidth="0dp"
             android:padding="0dp"
@@ -164,13 +218,12 @@
             android:textColor="@color/white"
             android:textSize="12sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="24dp" />
-
+            app:cornerRadius="22dp" />
         <com.google.android.material.button.MaterialButton
             android:id="@+id/zoom3Button"
             style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="52dp"
-            android:layout_height="40dp"
+            android:layout_width="54dp"
+            android:layout_height="42dp"
             android:layout_marginHorizontal="3dp"
             android:minWidth="0dp"
             android:padding="0dp"
@@ -179,7 +232,7 @@
             android:textColor="@color/white"
             android:textSize="12sp"
             app:backgroundTint="@color/hud_black"
-            app:cornerRadius="24dp" />
+            app:cornerRadius="22dp" />
     </LinearLayout>
 
     <TextView
@@ -187,11 +240,41 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center_vertical|end"
-        android:layout_marginEnd="124dp"
-        android:text="VIDEO"
+        android:layout_marginEnd="130dp"
+        android:text="VÍDEO"
         android:textColor="@color/white"
         android:textSize="12sp"
         android:textStyle="bold" />
+
+    <ImageView
+        android:id="@+id/galleryThumbnail"
+        android:layout_width="58dp"
+        android:layout_height="58dp"
+        android:layout_gravity="center_vertical|start"
+        android:layout_marginStart="22dp"
+        android:background="@drawable/camera_pill"
+        android:contentDescription="Abrir último vídeo"
+        android:padding="3dp"
+        android:scaleType="centerCrop"
+        android:src="@drawable/ic_gallery"
+        android:tint="@null" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/pauseButton"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="55dp"
+        android:layout_height="55dp"
+        android:layout_gravity="center_vertical|end"
+        android:layout_marginEnd="128dp"
+        android:contentDescription="Pausar gravação"
+        android:minWidth="0dp"
+        android:padding="12dp"
+        android:text="Ⅱ"
+        android:textColor="@color/white"
+        android:textSize="20sp"
+        android:visibility="gone"
+        app:backgroundTint="@color/hud_black"
+        app:cornerRadius="28dp" />
 
     <FrameLayout
         android:id="@+id/recordButton"
@@ -201,8 +284,8 @@
         android:layout_marginEnd="26dp"
         android:background="@drawable/record_outer"
         android:clickable="true"
+        android:contentDescription="Iniciar gravação"
         android:focusable="true">
-
         <View
             android:id="@+id/recordInner"
             android:layout_width="54dp"
@@ -210,5 +293,4 @@
             android:layout_gravity="center"
             android:background="@drawable/record_inner_idle" />
     </FrameLayout>
-
 </FrameLayout>
