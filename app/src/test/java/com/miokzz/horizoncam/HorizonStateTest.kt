@@ -16,7 +16,7 @@ class HorizonStateTest {
         assertEquals(-180f, state.correctionDegrees(), 0.01f)
     }
 
-    @Test fun 360DegreesIsContinuousOnBothSidesOfWrap() {
+    @Test fun full360DegreesIsContinuousOnBothSidesOfWrap() {
         val state = HorizonState()
         val angles = listOf(90f, 135f, 179f, -179f, -135f, -90f, -45f, 0f, 45f, 90f)
         angles.forEachIndexed { i, angle ->
