@@ -65,7 +65,7 @@ class HorizonSurfaceProcessor(
             }
         } catch (t: Throwable) {
             request.willNotProvideSurface()
-            throw ProcessingException(t)
+            throw ProcessingException().apply { initCause(t) }
         }
     }
 
@@ -96,7 +96,7 @@ class HorizonSurfaceProcessor(
             outputSurface = surface
         } catch (t: Throwable) {
             surfaceOutput.close()
-            throw ProcessingException(t)
+            throw ProcessingException().apply { initCause(t) }
         }
     }
 
