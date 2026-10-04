@@ -6,6 +6,11 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Bundle
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.view.Gravity
+import android.view.Surface
+import android.widget.FrameLayout
 import android.provider.MediaStore
 import android.util.Range
 import android.view.ScaleGestureDetector
@@ -53,8 +58,8 @@ class MainActivity : AppCompatActivity() {
     private var requestedFps = 30
     private var cameraStarting = false
 
-    private var hudReferenceRoll: Float? = null
-    private var lastHudRotation = 0f
+    private var showDiagnostics = false
+    private var lastDiagnosticsAt = 0L
     private var selectedZoom = 1f
 
     private val permissionLauncher = registerForActivityResult(
@@ -77,17 +82,23 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         enterImmersiveMode()
 
-        binding.previewView.scaleType = androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+        updateControlsForOrientation()
+        binding.statusText.setOnLongClickListener {
+            showDiagnostics = !showDiagnostics
+            updateStatusText()
+            true
+        }
         binding.qualityButton.text = "FHD"
         binding.fpsButton.text = "30"
-        binding.statusText.text = "360°"
-
-        horizonState.setLandscapeAnchor(display?.rotation ?: android.view.Surface.ROTATION_90)
+        binding.statusText.text = "H LOCK"
 
         gravitySensor = GravityRollSensor(this) { roll ->
             horizonState.updateRoll(roll)
-            runOnUiThread {
-                updateRotatingHud()
+            val time = android.os.SystemClock.uptimeMillis()
+            if (showDiagnostics && time - lastDiagnosticsAt > 150L) {
+                lastDiagnosticsAt = time
+                runOnUiThread { updateStatusText() }
             }
         }
 
@@ -237,9 +248,11 @@ class MainActivity : AppCompatActivity() {
         provider.unbindAll()
 
         val preview = Preview.Builder()
-            .setTargetRotation(binding.previewView.display.rotation)
+            .setTargetRotation(binding.previewView.display?.rotation ?: Surface.ROTATION_0)
             .build()
-            .also { it.setSurfaceProvider(binding.previewView.surfaceProvider) }
+            .also {
+                it.setSurfaceProvider(ContextCompat.getMainExecutor(this), binding.previewView)
+            }
 
         val qualitySelector = QualitySelector.from(
             requestedQuality,
@@ -251,7 +264,7 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         val capture = VideoCapture.Builder(recorder)
-            .setTargetRotation(binding.previewView.display.rotation)
+            .setTargetRotation(binding.previewView.display?.rotation ?: Surface.ROTATION_0)
             .setTargetFrameRate(Range(fps, fps))
             .build()
 
@@ -278,7 +291,7 @@ class MainActivity : AppCompatActivity() {
             videoCapture = capture
             camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group)
             cameraStarting = false
-            binding.statusText.text = "HORIZON LOCK"
+            updateStatusText()
             updateZoomAvailability()
             updateZoomUi(selectedZoom)
         } catch (t: Throwable) {
@@ -351,6 +364,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun startRecording() {
         val capture = videoCapture ?: return
+        horizonState.startRecording()
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
 
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
             .format(System.currentTimeMillis())
@@ -396,6 +411,8 @@ class MainActivity : AppCompatActivity() {
                 is VideoRecordEvent.Finalize -> {
                     recording?.close()
                     recording = null
+                    horizonState.stopRecording()
+                    requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
                     setSettingsEnabled(true)
                     setRecordingUi(false)
 
@@ -435,7 +452,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.timerText.visibility =
             if (isRecording) android.view.View.VISIBLE else android.view.View.GONE
-        binding.statusText.text = if (isRecording) "REC" else "360°"
+        updateStatusText()
     }
 
     private fun setSettingsEnabled(enabled: Boolean) {
@@ -458,33 +475,61 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
-    private fun updateRotatingHud() {
-        var target = horizonState.hudRotationDegrees()
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateControlsForOrientation()
+        if (recording == null) {
+            horizonState.alignToScreenOrientation()
+            restartCamera()
+        }
+    }
 
-        while (target - lastHudRotation > 180f) target -= 360f
-        while (target - lastHudRotation < -180f) target += 360f
+    private fun updateControlsForOrientation() {
+        val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
 
-        if (kotlin.math.abs(target - lastHudRotation) < 1f) return
-        lastHudRotation = target
+        val record = binding.recordButton.layoutParams as FrameLayout.LayoutParams
+        record.gravity = if (portrait) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                         else Gravity.END or Gravity.CENTER_VERTICAL
+        record.bottomMargin = if (portrait) dp(64) else 0
+        record.marginEnd = if (portrait) 0 else dp(26)
+        binding.recordButton.layoutParams = record
 
-        val rotatingViews = listOf(
-            binding.statusText,
-            binding.timerText,
-            binding.qualityButton,
-            binding.fpsButton,
-            binding.lockButton,
-            binding.zoom06Button,
-            binding.zoom1Button,
-            binding.zoom2Button,
-            binding.zoom3Button,
-            binding.modeLabel
-        )
+        val zoom = binding.zoomControls.layoutParams as FrameLayout.LayoutParams
+        zoom.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        zoom.bottomMargin = if (portrait) dp(165) else dp(22)
+        binding.zoomControls.layoutParams = zoom
 
-        rotatingViews.forEach { view ->
-            view.animate()
-                .rotation(target)
-                .setDuration(180L)
-                .start()
+        val mode = binding.modeLabel.layoutParams as FrameLayout.LayoutParams
+        mode.gravity = if (portrait) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                       else Gravity.END or Gravity.CENTER_VERTICAL
+        mode.marginEnd = if (portrait) 0 else dp(124)
+        mode.bottomMargin = if (portrait) dp(155) else 0
+        binding.modeLabel.layoutParams = mode
+
+        val status = binding.statusText.layoutParams as FrameLayout.LayoutParams
+        status.topMargin = if (portrait) dp(74) else dp(18)
+        binding.statusText.layoutParams = status
+
+        val timer = binding.timerText.layoutParams as FrameLayout.LayoutParams
+        timer.topMargin = if (portrait) dp(115) else dp(62)
+        binding.timerText.layoutParams = timer
+
+        listOf(binding.statusText, binding.timerText, binding.qualityButton,
+            binding.fpsButton, binding.lockButton, binding.zoom06Button,
+            binding.zoom1Button, binding.zoom2Button, binding.zoom3Button,
+            binding.modeLabel).forEach { view ->
+                view.animate().cancel()
+                view.rotation = 0f
+            }
+    }
+
+    private fun updateStatusText() {
+        if (showDiagnostics) {
+            val gpu = horizonEffect?.processor?.diagnostics() ?: "P0 V0 F0"
+            binding.statusText.text = "v0.7 " + gpu + " / " +
+                String.format(Locale.US, "%.0f", horizonState.correctionDegrees()) + "°"
+        } else {
+            binding.statusText.text = if (recording != null) "● REC" else "H LOCK"
         }
     }
 
