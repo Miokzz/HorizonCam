@@ -5,6 +5,7 @@ import android.opengl.Matrix
 import android.os.Handler
 import android.view.Surface
 import androidx.camera.core.ProcessingException
+import androidx.camera.core.CameraEffect
 import androidx.camera.core.SurfaceOutput
 import androidx.camera.core.SurfaceProcessor
 import androidx.camera.core.SurfaceRequest
@@ -39,6 +40,15 @@ class HorizonSurfaceProcessor(
 
     private val cameraTextureMatrix = FloatArray(16)
     private val vertexMatrix = FloatArray(16)
+    @Volatile private var registeredTargets = 0
+    @Volatile private var renderedFrames = 0L
+
+    fun diagnostics(): String {
+        val mask = registeredTargets
+        val p = if (mask and CameraEffect.PREVIEW != 0) 1 else 0
+        val v = if (mask and CameraEffect.VIDEO_CAPTURE != 0) 1 else 0
+        return "P" + p + " V" + v + " F" + renderedFrames
+    }
 
     override fun onInputSurface(request: SurfaceRequest) {
         ensureGlThread()
@@ -92,11 +102,13 @@ class HorizonSurfaceProcessor(
                 if (target != null) {
                     egl.unregister(target.surface)
                 }
+                registeredTargets = outputs.keys.fold(0) { mask, key -> mask or key.targets }
                 surfaceOutput.close()
             }
 
             egl.register(surface)
             outputs[surfaceOutput] = OutputTarget(surfaceOutput, surface)
+            registeredTargets = outputs.keys.fold(0) { mask, key -> mask or key.targets }
         } catch (t: Throwable) {
             surfaceOutput.close()
             throw ProcessingException().apply { initCause(t) }
@@ -142,6 +154,7 @@ class HorizonSurfaceProcessor(
                     renderer.draw(target.transform, vertexMatrix)
                 }
             }
+            renderedFrames++
         } catch (t: Throwable) {
             throw RuntimeException("Horizon GL frame processing failed", t)
         }
@@ -163,6 +176,7 @@ class HorizonSurfaceProcessor(
                     target.info.close()
                 }
                 outputs.clear()
+                registeredTargets = 0
 
                 if (initialized) {
                     renderer.release()
