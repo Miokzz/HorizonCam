@@ -1,60 +1,64 @@
 package com.miokzz.horizoncam
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HorizonStateTest {
-    @Test fun recordingFreezesOutputNotSensor() {
-        val state = HorizonState()
-        state.updateRoll(90f)
-        state.startRecording()
-        state.updateRoll(180f)
-        assertEquals(-90f, state.correctionDegrees(), 0.01f)
-        state.updateRoll(-90f)
-        assertEquals(180f, state.correctionDegrees(), 0.01f)
-        state.stopRecording()
-        // After REC ends the horizon stays where it was until UI orientation changes.
-        assertEquals(180f, state.correctionDegrees(), 0.01f)
-        state.alignToScreenOrientation()
-        assertEquals(0f, state.correctionDegrees(), 0.01f)
+    @Test fun nativeLandscapeStartsWithNoCorrection() {
+        val s = HorizonState()
+        s.updateRoll(90f)
+        assertTrue(s.isLandscapePose())
+        assertEquals(0f, s.correctionDegrees(), 0.01f)
     }
 
-    @Test fun noSnapAtArbitrary55DegreeThreshold() {
-        val state = HorizonState()
-        state.updateRoll(0f)
-        state.updateRoll(30f)
-        assertEquals(-30f, state.correctionDegrees(), 0.01f)
-        state.updateRoll(56f)
-        assertEquals(-56f, state.correctionDegrees(), 0.01f)
-        state.updateRoll(89f)
-        assertEquals(-89f, state.correctionDegrees(), 0.01f)
-        // Real screen rotation updates the target orientation.
-        state.alignToScreenOrientation()
-        assertEquals(1f, state.correctionDegrees(), 0.01f)
+    @Test fun portraitDoesNotTurnIntoAPortraitRecording() {
+        val s = HorizonState()
+        s.updateRoll(0f)
+        assertFalse(s.isLandscapePose())
+        assertEquals(90f, s.correctionDegrees(), 0.01f)
+        s.startRecording()
+        s.updateRoll(90f)
+        assertEquals(0f, s.correctionDegrees(), 0.01f)
     }
 
-    @Test fun captureDoesNotReorientMidTake() {
-        val state = HorizonState()
-        state.updateRoll(-90f)
-        state.alignToScreenOrientation()
-        state.startRecording()
-        state.updateRoll(30f)
-        state.alignToScreenOrientation()
-        assertEquals(-120f, state.correctionDegrees(), 0.01f)
-        state.updateRoll(90f)
-        assertEquals(-180f, state.correctionDegrees(), 0.01f)
+    @Test fun full360NeverReanchorsOrFlipsAt90() {
+        val s = HorizonState()
+        s.updateRoll(90f)
+        s.startRecording()
+        val angles = listOf(90f, 135f, 179f, -180f, -135f, -90f, -45f, 0f, 45f, 90f)
+        val expected = listOf(0f, -45f, -89f, -90f, -135f, 180f, 135f, 90f, 45f, 0f)
+        angles.zip(expected).forEach { (r, output) ->
+            s.updateRoll(r)
+            assertEquals("roll=$r", output, s.correctionDegrees(), 0.01f)
+        }
+        s.stopRecording()
+        assertEquals(0f, s.correctionDegrees(), 0.01f)
     }
 
-    @Test fun cropIsFixedForEveryRoll() {
-        val state = HorizonState()
-        state.updateRoll(90f)
-        state.startRecording()
-        val zoom = state.fixedCropScale()
-        state.updateRoll(-90f)
-        assertEquals(zoom, state.fixedCropScale(), 0.0001f)
-        assertTrue(zoom > 2f)
-        state.toggleEnabled()
-        assertEquals(1f, state.fixedCropScale(), 0.0001f)
+    @Test fun stabilizationMarginNeverPumps() {
+        val s = HorizonState()
+        val crop = s.fixedCropScale()
+        (0..36).forEach { i ->
+            s.updateRoll(i * 10f)
+            assertEquals(crop, s.fixedCropScale(), 0.0001f)
+        }
+        assertTrue(crop > 2f)
+        s.toggleEnabled()
+        assertEquals(1f, s.fixedCropScale(), 0.0001f)
+    }
+
+    @Test fun correctionWorksRegardlessOfHudOrientation() {
+        val s = HorizonState()
+        s.updateRoll(-90f)
+        assertEquals(180f, s.correctionDegrees(), 0.01f)
+        s.updateRoll(45f)
+        assertEquals(45f, s.correctionDegrees(), 0.01f)
+        s.startRecording()
+        s.updateRoll(0f)
+        assertEquals(90f, s.correctionDegrees(), 0.01f)
+        s.stopRecording()
+        assertEquals(90f, s.correctionDegrees(), 0.01f)
     }
 }

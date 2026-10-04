@@ -48,7 +48,7 @@ class GravityRollSensor(
         if (hypot(x, y) < 1.3f) return
         val angle = Math.toDegrees(atan2(x.toDouble(), -y.toDouble())).toFloat()
         filteredRoll = wrap(if (!hasRoll) angle
-            else filteredRoll + 0.29f * wrap(angle - filteredRoll))
+            else filteredRoll + 0.72f * wrap(angle - filteredRoll))
         hasRoll = true
         onRoll(filteredRoll)
     }

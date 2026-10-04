@@ -58,6 +58,7 @@ class MainActivity : AppCompatActivity() {
     private var requestedQuality = Quality.FHD
     private var requestedFps = 30
     private var cameraStarting = false
+    private var nativeEisActive = false
 
     private var showDiagnostics = false
     private var lastDiagnosticsAt = 0L
@@ -97,7 +98,7 @@ class MainActivity : AppCompatActivity() {
         gravitySensor = GravityRollSensor(this) { roll ->
             horizonState.updateRoll(roll)
             val time = android.os.SystemClock.uptimeMillis()
-            if (showDiagnostics && time - lastDiagnosticsAt > 150L) {
+            if (time - lastDiagnosticsAt > 240L) {
                 lastDiagnosticsAt = time
                 runOnUiThread { updateStatusText() }
             }
@@ -245,12 +246,24 @@ class MainActivity : AppCompatActivity() {
         startCamera()
     }
 
-    private fun bindCameraWithFallback(fps: Int) {
+    private fun bindCameraWithFallback(fps: Int, allowEis: Boolean? = null) {
         val provider = cameraProvider ?: return
         provider.unbindAll()
 
+        val halCanStabilize = runCatching {
+            val info = provider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
+            Preview.getPreviewCapabilities(info).isStabilizationSupported &&
+                Recorder.getVideoCapabilities(info).isStabilizationSupported
+        }.getOrDefault(false)
+        val eis = allowEis ?: (
+            halCanStabilize && requestedQuality == Quality.FHD && fps == 30
+        )
+
+        // Both camera outputs intentionally use a FIXED landscape target.
+        // Display/UI rotation must never change the video aspect or metadata.
         val preview = Preview.Builder()
-            .setTargetRotation(binding.previewView.display?.rotation ?: Surface.ROTATION_0)
+            .setTargetRotation(Surface.ROTATION_90)
+            .apply { if (eis) setPreviewStabilizationEnabled(true) }
             .build()
             .also {
                 it.setSurfaceProvider(ContextCompat.getMainExecutor(this), binding.previewView)
@@ -266,8 +279,9 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         val capture = VideoCapture.Builder(recorder)
-            .setTargetRotation(binding.previewView.display?.rotation ?: Surface.ROTATION_0)
+            .setTargetRotation(Surface.ROTATION_90)
             .setTargetFrameRate(Range(fps, fps))
+            .apply { if (eis) setVideoStabilizationEnabled(true) }
             .build()
 
         val effect = HorizonGlEffect.create(horizonState) { error ->
@@ -293,6 +307,7 @@ class MainActivity : AppCompatActivity() {
             previewUseCase = preview
             videoCapture = capture
             camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group)
+            nativeEisActive = eis
             cameraStarting = false
             updateStatusText()
             updateZoomAvailability()
@@ -300,7 +315,12 @@ class MainActivity : AppCompatActivity() {
         } catch (t: Throwable) {
             effect.close()
 
-            if (fps == 60) {
+            if (eis) {
+                // Some devices report HAL stabilization but cannot combine it
+                // with an external GPU effect. Rebind without HAL EIS.
+                nativeEisActive = false
+                bindCameraWithFallback(fps, false)
+            } else if (fps == 60) {
                 requestedFps = 30
                 binding.fpsButton.text = "30"
                 Toast.makeText(
@@ -367,8 +387,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun startRecording() {
         val capture = videoCapture ?: return
+        // The S26 horizontal-lock mode is designed to start in landscape.
+        // We do not silently switch output into a portrait recording.
+        if (horizonState.isEnabled() && !horizonState.isLandscapePose()) {
+            Toast.makeText(
+                this,
+                "H Lock: gire o aparelho para paisagem antes de gravar.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
         horizonState.startRecording()
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
 
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
             .format(System.currentTimeMillis())
@@ -415,7 +444,6 @@ class MainActivity : AppCompatActivity() {
                     recording?.close()
                     recording = null
                     horizonState.stopRecording()
-                    requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
                     setSettingsEnabled(true)
                     setRecordingUi(false)
 
@@ -482,14 +510,9 @@ class MainActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         updateControlsForOrientation()
 
-        if (recording == null) {
-            // Do not unbind the camera. Rebinding destroys all GPU outputs and
-            // visibly freezes the viewfinder every time the UI rotates.
-            val rotation = binding.previewView.display?.rotation ?: Surface.ROTATION_0
-            horizonState.alignToScreenOrientation()
-            previewUseCase?.targetRotation = rotation
-            videoCapture?.targetRotation = rotation
-        }
+        // Camera streams remain at Surface.ROTATION_90 while UI rotates.
+        // Rebinding or calling setTargetRotation here would change the
+        // output geometry and produce portrait MP4s / jumping previews.
     }
 
     private fun updateControlsForOrientation() {
@@ -534,10 +557,14 @@ class MainActivity : AppCompatActivity() {
     private fun updateStatusText() {
         if (showDiagnostics) {
             val gpu = horizonEffect?.processor?.diagnostics() ?: "P0 V0 F0"
-            binding.statusText.text = "v0.7 " + gpu + " / " +
+            binding.statusText.text = "v0.9 " + gpu +
+                (if (nativeEisActive) " EIS" else " GPU") + " / " +
                 String.format(Locale.US, "%.0f", horizonState.correctionDegrees()) + "°"
         } else {
-            binding.statusText.text = if (recording != null) "● REC" else "H LOCK"
+            binding.statusText.text = if (recording != null) "● REC"
+                else if (horizonState.isEnabled() && !horizonState.isLandscapePose())
+                    "GIRE ↻ 16:9"
+                else "H LOCK"
         }
     }
 

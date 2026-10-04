@@ -2,67 +2,66 @@ package com.miokzz.horizoncam
 
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.round
 import kotlin.math.sqrt
 
 /**
- * The output's orientation is selected automatically, then frozen for recording.
- * Phone roll remains gravity-relative throughout the take.
+ * 360-degree roll lock anchored to a LANDSCAPE video canvas.
+ *
+ * Orientation of the Android activity must never re-anchor this state. In
+ * particular, no auto-snapping to 0/90/180/270 during a full phone revolution.
  */
 class HorizonState {
     private val roll = AtomicReference(0f)
-    private val outputCardinal = AtomicReference(0f)
-    private val initialized = AtomicBoolean(false)
-    private val recording = AtomicBoolean(false)
     private val enabled = AtomicBoolean(true)
-    private val sign = AtomicReference(1f)
+    private val inverted = AtomicBoolean(false)
+    private val recording = AtomicBoolean(false)
 
     fun updateRoll(degrees: Float) {
-        if (!degrees.isFinite()) return
-        val next = wrap(degrees)
-        roll.set(next)
-        if (initialized.compareAndSet(false, true)) {
-            outputCardinal.set(nearestCardinal(next))
-        }
-        // A rotation of the device is NOT a new video orientation.
-        // The output orientation is changed only when the Android display
-        // actually changes its orientation (via alignToScreenOrientation).
-        // This avoids snapping the preview at arbitrary roll thresholds.
+        if (degrees.isFinite()) roll.set(wrap(degrees))
     }
 
-    fun alignToScreenOrientation() {
-        if (!recording.get()) outputCardinal.set(nearestCardinal(roll.get()))
+    fun currentRoll(): Float = roll.get()
+    fun isEnabled(): Boolean = enabled.get()
+    fun isRecording(): Boolean = recording.get()
+    fun toggleEnabled(): Boolean = (!enabled.get()).also { enabled.set(it) }
+
+    fun toggleDirection(): Float {
+        inverted.set(!inverted.get())
+        return if (inverted.get()) -1f else 1f
     }
 
     fun startRecording() {
-        alignToScreenOrientation()
         recording.set(true)
     }
 
     fun stopRecording() {
         recording.set(false)
-        // Keep the last stabilized output until the UI actually rotates.
-        // Aligning immediately here can flip the view by 180 degrees.
     }
 
-    fun isEnabled() = enabled.get()
-    fun toggleEnabled(): Boolean = (!enabled.get()).also { enabled.set(it) }
-    fun toggleDirection(): Float = (-sign.get()).also { sign.set(it) }
-    fun currentRoll() = roll.get()
+    fun isLandscapePose(): Boolean = abs(abs(roll.get()) - 90f) <= 40f
 
+    /**
+     * Device physical roll is sampled continuously and relative to gravity.
+     * The output coordinate system NEVER changes during portrait/UI rotations.
+     * 90 degrees is the landscape-zero device angle (normal landscape grip).
+     */
     fun correctionDegrees(): Float {
         if (!enabled.get()) return 0f
-        return wrap((outputCardinal.get() - roll.get()) * sign.get())
+        val correction = wrap(90f - roll.get())
+        return if (inverted.get()) wrap(-correction) else correction
     }
 
+    /**
+     * Same fixed overscan at every roll angle, so field of view never pumps.
+     * Not a substitute for an actual wider optical input like S26 Super Steady.
+     */
     fun fixedCropScale(aspectRatio: Float = 16f / 9f): Float {
         if (!enabled.get()) return 1f
         val a = max(aspectRatio, 1f / aspectRatio).coerceAtLeast(1f)
         return (sqrt(1f + a * a) * 1.015f).coerceIn(1f, 2.20f)
     }
-
-    private fun nearestCardinal(value: Float): Float = wrap(round(value / 90f) * 90f)
 
     private fun wrap(value: Float): Float {
         var v = value
