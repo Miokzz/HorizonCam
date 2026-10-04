@@ -22,7 +22,7 @@ import kotlin.math.min
 class HorizonPreviewTextureView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
-) : TextureView(context, attrs), Preview.SurfaceProvider, SurfaceTextureListener {
+) : TextureView(context, attrs), Preview.SurfaceProvider, TextureView.SurfaceTextureListener {
     private data class Active(val request: SurfaceRequest, val surface: Surface, val texture: SurfaceTexture)
     private val main = ContextCompat.getMainExecutor(context)
     private var waiting: SurfaceRequest? = null
