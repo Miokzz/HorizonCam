@@ -736,7 +736,7 @@ class MainActivity : AppCompatActivity() {
         mode.gravity = if (portrait) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                        else Gravity.END or Gravity.CENTER_VERTICAL
         mode.marginEnd = if (portrait) 0 else dp(124)
-        mode.bottomMargin = if (portrait) dp(155) else 0
+        mode.bottomMargin = if (portrait) dp(255) else 0
         binding.modeLabel.layoutParams = mode
 
         val status = binding.statusText.layoutParams as FrameLayout.LayoutParams
