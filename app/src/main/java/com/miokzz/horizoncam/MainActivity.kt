@@ -95,6 +95,7 @@ class MainActivity : AppCompatActivity() {
 
     private var showDiagnostics = false
     private var lastDiagnosticsAt = 0L
+    private var returningFromPhoto = false
     private var selectedZoom = 1f
     private var lastFocusTapX: Float? = null
     private var lastFocusTapY: Float? = null
@@ -210,6 +211,14 @@ class MainActivity : AppCompatActivity() {
         binding.quickControlsButton.setOnClickListener { showQuickControls() }
         binding.flashButton.setOnClickListener { toggleTorch() }
         binding.galleryThumbnail.setOnClickListener { openLastVideo() }
+        binding.modeLabel.setOnClickListener {
+            if (recording != null) {
+                toast("Finalize a gravação antes de mudar para Foto.")
+            } else {
+                returningFromPhoto = true
+                startActivity(Intent(this, PhotoActivity::class.java))
+            }
+        }
         binding.pauseButton.setOnClickListener { togglePause() }
 
         binding.qualityButton.setOnClickListener {
@@ -264,6 +273,10 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         enterImmersiveMode()
         gravitySensor.start()
+        if (returningFromPhoto) {
+            returningFromPhoto = false
+            restartCamera()
+        }
     }
 
     override fun onPause() {
@@ -723,7 +736,7 @@ class MainActivity : AppCompatActivity() {
         mode.gravity = if (portrait) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                        else Gravity.END or Gravity.CENTER_VERTICAL
         mode.marginEnd = if (portrait) 0 else dp(124)
-        mode.bottomMargin = if (portrait) dp(155) else 0
+        mode.bottomMargin = if (portrait) dp(255) else 0
         binding.modeLabel.layoutParams = mode
 
         val status = binding.statusText.layoutParams as FrameLayout.LayoutParams

@@ -1,10 +1,19 @@
 # HorizonCam · S24
 
-Camera Android nativa independente, dedicada exclusivamente à gravação de vídeo, inspirada no modo Vídeo/Horizontal Lock do Galaxy S26 Ultra. Destino inicial: **Galaxy S24 SM-S9210, Snapdragon 8 Gen 3, Android 16, TGY**.
+Camera Android nativa independente, com modo Vídeo e novo modo Foto, inspirada no modo Vídeo/Horizontal Lock do Galaxy S26 Ultra. Destino inicial: **Galaxy S24 SM-S9210, Snapdragon 8 Gen 3, Android 16, TGY**.
 
 **Status: release candidate para validação no aparelho.** Compilar e passar nos testes JVM não prova que o resultado visual está idêntico ao S26. Não há S24 conectado ao runner GitHub Actions.
 
 ## O que é implementado (de verdade)
+
+### Modo Foto (primeiro protótipo)
+
+- Toque em **FOTO ›** no modo Vídeo para abrir uma sessão CameraX de fotografia independente.
+- Prévia ao vivo, JPEG pelo ImageCapture em **Pictures/HorizonCam**, botão da galeria e alternância **0,6× / 1× / 3×**.
+- Usa ultrawide/teleobj. físicas quando o Android as expõe como câmeras selecionáveis; caso contrário tenta o zoom da câmera lógica. **3× não garante o sensor tele físico**, depende do HAL Samsung e dos testes no S24.
+- Sem IA, RAW, HDR computacional proprietário ou garantia de equivalência ao processamento da Samsung nesta versão.
+
+### Modo Vídeo (preservado)
 
 - CameraX Camera2 HAL e `VideoCapture<Recorder>` salvando MP4 no MediaStore, áudio opcional.
 - OpenGL ES + `CameraEffect(PREVIEW | VIDEO_CAPTURE)`: UMA única transformação geométrica canônica para o frame, aplicada a prévia e codificação.

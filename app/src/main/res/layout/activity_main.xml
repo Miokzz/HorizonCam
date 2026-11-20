@@ -238,11 +238,17 @@
 
     <TextView
         android:id="@+id/modeLabel"
+        android:background="@drawable/camera_pill"
+        android:clickable="true"
+        android:focusable="true"
+        android:contentDescription="Abrir modo Foto"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="12dp"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center_vertical|end"
         android:layout_marginEnd="130dp"
-        android:text="VÍDEO"
+        android:text="FOTO ›"
         android:textColor="@color/white"
         android:textSize="12sp"
         android:textStyle="bold" />
