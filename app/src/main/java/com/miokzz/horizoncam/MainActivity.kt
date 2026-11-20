@@ -95,6 +95,7 @@ class MainActivity : AppCompatActivity() {
 
     private var showDiagnostics = false
     private var lastDiagnosticsAt = 0L
+    private var returningFromPhoto = false
     private var selectedZoom = 1f
     private var lastFocusTapX: Float? = null
     private var lastFocusTapY: Float? = null
@@ -210,6 +211,14 @@ class MainActivity : AppCompatActivity() {
         binding.quickControlsButton.setOnClickListener { showQuickControls() }
         binding.flashButton.setOnClickListener { toggleTorch() }
         binding.galleryThumbnail.setOnClickListener { openLastVideo() }
+        binding.modeLabel.setOnClickListener {
+            if (recording != null) {
+                toast("Finalize a gravação antes de mudar para Foto.")
+            } else {
+                returningFromPhoto = true
+                startActivity(Intent(this, PhotoActivity::class.java))
+            }
+        }
         binding.pauseButton.setOnClickListener { togglePause() }
 
         binding.qualityButton.setOnClickListener {
@@ -264,6 +273,10 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         enterImmersiveMode()
         gravitySensor.start()
+        if (returningFromPhoto) {
+            returningFromPhoto = false
+            restartCamera()
+        }
     }
 
     override fun onPause() {

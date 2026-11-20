@@ -55,6 +55,46 @@ object PublicLensDiscovery {
         return WideLens(wideId, selector, candidate.second)
     }
 
+
+    data class TeleLens(val id: String, val selector: CameraSelector, val fov: Double)
+
+    /** Returns a truly selectable rear tele camera, not merely a physical-only ID. */
+    fun findAccessibleTelephoto(
+        context: Context,
+        provider: ProcessCameraProvider
+    ): TeleLens? {
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val mainId = Camera2CameraInfo.from(
+            provider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
+        ).cameraId
+        val mainFov = fov(manager, mainId) ?: return null
+
+        val candidate = provider.availableCameraInfos.mapNotNull { info ->
+            runCatching {
+                val c2 = Camera2CameraInfo.from(info)
+                val id = c2.cameraId
+                if (id == mainId) return@runCatching null
+                if (c2.getCameraCharacteristic(CameraCharacteristics.LENS_FACING) !=
+                    CameraCharacteristics.LENS_FACING_BACK) return@runCatching null
+                val degrees = fov(manager, id) ?: return@runCatching null
+                if (degrees >= mainFov * 0.75) return@runCatching null
+                id to degrees
+            }.getOrNull()
+        }.minByOrNull { it.second } ?: return null
+
+        val teleId = candidate.first
+        val selector = CameraSelector.Builder()
+            .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+            .addCameraFilter(CameraFilter { cameras ->
+                cameras.filter { info ->
+                    runCatching { Camera2CameraInfo.from(info).cameraId == teleId }
+                        .getOrDefault(false)
+                }
+            })
+            .build()
+        return TeleLens(teleId, selector, candidate.second)
+    }
+
     private fun fov(manager: CameraManager, id: String): Double? {
         val chars = manager.getCameraCharacteristics(id)
         val f = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
