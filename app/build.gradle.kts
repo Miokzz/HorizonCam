@@ -12,8 +12,8 @@ android {
         minSdk = 29
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 111
-        versionName = "2.0.0-rc2"
+        versionCode = 112
+        versionName = "2.0.0-ai2"
     }
 
     providers.environmentVariable("HORIZONCAM_CI_KEYSTORE").orNull?.let { path ->
@@ -52,6 +52,8 @@ dependencies {
 
     implementation("androidx.work:work-runtime:2.11.2")
     implementation("com.google.ai.edge.litert:litert:1.4.2")
+    implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
+    implementation("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
     val cameraX = "1.6.1"
     implementation("androidx.camera:camera-core:$cameraX")
     implementation("androidx.camera:camera-camera2:$cameraX")

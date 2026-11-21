@@ -13,6 +13,7 @@ data class FusionOptions(
     val superResolution: Boolean = false,
     val maxShiftPixels: Int = 16,
     val maxFrames: Int = 8,
+    val referenceIndex: Int? = null,
     val maxLongEdge: Int = 1280,
     val srMaxLongEdge: Int = 960,
 )

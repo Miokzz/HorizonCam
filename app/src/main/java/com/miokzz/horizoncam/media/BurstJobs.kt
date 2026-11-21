@@ -27,7 +27,7 @@ object BurstJobs {
     fun cancel() { cancelled.set(true) }
 
     /** Takes ownership of all private scratch files, including when admission fails. */
-    fun process(context: Context, frames: List<BurstCapture.FrameFile>, superResolution: Boolean) {
+    fun process(context: Context, frames: List<BurstCapture.FrameFile>, superResolution: Boolean, zoom: Float) {
         val app = context.applicationContext
         if (!active.compareAndSet(false, true)) { cleanup(frames); return }
         cancelled.set(false)
@@ -60,9 +60,20 @@ object BurstJobs {
                     val bitmap = Bitmap.createBitmap(output.pixels, output.width, output.height, Bitmap.Config.ARGB_8888)
                     try {
                         val notes = "$detail · $used/${frames.size} quadros · ${output.width}×${output.height}"
-                        val saved = AiPhotoFiles.save(app, Uri.fromFile(reference), bitmap, if (superResolution) "HC_MULTI" else "HC_NIGHT", notes)
+                        val exif = android.media.ExifInterface(reference)
+                        val iso = exif.getAttributeInt(android.media.ExifInterface.TAG_ISO_SPEED_RATINGS,100)
+                        val exposure = exif.getAttributeDouble(android.media.ExifInterface.TAG_EXPOSURE_TIME,0.0)
+                        val restored = try {
+                            com.miokzz.horizoncam.ai.NativeRestorer.restore(app,bitmap,zoom,iso,1,
+                                { p -> updates.postValue(State(true, "Revelando · ${p.completedTiles}/${p.totalTiles}")) },
+                                cancelled::get, exposure)
+                        } catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { Log.w("HorizonBurst","Fusão concluída sem etapa neural", e); null }
+                        val description = if (restored != null) "$notes | Horizon AI 2 | ${restored.model} | textura estimada" else "$notes | sem restauracao neural"
+                        val saved = try { AiPhotoFiles.save(app, Uri.fromFile(reference), restored?.bitmap ?: bitmap, if (superResolution) "HC_MULTI" else "HC_NIGHT", description) }
+                            finally { restored?.bitmap?.recycle() }
                         Log.i("HorizonBurst", "$notes · cobertura subpixel ${output.phaseCoverage} · ${output.alignments}")
-                        State(detail = notes, output = saved)
+                        State(detail = if (restored == null) "$notes · sem restauração neural" else notes, output = saved)
                     } finally { bitmap.recycle() }
                 }
             }.getOrElse { error ->

@@ -626,7 +626,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             if (mode == ShootingMode.PHOTO && photoSettings.format == PhotoFormat.JPEG) {
                 val trace = lenses?.diagnostics()
                 Log.i(TAG, "Disparo zoom=$displayZoom recorte=$extraCrop camera=${trace?.selectedCameraId} fisicaSolicitada=${trace?.selectedPhysicalCameraId} ativaHAL=${trace?.activePhysicalCameraId}")
-                AutoPhotos.capture(applicationContext, engine.capture, displayZoom, extraCrop, main) { error ->
+                val physical = trace?.selectedPhysicalCameraId ?: trace?.activePhysicalCameraId
+                AutoPhotos.capture(applicationContext, engine.capture, displayZoom, extraCrop, main,
+                    physicalId = { trace?.selectedPhysicalCameraId ?: lenses?.diagnostics()?.activePhysicalCameraId },
+                    boundSensor = physical) { error ->
                     takingPhoto = false
                     if (!isDestroyed) {
                         if (error != null) toast("Falha ao guardar a captura: ${error.localizedMessage}")
@@ -667,7 +670,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             { result ->
                 burst = null
                 takingPhoto = false
-                result.onSuccess { frames -> BurstJobs.process(applicationContext, frames, burstDetail) }
+                result.onSuccess { frames -> BurstJobs.process(applicationContext, frames, burstDetail, burstZoom) }
                     .onFailure { error ->
                         if (!isDestroyed && error !is java.util.concurrent.CancellationException) {
                             Log.w(TAG, "Sequência interrompida", error)

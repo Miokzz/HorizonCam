@@ -13,7 +13,7 @@ class without BasicSR's unrelated registry imports, loads the checkpoint using T
 
 ## Asset contract
 
-- File: `app/src/main/assets/ai/RealESRGAN-general-x4v3.tflite`, 4,884,868 bytes.
+- File: `app/src/androidTest/assets/baseline/x4v3.tflite`, 4,884,868 bytes.
 - SHA-256: `23c281028af47e692dc84fda1fdbc681c3c1038f6d0329c1a849b08c6ec6f11b`.
 - Input: float32 `[1,50,50,3]`, RGB, nominal 0–255. Output: float32 `[1,200,200,3]`, same order/range.
 - Normalize `/255` and de-normalize `*255` **inside** the graph. Do not repeat externally.
@@ -37,8 +37,8 @@ python3.12 -m venv ../restoration-venv
 ../restoration-venv/bin/python -m pip install torch==2.15.0+cpu --index-url https://download.pytorch.org/whl/cpu
 ../restoration-venv/bin/python -m pip install -r tools/model/requirements-verified.txt
 curl -L https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth -o ../realesr-general-x4v3.pth
-../restoration-venv/bin/python tools/model/convert_realesrgan.py --weights ../realesr-general-x4v3.pth --output app/src/main/assets/ai/RealESRGAN-general-x4v3.tflite --report ../conversion.json
-../restoration-venv/bin/python tools/model/validate_realesrgan.py --weights ../realesr-general-x4v3.pth --model app/src/main/assets/ai/RealESRGAN-general-x4v3.tflite --baseline-model app/src/main/assets/ai/ESRGAN.tflite --output ../restoration-validation
+../restoration-venv/bin/python tools/model/convert_realesrgan.py --weights ../realesr-general-x4v3.pth --output app/src/androidTest/assets/baseline/x4v3.tflite --report ../conversion.json
+../restoration-venv/bin/python tools/model/validate_realesrgan.py --weights ../realesr-general-x4v3.pth --model app/src/androidTest/assets/baseline/x4v3.tflite --baseline-model app/src/main/assets/ai/ESRGAN.tflite --output ../restoration-validation
 ../restoration-venv/bin/python tools/model/make_comparison.py ../restoration-validation
 ```
 

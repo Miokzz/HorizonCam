@@ -19,7 +19,6 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
-import com.miokzz.horizoncam.ai.CaptureMetrics
 import com.miokzz.horizoncam.ai.NativeRestorer
 import java.io.File
 import java.util.UUID
@@ -34,7 +33,7 @@ object AutoPhotos {
     internal fun post(state: State) = updates.postValue(state)
     internal fun directory(context: Context) = File(context.noBackupFilesDir, "pending-photos")
 
-    fun capture(context: Context, capture: ImageCapture, zoom: Float, crop: Float, executor: Executor, finished: (Throwable?) -> Unit) {
+    fun capture(context: Context, capture: ImageCapture, zoom: Float, crop: Float, executor: Executor, physicalId: () -> String?, boundSensor: String?, finished: (Throwable?) -> Unit) {
         val dir = directory(context)
         val name = "${System.currentTimeMillis()}_${zoom.toRawBits()}_${crop.toRawBits()}_${UUID.randomUUID()}"
         val part = File(dir, "$name.part")
@@ -47,6 +46,17 @@ object AutoPhotos {
                     val pending = File(dir, "$name.jpg")
                     val error = runCatching {
                         check(part.renameTo(pending)) { "Falha ao concluir o arquivo privado." }
+                        val window = capture.resolutionInfo?.cropRect
+                        val nativeEdge = window?.let { maxOf(it.width(), it.height()) / crop } ?: Float.MAX_VALUE
+                        val power = context.getSystemService(PowerManager::class.java)
+                        val cool = (power?.currentThermalStatus ?: 0) < PowerManager.THERMAL_STATUS_MODERATE
+                        if (zoom >= 8f && nativeEdge <= 1280f && cool && boundSensor != null && physicalId() == boundSensor) {
+                            extraFrames(capture, pending, executor, boundSensor, physicalId) {
+                                enqueue(context, pending)
+                                finished(null)
+                            }
+                            return
+                        }
                         enqueue(context, pending)
                     }.exceptionOrNull()
                     finished(error)
@@ -59,6 +69,38 @@ object AutoPhotos {
         } catch (e: Exception) { part.delete(); finished(e) }
     }
 
+    // The reference is committed first. Extras may be dropped when time, sensor or lifecycle changes.
+    private val acquiring = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private fun extraFrames(capture: ImageCapture, reference: File, executor: Executor, sensor: String,
+                            activeSensor: () -> String?, ready: () -> Unit) {
+        acquiring.add(reference.name)
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        var complete = false
+        val finish = Runnable {
+            if (!complete) { complete = true; acquiring.remove(reference.name); ready() }
+        }
+        handler.postDelayed(finish, 1250)
+        fun next(index: Int) {
+            if (complete) return
+            if (index > 2 || activeSensor() != sensor) { handler.removeCallbacks(finish); finish.run(); return }
+            val file = File(reference.parentFile, "${reference.nameWithoutExtension}.extra$index")
+            val partial = File(file.parentFile, "${file.name}.part")
+            try {
+                capture.takePicture(ImageCapture.OutputFileOptions.Builder(partial).build(), executor, object : ImageCapture.OnImageSavedCallback {
+                    override fun onImageSaved(result: ImageCapture.OutputFileResults) {
+                        if (complete || activeSensor() != sensor || !partial.renameTo(file)) {
+                            partial.delete(); handler.removeCallbacks(finish); finish.run()
+                        } else next(index + 1)
+                    }
+                    override fun onError(exception: ImageCaptureException) {
+                        partial.delete(); handler.removeCallbacks(finish); finish.run()
+                    }
+                })
+            } catch (e: Exception) { partial.delete(); handler.removeCallbacks(finish); finish.run() }
+        }
+        next(1)
+    }
+
     fun recover(context: Context) {
         val dir = directory(context)
         val prefs = context.getSharedPreferences("horizoncam", Context.MODE_PRIVATE)
@@ -69,7 +111,7 @@ object AutoPhotos {
         val files = dir.listFiles().orEmpty()
         files.filter { it.extension == "part" && System.currentTimeMillis() - it.lastModified() > 86_400_000 }
             .forEach { it.delete() }
-        files.filter { it.extension == "jpg" }.sortedBy { it.name }.forEach { enqueue(context, it) }
+        files.filter { it.extension == "jpg" && it.name !in acquiring }.sortedBy { it.name }.forEach { enqueue(context, it) }
     }
 
     private fun enqueue(context: Context, file: File) {
@@ -122,12 +164,13 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                 target
             }
             val neural = encoded.isFile && runCatching { ExifInterface(encoded)
-                .getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION)?.contains("Real-ESRGAN") == true }.getOrDefault(false)
+                .getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION)?.contains("Horizon AI") == true }.getOrDefault(false)
             val message = if (neural) "Foto restaurada" else "JPEG da câmera salvo · restauração indisponível"
             check(app.getSharedPreferences("horizoncam", Context.MODE_PRIVATE).edit()
                 .putString("autoFinalUri", saved.toString()).putString("autoFinalMessage", message)
                 .putFloat("autoFinalZoom", zoom).commit())
-            if (file.delete()) { marker.delete(); encoded.delete() }
+            if (file.delete()) { marker.delete(); encoded.delete(); extras(file).forEach { it.delete() } }
+            Log.i("HorizonAuto", "published zoom=$zoom neural=$neural shutterToGalleryMs=${System.currentTimeMillis()-name.substringBefore('_').toLong()}")
             AutoPhotos.post(AutoPhotos.State(false, message, saved, zoom))
             Result.success()
         } catch (e: CancellationException) { Result.retry() }
@@ -147,10 +190,43 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         finally { framed.recycle() }
     }
 
+    private fun extras(file: File) = (1..2).map { File(file.parentFile, "${file.nameWithoutExtension}.extra$it") }
+
+    private fun fuseIfAvailable(file: File, base: Bitmap, crop: Float): Pair<Bitmap, Int> {
+        val additional = extras(file).filter { it.isFile }
+        if (additional.isEmpty() || maxOf(base.width, base.height) > 1280 || minOf(base.width,base.height)<16) return base to 1
+        fun frame(bitmap: Bitmap, input: File): com.miokzz.horizoncam.photo.fusion.FusionFrame {
+            val pixels = IntArray(bitmap.width*bitmap.height)
+            bitmap.getPixels(pixels,0,bitmap.width,0,0,bitmap.width,bitmap.height)
+            val meta = ExifInterface(input)
+            val exposure = meta.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME,0.0)
+            val iso = meta.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS,0)
+            return com.miokzz.horizoncam.photo.fusion.FusionFrame(pixels,bitmap.width,bitmap.height,
+                (1e9*exposure).toLong().takeIf { it>0 },iso.takeIf { it>0 })
+        }
+        val frames = mutableListOf(frame(base,file))
+        for (input in additional) {
+            val bitmap = decodeFramed(input,crop)
+            try { if (bitmap.width==base.width && bitmap.height==base.height) frames.add(frame(bitmap,input)) }
+            finally { bitmap.recycle() }
+        }
+        val result = com.miokzz.horizoncam.photo.fusion.BurstFusion.fuse(frames,
+            com.miokzz.horizoncam.photo.fusion.FusionOptions(referenceIndex = 0),
+            onProgress = { p -> AutoPhotos.post(AutoPhotos.State(true,"Alinhando · ${p.completedFrames}/${p.totalFrames}")) },
+            isCancelled = { isStopped })
+        if (result.acceptedFrameCount<2) return base to 1
+        return Bitmap.createBitmap(result.pixels,result.width,result.height,Bitmap.Config.ARGB_8888) to result.acceptedFrameCount
+    }
+
     private fun restore(file: File, target: File, zoom: Float, crop: Float) {
         val exif = ExifInterface(file)
         val iso = exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 100)
-        val source = decodeFramed(file, crop)
+        val base = decodeFramed(file, crop)
+        val pair = try { fuseIfAvailable(file,base,crop) }
+        catch (e: CancellationException) { base.recycle(); throw e }
+        catch (e: Exception) { Log.w("HorizonAuto","Fusão opcional dispensada",e); base to 1 }
+        val (source, usedFrames) = pair
+        if (source !== base) base.recycle()
         try {
             var lastPercent = -1
             val power = app.getSystemService(PowerManager::class.java)
@@ -164,15 +240,12 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                     tooHot = (power?.currentThermalStatus ?: 0) >= PowerManager.THERMAL_STATUS_SEVERE
                     if (tooHot) AutoPhotos.post(AutoPhotos.State(true, "Restauração aguardando resfriamento"))
                 }
-            }, { isStopped || tooHot })
+            }, { isStopped || tooHot }, exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0))
             try {
                 if (isStopped) throw CancellationException()
                 AiPhotoFiles.encode(app, Uri.fromFile(file), result.bitmap, target,
-                    "Horizon AI · Real-ESRGAN general-x4v3 · textura estimada · zoom ${zoom}x")
-                val before = CaptureMetrics.summary(source)
-                val after = CaptureMetrics.summary(result.bitmap)
-                Log.i("HorizonAuto", "scene zoom=$zoom residual=$crop iso=$iso before=$before after=$after pssKb=${android.os.Debug.getPss()}")
-                Log.i("HorizonAuto", "Real-ESRGAN ${source.width}x${source.height} grid=${result.modelWidth}x${result.modelHeight} ms=${result.elapsedMs}")
+                    "Horizon AI 2 | ${result.model} | textura estimada | zoom ${zoom}x | frames=$usedFrames")
+                Log.i("HorizonAuto", "AI2 source=${source.width}x${source.height} output=${result.bitmap.width}x${result.bitmap.height} zoom=$zoom crop=$crop grid=${result.modelWidth}x${result.modelHeight} model=${result.model} backend=${result.backend} tiles=${result.tiles} frames=$usedFrames neuralMs=${result.inferenceMs} restoreMs=${result.elapsedMs} pssKiB=${android.os.Debug.getPss()} scene=${result.scene}")
             } finally { result.bitmap.recycle() }
         } finally { source.recycle() }
     }

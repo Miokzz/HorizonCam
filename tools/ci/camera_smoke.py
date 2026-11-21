@@ -237,13 +237,13 @@ class Smoke:
                     with Image.open(path) as candidate:
                         candidate.load()
                         description = candidate.getexif().get(270, "")
-                        if "Real-ESRGAN" not in str(description) or "textura estimada" not in str(description):
+                        if "Horizon AI 2" not in str(description) or "textura estimada" not in str(description):
                             return None
                 except (OSError, ValueError):
                     return None
                 return remote
             remote = self.wait(signed_final,
-                "Normal Foto did not publish its single signed Real-ESRGAN final JPEG within6min", seconds=360)
+                "Normal Foto did not publish its single attributed neural final JPEG within6min", seconds=360)
         else:
             remote = self.new_media(True, before)
         self.wait_node("recordButton", "Tirar foto")
@@ -262,8 +262,8 @@ class Smoke:
                 # The worker logs the upright native source dimensions, independently of saved EXIF.
                 logs = self.adb("logcat", "-d", "-s", "HorizonAuto:I", "*:S")
                 (self.output / (label + "-auto-worker.txt")).write_text(logs, encoding="utf-8")
-                dimensions = re.findall(r"Real-ESRGAN (\d+)x(\d+) grid=", logs)
-                require(bool(dimensions), "No actual Real-ESRGAN worker completion evidence")
+                dimensions = re.findall(r"AI2 source=\d+x\d+ output=(\d+)x(\d+)", logs)
+                require(bool(dimensions), "No actual neural worker completion evidence")
                 require(tuple(map(int, dimensions[-1])) == displayed.size,
                         "Normal Foto changed the native source framing/dimensions")
                 require(len(self.media_paths(True) - before) == 1, "Normal Foto left extra public JPEGs")

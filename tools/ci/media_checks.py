@@ -51,7 +51,7 @@ def validate_ai_output(width, height, patch_edge, description):
             f"AI output {width}x{height} is not 4x native {patch_edge}x{patch_edge} patch")
     require(isinstance(description, str) and "pretrained ESRGAN" in description and
             "estimated details" in description, "AI JPEG is missing its model-generated-detail disclosure")
-    dimensions = re.search(r"input/output\s+(\d+)[×x](\d+)\s*→\s*(\d+)[×x](\d+)", description)
+    dimensions = re.search(r"input/output\s+(\d+)[×x](\d+)\s*(?:→|->)\s*(\d+)[×x](\d+)", description)
     require(dimensions is not None, "AI JPEG must describe actual input/output dimensions")
     require(tuple(map(int, dimensions.groups())) == (patch_edge, patch_edge, width, height),
             "AI JPEG description disagrees with actual patch/output dimensions")

@@ -1,0 +1,698 @@
+{
+  "runtime": "TensorFlow2.20 CPU XNNPACK2threads;desktop,NOT handset/GPU",
+  "model_hashes": {
+    "quicksr": "523609151d17484a0bfef7d60a2e9ddd762604138bf3067b9248aa436f831f3f",
+    "x4v3": "23c281028af47e692dc84fda1fdbc681c3c1038f6d0329c1a849b08c6ec6f11b"
+  },
+  "perceptual": "lpips0.1.4 AlexNet ImageNet pretrained, RGB[-1,1], lower better",
+  "results": [
+    {
+      "fixture": "vegetation_grass",
+      "task": "matched4xSR",
+      "degradation": "clean",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 20.16500626501533,
+          "ssim": 0.3443675662907733,
+          "lpips_alex": 0.6445960402488708,
+          "mae": 19.835205078125
+        },
+        "quicksr": {
+          "psnr_db": 20.397016885896985,
+          "ssim": 0.4317731084569008,
+          "lpips_alex": 0.6142477989196777,
+          "mae": 19.22309932002315
+        },
+        "x4v3": {
+          "psnr_db": 19.039537327206993,
+          "ssim": 0.18091446368084674,
+          "lpips_alex": 0.6087075471878052,
+          "mae": 22.815257884837962
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 8.541600000171456,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 130.6877999995777,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "vegetation_grass",
+      "task": "matched4xSR",
+      "degradation": "mild",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 19.60189881204077,
+          "ssim": 0.24861791770359357,
+          "lpips_alex": 0.7256421446800232,
+          "mae": 21.25779441550926
+        },
+        "quicksr": {
+          "psnr_db": 19.599017143958825,
+          "ssim": 0.2812122906836749,
+          "lpips_alex": 0.6980249881744385,
+          "mae": 21.233054832175927
+        },
+        "x4v3": {
+          "psnr_db": 18.83592099156963,
+          "ssim": 0.14084628575267633,
+          "lpips_alex": 0.6429051160812378,
+          "mae": 23.361174406828702
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 8.505300000251736,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 132.32419999985723,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "vegetation_grass",
+      "task": "matched4xSR",
+      "degradation": "strong",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 18.84138910860689,
+          "ssim": 0.11789089704763638,
+          "lpips_alex": 1.0015673637390137,
+          "mae": 23.33762839988426
+        },
+        "quicksr": {
+          "psnr_db": 18.8367154382423,
+          "ssim": 0.12002690815304144,
+          "lpips_alex": 0.9391593337059021,
+          "mae": 23.34837962962963
+        },
+        "x4v3": {
+          "psnr_db": 18.453990268643274,
+          "ssim": 0.08047742838369293,
+          "lpips_alex": 1.0038104057312012,
+          "mae": 24.420166015625
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 7.9142000004139845,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 125.72120000004361,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "vegetation_grass",
+      "task": "matchedNative1xRestoration",
+      "degradation": "mild",
+      "input": [
+        96,
+        96
+      ],
+      "truth": [
+        96,
+        96
+      ],
+      "metrics": {
+        "degraded": {
+          "psnr_db": 28.77653756314804,
+          "ssim": 0.9011442834529126,
+          "lpips_alex": 0.0341484509408474,
+          "mae": 7.36302806712963
+        },
+        "quicksr": {
+          "psnr_db": 28.4442955506737,
+          "ssim": 0.8938346702458696,
+          "lpips_alex": 0.036026984453201294,
+          "mae": 7.647497106481482
+        },
+        "x4v3": {
+          "psnr_db": 25.30475177221955,
+          "ssim": 0.7385109882882782,
+          "lpips_alex": 0.25375449657440186,
+          "mae": 11.103117766203704
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 12.837999999646854,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 631.7103999999745,
+          "calls": 16
+        }
+      }
+    },
+    {
+      "fixture": "architecture_brick",
+      "task": "matched4xSR",
+      "degradation": "clean",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 22.50765774742373,
+          "ssim": 0.4906385125152161,
+          "lpips_alex": 0.5658212304115295,
+          "mae": 13.562364366319445
+        },
+        "quicksr": {
+          "psnr_db": 23.348070800068843,
+          "ssim": 0.5871438343509198,
+          "lpips_alex": 0.4209475517272949,
+          "mae": 12.48049587673611
+        },
+        "x4v3": {
+          "psnr_db": 19.822421530357587,
+          "ssim": 0.5736700782674292,
+          "lpips_alex": 0.39725345373153687,
+          "mae": 20.952763310185187
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 10.768699999971432,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 173.3239000004687,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "architecture_brick",
+      "task": "matched4xSR",
+      "degradation": "mild",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 22.018989804097888,
+          "ssim": 0.43577346070696327,
+          "lpips_alex": 0.6531046032905579,
+          "mae": 14.474256727430555
+        },
+        "quicksr": {
+          "psnr_db": 22.193237699762133,
+          "ssim": 0.4608330960364982,
+          "lpips_alex": 0.5495181679725647,
+          "mae": 14.489890769675926
+        },
+        "x4v3": {
+          "psnr_db": 19.293008238561963,
+          "ssim": 0.459387449880585,
+          "lpips_alex": 0.47516554594039917,
+          "mae": 22.92066333912037
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 11.14289999986795,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 189.81590000021242,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "architecture_brick",
+      "task": "matched4xSR",
+      "degradation": "strong",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 20.794501659966606,
+          "ssim": 0.3397103025745134,
+          "lpips_alex": 0.8539362549781799,
+          "mae": 17.26249638310185
+        },
+        "quicksr": {
+          "psnr_db": 20.796272339984966,
+          "ssim": 0.32945341701138,
+          "lpips_alex": 0.7604882121086121,
+          "mae": 17.226173683449073
+        },
+        "x4v3": {
+          "psnr_db": 20.41184384739158,
+          "ssim": 0.2666787128340508,
+          "lpips_alex": 0.6706621646881104,
+          "mae": 18.86890552662037
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 8.79239999994752,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 179.10260000007838,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "architecture_brick",
+      "task": "matchedNative1xRestoration",
+      "degradation": "mild",
+      "input": [
+        96,
+        96
+      ],
+      "truth": [
+        96,
+        96
+      ],
+      "metrics": {
+        "degraded": {
+          "psnr_db": 33.738562085246954,
+          "ssim": 0.9632000454359155,
+          "lpips_alex": 0.009201649576425552,
+          "mae": 4.059678819444445
+        },
+        "quicksr": {
+          "psnr_db": 33.53523951912031,
+          "ssim": 0.961604608156795,
+          "lpips_alex": 0.007611559238284826,
+          "mae": 4.135091145833333
+        },
+        "x4v3": {
+          "psnr_db": 28.172035843091354,
+          "ssim": 0.9275510451321526,
+          "lpips_alex": 0.03581106662750244,
+          "mae": 6.266818576388889
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 13.50189999993745,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 704.521399999976,
+          "calls": 16
+        }
+      }
+    },
+    {
+      "fixture": "fur_cat",
+      "task": "matched4xSR",
+      "degradation": "clean",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 28.32112472113589,
+          "ssim": 0.7868058103546413,
+          "lpips_alex": 0.354914128780365,
+          "mae": 6.368471498842593
+        },
+        "quicksr": {
+          "psnr_db": 29.603314291439155,
+          "ssim": 0.8313633526033732,
+          "lpips_alex": 0.2590870261192322,
+          "mae": 5.536675347222222
+        },
+        "x4v3": {
+          "psnr_db": 26.68579547860254,
+          "ssim": 0.7725591302628617,
+          "lpips_alex": 0.2897876501083374,
+          "mae": 8.121410228587964
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 10.295600000063132,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 194.45180000002438,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "fur_cat",
+      "task": "matched4xSR",
+      "degradation": "mild",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 26.48772910000663,
+          "ssim": 0.6942934555022937,
+          "lpips_alex": 0.5113147497177124,
+          "mae": 8.48097511574074
+        },
+        "quicksr": {
+          "psnr_db": 26.54110999215456,
+          "ssim": 0.6950348618479333,
+          "lpips_alex": 0.41665157675743103,
+          "mae": 8.568693938078704
+        },
+        "x4v3": {
+          "psnr_db": 26.15179356712483,
+          "ssim": 0.7081337005401602,
+          "lpips_alex": 0.3047722578048706,
+          "mae": 8.887496383101851
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 10.908300000664894,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 175.39809999925637,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "fur_cat",
+      "task": "matched4xSR",
+      "degradation": "strong",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 23.88266477606052,
+          "ssim": 0.5548704343008164,
+          "lpips_alex": 0.6975153684616089,
+          "mae": 11.82520435474537
+        },
+        "quicksr": {
+          "psnr_db": 23.87000798331912,
+          "ssim": 0.5504123734979797,
+          "lpips_alex": 0.6319056749343872,
+          "mae": 11.852602358217593
+        },
+        "x4v3": {
+          "psnr_db": 24.124615593614166,
+          "ssim": 0.5733895685454656,
+          "lpips_alex": 0.4704020321369171,
+          "mae": 11.664388020833334
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 11.211899999580055,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 185.69509999997535,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "fur_cat",
+      "task": "matchedNative1xRestoration",
+      "degradation": "mild",
+      "input": [
+        96,
+        96
+      ],
+      "truth": [
+        96,
+        96
+      ],
+      "metrics": {
+        "degraded": {
+          "psnr_db": 33.92318698623129,
+          "ssim": 0.9534886483763126,
+          "lpips_alex": 0.013232134282588959,
+          "mae": 3.809497974537037
+        },
+        "quicksr": {
+          "psnr_db": 33.685981087853996,
+          "ssim": 0.9513527653726737,
+          "lpips_alex": 0.015297156758606434,
+          "mae": 3.8857421875
+        },
+        "x4v3": {
+          "psnr_db": 31.85390536723037,
+          "ssim": 0.9435867481396022,
+          "lpips_alex": 0.04693099856376648,
+          "mae": 4.555700231481482
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 15.261100000316219,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 721.823900000345,
+          "calls": 16
+        }
+      }
+    },
+    {
+      "fixture": "face_astronaut",
+      "task": "matched4xSR",
+      "degradation": "clean",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 24.368695608683673,
+          "ssim": 0.79382123675004,
+          "lpips_alex": 0.3568183183670044,
+          "mae": 8.93798828125
+        },
+        "quicksr": {
+          "psnr_db": 26.00513497080867,
+          "ssim": 0.857771484100449,
+          "lpips_alex": 0.14986787736415863,
+          "mae": 7.192482277199074
+        },
+        "x4v3": {
+          "psnr_db": 22.19940168224138,
+          "ssim": 0.7486860820052402,
+          "lpips_alex": 0.1568308025598526,
+          "mae": 11.942211009837964
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 10.843899999599671,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 182.75749999975233,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "face_astronaut",
+      "task": "matched4xSR",
+      "degradation": "mild",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 22.964521356663226,
+          "ssim": 0.6841735650307412,
+          "lpips_alex": 0.4869281053543091,
+          "mae": 11.559461805555555
+        },
+        "quicksr": {
+          "psnr_db": 23.320537785623827,
+          "ssim": 0.6812484112207974,
+          "lpips_alex": 0.3418380618095398,
+          "mae": 11.26099537037037
+        },
+        "x4v3": {
+          "psnr_db": 21.469130063194385,
+          "ssim": 0.684653494043736,
+          "lpips_alex": 0.19317124783992767,
+          "mae": 13.1240234375
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 11.165999999320775,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 182.26160000085656,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "face_astronaut",
+      "task": "matched4xSR",
+      "degradation": "strong",
+      "input": [
+        48,
+        48
+      ],
+      "truth": [
+        192,
+        192
+      ],
+      "metrics": {
+        "bicubic": {
+          "psnr_db": 20.600849967672854,
+          "ssim": 0.5564904230053792,
+          "lpips_alex": 0.6198701858520508,
+          "mae": 15.986246744791666
+        },
+        "quicksr": {
+          "psnr_db": 20.601623877367544,
+          "ssim": 0.5488497515961925,
+          "lpips_alex": 0.5525530576705933,
+          "mae": 15.974509910300926
+        },
+        "x4v3": {
+          "psnr_db": 20.38669245564133,
+          "ssim": 0.5992639248067725,
+          "lpips_alex": 0.29466378688812256,
+          "mae": 14.813892505787036
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 11.071300000367046,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 179.54829999962385,
+          "calls": 4
+        }
+      }
+    },
+    {
+      "fixture": "face_astronaut",
+      "task": "matchedNative1xRestoration",
+      "degradation": "mild",
+      "input": [
+        96,
+        96
+      ],
+      "truth": [
+        96,
+        96
+      ],
+      "metrics": {
+        "degraded": {
+          "psnr_db": 31.664009990559453,
+          "ssim": 0.9488472014955486,
+          "lpips_alex": 0.007701191585510969,
+          "mae": 4.562138310185185
+        },
+        "quicksr": {
+          "psnr_db": 31.333894515273037,
+          "ssim": 0.9472058094104341,
+          "lpips_alex": 0.008355357684195042,
+          "mae": 4.694263599537037
+        },
+        "x4v3": {
+          "psnr_db": 28.75819531969128,
+          "ssim": 0.9478585415248034,
+          "lpips_alex": 0.015592326410114765,
+          "mae": 5.918113425925926
+        }
+      },
+      "timings": {
+        "quicksr": {
+          "elapsed_ms": 15.253000000484462,
+          "calls": 1
+        },
+        "x4v3": {
+          "elapsed_ms": 727.3600000007718,
+          "calls": 16
+        }
+      }
+    }
+  ]
+}

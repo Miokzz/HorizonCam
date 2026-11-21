@@ -62,7 +62,8 @@ object BurstFusion {
                 checkCancel()
                 FusionRegistration.prepare(frame)
             }
-        val referenceIndex = FusionRegistration.reference(prepared)
+        val referenceIndex = options.referenceIndex?.also { require(it in prepared.indices) }
+            ?: FusionRegistration.reference(prepared)
         val reference = prepared[referenceIndex]
         val registered = mutableListOf<Registered>()
         val alignments = ArrayList<FrameAlignment>()

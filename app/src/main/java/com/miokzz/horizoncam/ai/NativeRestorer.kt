@@ -2,159 +2,168 @@ package com.miokzz.horizoncam.ai
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
 import android.os.Looper
-import org.tensorflow.lite.DataType
-import org.tensorflow.lite.Interpreter
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.security.MessageDigest
 import java.util.concurrent.CancellationException
-import kotlin.math.roundToInt
+import kotlin.math.abs
+import kotlin.math.max
 
-/**
- * Blind restoration with a learned general-photo prior. Composite straight into the original
- * pixel grid: keep native framing and never allocate a 4× full-scene intermediate bitmap.
- */
 object NativeRestorer {
     const val MAX_PIXELS = 12_600_000
-    data class Result(val bitmap: Bitmap, val modelWidth: Int, val modelHeight: Int, val elapsedMs: Long)
+    data class Result(val bitmap: Bitmap, val modelWidth: Int, val modelHeight: Int, val elapsedMs: Long,
+        val model: String, val backend: String, val tiles: Int, val inferenceMs: Long, val scene: SceneEvidence)
 
-    fun restore(context: Context, original: Bitmap, zoom: Float, iso: Int, upscale: Int, onProgress: (AiProgress) -> Unit, cancelled: () -> Boolean): Result {
+    fun restore(context: Context, original: Bitmap, zoom: Float, iso: Int, upscale: Int,
+                onProgress: (AiProgress) -> Unit, cancelled: () -> Boolean, exposureSeconds: Double = 0.0): Result {
         check(Looper.myLooper() != Looper.getMainLooper())
-        require(upscale in setOf(1, 2, 4))
+        require(upscale == 1 || upscale == 2 || upscale == 4)
         val width = original.width * upscale
         val height = original.height * upscale
-        val count = width.toLong() * height
-        require(count in 1..MAX_PIXELS.toLong()) { "Para uma foto acima de 12,6 MP, selecione um detalhe." }
-        val estimate = count * (if (upscale > 1) 10 else 6) + 62L * 1024 * 1024
-        val runtime = Runtime.getRuntime()
-        require(estimate < runtime.maxMemory() - runtime.totalMemory() + runtime.freeMemory()) {
-            "Memória insuficiente para restaurar a cena inteira. Selecione um detalhe."
-        }
-        val strength = RestorationStrength.forCapture(zoom, iso)
-        val started = System.nanoTime()
-        val scale = maxOf(upscale, samplingFactor(maxOf(width, height)))
-        val guideW = (width + scale - 1) / scale
-        val guideH = (height + scale - 1) / scale
-        val guide = if (guideW == original.width && guideH == original.height) original else Bitmap.createScaledBitmap(original, guideW, guideH, true)
-        var destination: Bitmap? = null
-        var baseline: Bitmap? = null
-        fun checkCancelled() { if (cancelled() || Thread.currentThread().isInterrupted) throw CancellationException() }
+        require(width.toLong() * height <= MAX_PIXELS)
+        val start = System.nanoTime()
+        val scene = analyze(original, iso, exposureSeconds)
+        val plan = ReconstructionPlan.choose(original.width,original.height,width,height,zoom,scene)
+        val guide = if (plan.guideW == original.width && plan.guideH == original.height) original
+            else Bitmap.createScaledBitmap(original,plan.guideW,plan.guideH,true)
+        // Whole scene uses the same normalized coordinates at every scale. Each tile owns the
+        // valid interior of its overlapping input support (overlap-save, no squared weight map).
+        val neural = Bitmap.createBitmap(plan.guideW * plan.neuralScale,plan.guideH * plan.neuralScale,Bitmap.Config.ARGB_8888)
+        val stripes = (height + BAND - 1)/BAND
+        val total = plan.tileCount + stripes
+        fun checkActive() { if (cancelled() || Thread.currentThread().isInterrupted) throw CancellationException() }
         try {
-            val observed = if (upscale == 1) original else Bitmap.createScaledBitmap(original, width, height, true)
-            baseline = observed
-            val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            destination = output
-            val accumulated = ShortArray(count.toInt())
-            val tiles = AiGeometry.tiles(guideW, guideH)
-            val model = modelBuffer(context)
-            val options = Interpreter.Options().setNumThreads(2)
-            Interpreter(model, options).use { interpreter ->
-                val inputTensor = interpreter.getInputTensor(0)
-                val outputTensor = interpreter.getOutputTensor(0)
-                require(inputTensor.shape().contentEquals(intArrayOf(1, 50, 50, 3)) && inputTensor.dataType() == DataType.FLOAT32)
-                require(outputTensor.shape().contentEquals(intArrayOf(1, 200, 200, 3)) && outputTensor.dataType() == DataType.FLOAT32)
-                val input = ByteBuffer.allocateDirect(inputTensor.numBytes()).order(ByteOrder.nativeOrder())
-                val prediction = ByteBuffer.allocateDirect(outputTensor.numBytes()).order(ByteOrder.nativeOrder())
-                val line = IntArray(50)
-                val maxArea = AiGeometry.CORE * scale * AiGeometry.CORE * scale
-                val previous = IntArray(maxArea)
-                val source = IntArray(maxArea)
-                onProgress(AiProgress(0, tiles.size))
-                for ((index, tile) in tiles.withIndex()) {
-                    checkCancelled()
-                    input.rewind()
-                    val mirroredX = IntArray(50) { AiGeometry.mirror(tile.x - AiGeometry.HALO + it, guideW) }
-                    val left = mirroredX.min()
-                    val span = mirroredX.max() - left + 1
-                    for (y in 0 until 50) {
-                        val sy = AiGeometry.mirror(tile.y - AiGeometry.HALO + y, guideH)
-                        guide.getPixels(line, 0, span, left, sy, span, 1)
-                        for (sx in mirroredX) {
-                            val pixel = line[sx - left]
-                            input.putFloat((pixel shr 16 and 255).toFloat())
-                            input.putFloat((pixel shr 8 and 255).toFloat())
-                            input.putFloat((pixel and 255).toFloat())
+            onProgress(AiProgress(0,total))
+            var backend = ""
+            val inferenceStart = System.nanoTime()
+            InferenceRuntime.run(context,plan.prior) { engine ->
+                backend = engine.backend
+                val inputValues = FloatArray(128*128*3)
+                val outputValues = FloatArray(512*512*3)
+                val row = IntArray(128)
+                val predicted = IntArray(plan.prior.core * plan.prior.core * plan.neuralScale * plan.neuralScale)
+                var finished = 0
+                for (y in 0 until guide.height step plan.prior.core) for (x in 0 until guide.width step plan.prior.core) {
+                    checkActive()
+                    val ix = IntArray(128) { AiGeometry.mirror(x - plan.prior.halo + it, guide.width) }
+                    val minX=ix.min()
+                    val span=ix.max()-minX+1
+                    for (j in 0 until 128) {
+                        val sourceY=AiGeometry.mirror(y-plan.prior.halo+j,guide.height)
+                        guide.getPixels(row,0,span,minX,sourceY,span,1)
+                        var offset = j*128*3
+                        for (i in 0 until 128) {
+                            val c = row[ix[i]-minX]
+                            inputValues[offset++] = (c ushr 16 and 255).toFloat()
+                            inputValues[offset++] = (c ushr 8 and 255).toFloat()
+                            inputValues[offset++] = (c and 255).toFloat()
                         }
                     }
-                    input.rewind()
-                    prediction.rewind()
-                    interpreter.run(input, prediction)
-                    val x0 = tile.x * scale
-                    val y0 = tile.y * scale
-                    val w = minOf(tile.width * scale, width - x0)
-                    val h = minOf(tile.height * scale, height - y0)
-                    output.getPixels(previous, 0, w, x0, y0, w, h)
-                    observed.getPixels(source, 0, w, x0, y0, w, h)
-                    val samples = 4 / scale
-                    for (y in 0 until h) {
-                        checkCancelled()
-                        val wy = AiGeometry.weight(y * samples, h * samples)
-                        for (x in 0 until w) {
-                            val local = y * w + x
-                            val global = (y0 + y) * width + x0 + x
-                            val weight = (64 * wy * AiGeometry.weight(x * samples, w * samples)).roundToInt().coerceAtLeast(1)
-                            val prior = accumulated[global].toInt()
-                            val pixel = areaSample(prediction, AiGeometry.HALO * 4 + x * samples,
-                                AiGeometry.HALO * 4 + y * samples, samples)
-                            // Low-ISO wide shots retain most of the measured high-frequency signal.
-                            val neighbour = source[if (x > 0) local - 1 else if (y > 0) local - w else local]
-                            val restored = RestorationStrength.protect(source[local], pixel, neighbour, strength)
-                            previous[local] = blend(previous[local], restored, weight.toFloat() / (prior + weight))
-                            accumulated[global] = (prior + weight).toShort()
+                    engine.rgb.rewind()
+                    engine.rgb.put(inputValues)
+                    engine.invoke()
+                    engine.prediction.rewind()
+                    engine.prediction.get(outputValues)
+                    val w=minOf(plan.prior.core,guide.width-x)*plan.neuralScale
+                    val h=minOf(plan.prior.core,guide.height-y)*plan.neuralScale
+                    val stride=4/plan.neuralScale
+                    for (j in 0 until h) for (i in 0 until w) {
+                        val begin=((j*stride+plan.prior.halo*4)*512+i*stride+plan.prior.halo*4)*3
+                        if (stride == 1) {
+                            predicted[j*w+i] = AiColor.pack(outputValues[begin],outputValues[begin+1],outputValues[begin+2])
+                            continue
                         }
+                        var rr=0f; var gg=0f; var bb=0f
+                        for (sy in 0 until stride) for (sx in 0 until stride) {
+                            val pos=begin+(sy*512+sx)*3
+                            rr+=outputValues[pos]; gg+=outputValues[pos+1]; bb+=outputValues[pos+2]
+                        }
+                        val n=stride*stride
+                        predicted[j*w+i]=AiColor.pack(rr/n,gg/n,bb/n)
                     }
-                    output.setPixels(previous, 0, w, x0, y0, w, h)
-                    onProgress(AiProgress(index + 1, tiles.size))
+                    neural.setPixels(predicted,0,w,x*plan.neuralScale,y*plan.neuralScale,w,h)
+                    onProgress(AiProgress(++finished,total))
                 }
             }
-            destination = null
-            return Result(output, guideW, guideH, (System.nanoTime() - started) / 1_000_000L)
-        } finally {
-            destination?.recycle()
-            if (baseline !== original) baseline?.recycle()
-            if (guide !== original) guide.recycle()
+            val ms=(System.nanoTime()-inferenceStart)/1_000_000
+            val result=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888)
+            try {
+                compose(original,guide,neural,result,scene,zoom,plan.prior==PhotoPrior.MAX) { stripe ->
+                    checkActive(); onProgress(AiProgress(plan.tileCount+stripe,total))
+                }
+                return Result(result,guide.width,guide.height,(System.nanoTime()-start)/1_000_000,
+                    plan.prior.display,backend,plan.tileCount,ms,scene)
+            } catch (t: Throwable) { result.recycle(); throw t }
+        } finally { neural.recycle(); if (guide !== original) guide.recycle() }
+    }
+
+    private const val BAND=48
+    private fun compose(source: Bitmap, low: Bitmap, prediction: Bitmap, out: Bitmap, scene: SceneEvidence,
+                        zoom: Float, blind: Boolean, progress: (Int)->Unit) {
+        val w=out.width
+        val rows=Bitmap.createBitmap(w,BAND+2,Bitmap.Config.ARGB_8888)
+        try {
+            val canvas=Canvas(rows)
+            val filter=Paint(Paint.FILTER_BITMAP_FLAG)
+            val measured=IntArray(w*(BAND+2))
+            val lp=IntArray(w*BAND)
+            val prior=IntArray(w*BAND)
+            val result=IntArray(w*BAND)
+            val lum=IntArray(measured.size)
+            fun read(map: Bitmap, y: Int, h: Int, buf: IntArray) {
+                canvas.drawBitmap(map,null,RectF(0f,-y.toFloat(),w.toFloat(),(out.height-y).toFloat()),filter)
+                rows.getPixels(buf,0,w,0,0,w,h)
+            }
+            var band=0
+            for (y in 0 until out.height step BAND) {
+                val h=minOf(BAND,out.height-y)
+                val top=maxOf(0,y-1)
+                val bottom=minOf(out.height,y+h+1)
+                read(source,top,bottom-top,measured)
+                for (i in 0 until (bottom-top)*w) lum[i]=DetailTransfer.y(measured[i])
+                read(low,y,h,lp)
+                read(prediction,y,h,prior)
+                for (j in 0 until h) {
+                    val row=(j+y-top)*w
+                    val prev=max(0,j+y-top-1)*w
+                    val next=minOf(bottom-top-1,j+y-top+1)*w
+                    for (x in 0 until w) {
+                        val i=j*w+x
+                        result[i]=DetailTransfer.pixel(measured[row+x],lp[i],prior[i],lum[row+max(0,x-1)],
+                            lum[row+minOf(w-1,x+1)],lum[prev+x],lum[next+x],zoom,scene,blind)
+                    }
+                }
+                out.setPixels(result,0,w,0,y,w,h)
+                progress(++band)
+            }
+        } finally { rows.recycle() }
+    }
+
+    /** Observe native pixel neighborhoods across the image; a resized thumbnail hides ISP noise. */
+    private fun analyze(b: Bitmap, iso: Int, seconds: Double): SceneEvidence {
+        val side=minOf(b.width,b.height,15)
+        if (side<3) return SceneEvidence(0f,0f,0f,100f,seconds,iso)
+        val patch=IntArray(side*side)
+        val noiseHist=IntArray(256)
+        var flat=0; var textured=0; var sharp=0; var samples=0; var sum=0L
+        for (gy in 0..7) for (gx in 0..7) {
+            b.getPixels(patch,0,side,(b.width-side)*gx/7,(b.height-side)*gy/7,side,side)
+            for (y in 1 until side-1) for (x in 1 until side-1) {
+                val i=y*side+x
+                val center=DetailTransfer.y(patch[i])
+                val l=DetailTransfer.y(patch[i-1]); val r=DetailTransfer.y(patch[i+1])
+                val u=DetailTransfer.y(patch[i-side]); val d=DetailTransfer.y(patch[i+side])
+                val grad=abs(r-l)+abs(d-u)
+                val lap=abs(4*center-l-r-u-d)
+                if (grad<18) { noiseHist[minOf(255,lap)]++; flat++ }
+                if (grad>8) { textured++; if (lap>8 && grad>20) sharp++ }
+                sum+=center; samples++
+            }
         }
-    }
-
-    private var verifiedModel: ByteBuffer? = null
-
-    @Synchronized private fun modelBuffer(context: Context): ByteBuffer {
-        verifiedModel?.let { return it.duplicate().order(ByteOrder.nativeOrder()) }
-        val bytes = context.assets.open(RestorationModel.ASSET).use { it.readBytes() }
-        val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
-        check(bytes.size == RestorationModel.BYTES && hash == RestorationModel.SHA256)
-        val model = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply { put(bytes); rewind() }
-        verifiedModel = model.asReadOnlyBuffer()
-        return model
-    }
-
-    fun samplingFactor(longEdge: Int): Int = when {
-        longEdge >= 2400 -> 4
-        longEdge >= 1000 -> 2
-        else -> 1
-    }
-
-    private fun areaSample(buffer: ByteBuffer, left: Int, top: Int, size: Int): Int {
-        var r = 0f
-        var g = 0f
-        var b = 0f
-        for (y in top until top + size) for (x in left until left + size) {
-            val offset = (200 * y + x) * 12
-            r += buffer.getFloat(offset)
-            g += buffer.getFloat(offset + 4)
-            b += buffer.getFloat(offset + 8)
-        }
-        val n = size * size
-        return AiColor.pack(r / n, g / n, b / n)
-    }
-
-    private fun blend(a: Int, b: Int, fraction: Float): Int {
-        fun channel(shift: Int): Float {
-            val start = a shr shift and 255
-            val end = b shr shift and 255
-            return start + (end - start) * fraction
-        }
-        return AiColor.pack(channel(16), channel(8), channel(0))
+        var median=0; var n=0
+        while (median<255 && n+noiseHist[median]<flat/2) { n+=noiseHist[median]; median++ }
+        return SceneEvidence(if (flat>0) median/3.016f else 0f,textured.toFloat()/samples,
+            sharp.toFloat()/max(1,textured),sum.toFloat()/samples,seconds,iso)
     }
 }

@@ -1,0 +1,40 @@
+{
+  "weights_url": "https://github.com/quic/aimet-model-zoo/releases/download/phase_2_january_artifacts/quicksrnet_small_4x_checkpoint_float32.pth.tar",
+  "weights_sha256": "e7666018b6aa9590f95b932c8ceb1869e976d93a2a632cf73484e27cc2768978",
+  "model_sha256": "523609151d17484a0bfef7d60a2e9ddd762604138bf3067b9248aa436f831f3f",
+  "model_bytes": 136560,
+  "input": [
+    1,
+    128,
+    128,
+    3
+  ],
+  "output": [
+    1,
+    512,
+    512,
+    3
+  ],
+  "dtype": "float32",
+  "rgb_range": [
+    0,
+    255
+  ],
+  "normalization_inside_graph": true,
+  "parameter_count": 33264,
+  "parity_max_abs_0_255": [
+    0.000457763671875,
+    0.0003509521484375
+  ],
+  "operators": [
+    "CONV_2D",
+    "DELEGATE",
+    "DEPTH_TO_SPACE",
+    "MINIMUM",
+    "MUL",
+    "RELU"
+  ],
+  "license": "BSD-3-Clause",
+  "tensorflow": "2.20.0",
+  "torch": "2.15.0+cpu"
+}

@@ -15,7 +15,7 @@ class MediaPublicationTest {
         val app = runner.targetContext
         val source = File.createTempFile("publication-test-", ".png", app.cacheDir)
         try {
-            runner.context.assets.open("quality/astronaut-detail-truth.png").use { input ->
+            runner.context.assets.open("quality/astronaut_detail-truth.png").use { input ->
                 source.outputStream().use { input.copyTo(it) }
             }
             val bitmap = BitmapFactory.decodeFile(source.path)
