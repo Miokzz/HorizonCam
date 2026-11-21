@@ -17,6 +17,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageOps, ImageStat
 from media_checks import require, validate_geometry, validate_probe
+from ui_checks import wait_for
 
 PACKAGE = "com.miokzz.horizoncam.gl"
 COMPONENT = f"{PACKAGE}/com.miokzz.horizoncam.MainActivity"
@@ -89,13 +90,7 @@ class Smoke:
         return tuple(coords)
 
     def wait(self, predicate, message, seconds=45):
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            result = predicate()
-            if result:
-                return result
-            time.sleep(0.5)
-        raise AssertionError(message)
+        return wait_for(predicate, message, seconds)
 
     def wait_node(self, resource, description=None, enabled=True):
         def poll():
@@ -162,13 +157,21 @@ class Smoke:
         self.wait(changed, "Saved capture never replaced the gallery placeholder", seconds=20)
 
     def check_preview(self, label, locked=False):
-        node = self.wait_node("previewView" if locked else "photoPreview", enabled=False)
-        image = self.snapshot(label + "-preview")
-        crop = image.crop(self.bounds(node))
-        # Exclude scrims, status/zoom controls and crop borders when checking real camera pixels.
-        width, height = crop.size
-        crop = crop.crop((width // 4, height // 3, width * 3 // 4, height * 2 // 3))
-        assert_visible_scene(crop)
+        def visible():
+            node = self.find(self.hierarchy(), resource="previewView" if locked else "photoPreview")
+            if node is None:
+                return None
+            image = self.snapshot(label + "-preview")
+            crop = image.crop(self.bounds(node))
+            # Exclude scrims, status/zoom controls and crop borders from real camera pixel checks.
+            width, height = crop.size
+            crop = crop.crop((width // 4, height // 3, width * 3 // 4, height * 2 // 3))
+            try:
+                assert_visible_scene(crop)
+            except AssertionError:
+                return None
+            return crop
+        crop = self.wait(visible, f"{label}: preview never showed usable camera pixels", seconds=30)
         crop.save(self.output / (label + "-preview-center.png"))
 
     def capture_photo(self, label, portrait):
