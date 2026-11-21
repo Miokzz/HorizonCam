@@ -17,6 +17,12 @@ Em **Foto → Ajustes → Formato e resolução**, escolha JPEG rápido, a resol
 
 **Pro → Ajustes → Controles manuais** oferece os controles aceitos pela sessão. ISO e obturador são definidos em conjunto; foco usa dioptrias e o balanço de branco usa os presets anunciados pelo HAL. **Foto → Ajustes → Verificar HDR da câmera** consulta a extensão HDR pública do fabricante. Quando disponível, ela usa JPEG automático e pode levar mais tempo para disparar.
 
+## Fase 3 · Horizon AI
+
+**Mais → Horizon AI** abre a última foto JPEG ou permite escolher uma imagem local. O motor executa no telefone o gerador ESRGAN pré-treinado em blocos sobrepostos. **Cena inteira** processa uma versão com até 640 pixels no lado maior. **Detalhe** processa até 256 × 256 pixels nativos ao redor do ponto selecionado. A saída tem quatro vezes a largura e a altura da entrada efetiva.
+
+A tela mostra os blocos concluídos e permite cancelar ou voltar à câmera. O JPEG derivado identifica o processamento nos metadados. Após salvar, alterne entre **Original** e **Horizon AI** para comparar o mesmo enquadramento. Para testes comparativos consulte [Avaliação de zoom](docs/ZOOM_EVALUATION.md) e [modelo e licença](docs/HORIZON_AI.md).
+
 ## Instalar e testar
 
 1. Em [GitHub Actions](https://github.com/Miokzz/HorizonCam/actions/workflows/build-apk.yml), abra a execução correspondente ao commit que deseja testar. Baixe **HorizonCam-S24-debug**, extraia e instale `app-debug.apk`.

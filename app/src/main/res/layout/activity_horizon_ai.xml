@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/labScreen" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:fillViewport="true" android:background="@color/camera_black">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:padding="18dp">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                android:text="Horizon AI" android:textSize="28sp" android:textColor="@color/white" android:fontFamily="sans-serif-medium" />
+            <Button android:id="@+id/backToCamera" style="@style/CameraControl"
+                android:layout_width="wrap_content" android:layout_height="48dp" android:text="Câmera" />
+        </LinearLayout>
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" android:layout_marginBottom="12dp" android:text="Super-resolução local · ESRGAN 4×" android:textSize="14sp" />
+        <ImageView android:id="@+id/image" android:layout_width="match_parent" android:layout_height="280dp"
+            android:scaleType="fitCenter" android:background="#141619" android:contentDescription="Foto selecionada. Toque para escolher a área de detalhe." />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center">
+            <Button android:id="@+id/showBefore" style="@style/CameraControl" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Original" />
+            <Button android:id="@+id/showAfter" style="@style/CameraControl" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Horizon AI" />
+            <Button android:id="@+id/gallery" style="@style/CameraControl" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Abrir JPEG" />
+        </LinearLayout>
+        <Button android:id="@+id/chooseImage" style="@style/CameraControl" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Escolher foto" />
+        <RadioGroup android:id="@+id/area" android:layout_width="match_parent" android:layout_height="wrap_content">
+            <RadioButton android:id="@+id/full" android:layout_width="match_parent" android:layout_height="48dp"
+                android:text="Cena inteira · entrada de até 640 px" android:checked="true" />
+            <RadioButton android:id="@+id/patch" android:layout_width="match_parent" android:layout_height="48dp"
+                android:text="Detalhe · recorte nativo de até 256 × 256 px" />
+        </RadioGroup>
+        <TextView android:id="@+id/description" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="44dp" />
+        <ProgressBar android:id="@+id/progress" style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <Button android:id="@+id/process" android:layout_width="wrap_content" android:layout_height="52dp" android:text="Restaurar foto" />
+            <Button android:id="@+id/cancelJob" style="@style/CameraControl" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Cancelar" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

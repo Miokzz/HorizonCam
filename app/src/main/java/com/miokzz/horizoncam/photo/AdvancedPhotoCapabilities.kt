@@ -70,7 +70,8 @@ data class AdvancedPhotoCapabilities(
             val awb = if (ManualPhotoKeys.AWB_MODE in keys) characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
                 ?.filter { it in allowedAwb }.orEmpty() else emptyList()
             val maximumFrame = characteristics.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION)
-            val manual = if (extensionActive) ManualPhotoCapabilities() else ManualPhotoCapabilities(
+            // Interop writes target the logical control. A physical stream alone does not guarantee manual control of that sensor.
+            val manual = if (extensionActive || physicalCameraId != null) ManualPhotoCapabilities() else ManualPhotoCapabilities(
                 isoRange = iso?.let { it.lower..it.upper },
                 exposureTimeNsRange = exposure?.let { it.lower..minOf(it.upper, maximumFrame ?: it.upper) },
                 maxFrameDurationNs = maximumFrame,

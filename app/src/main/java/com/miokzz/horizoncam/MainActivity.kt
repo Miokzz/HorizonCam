@@ -51,6 +51,7 @@ import com.miokzz.horizoncam.camera.RearLensManager
 import com.miokzz.horizoncam.camera.ZoomRoute
 import com.miokzz.horizoncam.databinding.ActivityMainBinding
 import com.miokzz.horizoncam.media.CaptureLibrary
+import com.miokzz.horizoncam.media.RestorationJobs
 import com.miokzz.horizoncam.photo.AdvancedPhotoCapabilities
 import com.miokzz.horizoncam.photo.AdvancedPhotoControls
 import com.miokzz.horizoncam.photo.AdvancedPhotoSettings
@@ -163,6 +164,32 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.modePhoto.setOnClickListener { selectMode(ShootingMode.PHOTO) }
         ui.modeVideo.setOnClickListener { selectMode(ShootingMode.VIDEO) }
         ui.modePro.setOnClickListener { selectMode(ShootingMode.PRO) }
+        ui.modeMore.text = "Mais"
+        ui.modeMore.contentDescription = "Mais opções de fotografia"
+        ui.modeMore.setOnClickListener {
+            PopupMenu(this, ui.modeMore).apply {
+                menu.add(0, 1, 0, "Horizon AI · super-resolução local")
+                menu.add(0, 2, 1, "Diagnóstico da câmera")
+                val latestJob = RestorationJobs.states.value
+                if (latestJob?.saved != null) menu.add(0, 3, 2, "Comparar última restauração")
+                setOnMenuItemClickListener { item ->
+                    if (item.itemId != 2) startActivity(Intent(this@MainActivity, HorizonAiActivity::class.java).apply {
+                        val selected = if (item.itemId == 3) latestJob?.input else null
+                        data = selected?.uri ?: prefs.getString("lastJpeg", null)?.let(Uri::parse)
+                        putExtra("zoom", selected?.zoom ?: prefs.getFloat("lastJpegZoom", -1f))
+                    }) else showDiagnostics()
+                    true
+                }
+                show()
+            }
+        }
+        RestorationJobs.states.observe(this) { state ->
+            ui.modeMore.text = when {
+                !state.running -> "Mais"
+                state.total <= 0 -> "IA…"
+                else -> "IA ${100 * state.completed / state.total}%"
+            }
+        }
         ui.modePro.text = "Pro"
         ui.modePro.contentDescription = "Modo Pro"
         ui.recordButton.setOnClickListener { shutter() }
@@ -563,6 +590,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun remember(uri: Uri, message: String) {
         library.remember(uri)
+        if (contentResolver.getType(uri) == "image/jpeg") {
+            prefs.edit().putString("lastJpeg", uri.toString()).putFloat("lastJpegZoom", displayZoom).apply()
+        }
         if (!isDestroyed && !isFinishing) {
             library.inspectAndLoad(uri, ui.galleryThumbnail::setImageBitmap)
             toast(message)
@@ -782,6 +812,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.modeVideo.isSelected = !photoMode
         ui.modePhoto.isEnabled = !busy
         ui.modeVideo.isEnabled = !busy
+        ui.modeMore.isEnabled = !busy
         ui.qualityButton.isVisible = !photoMode
         ui.fpsButton.isVisible = !photoMode
         ui.lockButton.isVisible = !photoMode
