@@ -1,6 +1,7 @@
 package com.miokzz.horizoncam.media
 
 import android.content.ContentValues
+import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
@@ -160,7 +161,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                 val target = reserve(file, marker)
                 // Only open the public row after the final JPEG (including EXIF) is durable.
                 // A transient MediaStore failure retries publication, never discards the inference.
-                AiPhotoFiles.copyAndPublish(app, encoded, target)
+                if (!published(target)) AiPhotoFiles.copyAndPublish(app, encoded, target)
                 target
             }
             val neural = encoded.isFile && runCatching { ExifInterface(encoded)
@@ -254,7 +255,11 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
             val w = info.size.width
             val h = info.size.height
-            val scale = minOf(1.0, kotlin.math.sqrt(NativeRestorer.MAX_PIXELS.toDouble() / (w.toLong() * h)))
+            // The budget applies to the actual field of view returned by the decoder.
+            // Downsampling the entire sensor first unnecessarily throws away tele detail.
+            val nativeBox = com.miokzz.horizoncam.camera.StillFraming.centerCrop(w, h, crop)
+            val scale = minOf(1.0, kotlin.math.sqrt(NativeRestorer.MAX_PIXELS.toDouble() /
+                (nativeBox.width.toLong() * nativeBox.height)))
             val outW = (w * scale).toInt().coerceAtLeast(1)
             val outH = (h * scale).toInt().coerceAtLeast(1)
             decoder.setTargetSize(outW, outH)
@@ -279,12 +284,26 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             put(MediaStore.Images.Media.DATE_TAKEN, file.name.substringBefore('_').toLong())
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
-        val uri = requireNotNull(resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values))
+        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        // A process can die after insert and before the local marker rename. The UUID
+        // belongs to the private capture and is stable across WorkManager retries.
+        @Suppress("DEPRECATION")
+        val lookup = MediaStore.setIncludePending(collection)
+        val idColumn = MediaStore.MediaColumns._ID
+        val existing = resolver.query(lookup, arrayOf(idColumn),
+            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+            arrayOf("HC_${file.name}", "Pictures/HorizonCam/"), null)?.use { cursor ->
+            if (cursor.moveToFirst()) ContentUris.withAppendedId(collection, cursor.getLong(0)) else null
+        }
+        val uri = existing ?: requireNotNull(resolver.insert(collection, values))
         try {
             val temp = File(marker.parentFile, "${marker.name}.tmp")
             temp.writeText(uri.toString())
             check(temp.renameTo(marker))
-        } catch (e: Exception) { resolver.delete(uri, null, null); throw e }
+        } catch (e: Exception) {
+            if (existing == null) resolver.delete(uri, null, null)
+            throw e
+        }
         return uri
     }
 }

@@ -105,6 +105,7 @@ object NativeRestorer {
         val rows=Bitmap.createBitmap(w,BAND+2,Bitmap.Config.ARGB_8888)
         try {
             val canvas=Canvas(rows)
+            val nativeSampling = source.width == out.width && source.height == out.height
             val filter=Paint(Paint.FILTER_BITMAP_FLAG)
             val measured=IntArray(w*(BAND+2))
             val lp=IntArray(w*BAND)
@@ -131,7 +132,7 @@ object NativeRestorer {
                     for (x in 0 until w) {
                         val i=j*w+x
                         result[i]=DetailTransfer.pixel(measured[row+x],lp[i],prior[i],lum[row+max(0,x-1)],
-                            lum[row+minOf(w-1,x+1)],lum[prev+x],lum[next+x],zoom,scene,blind)
+                            lum[row+minOf(w-1,x+1)],lum[prev+x],lum[next+x],zoom,scene,blind,nativeSampling)
                     }
                 }
                 out.setPixels(result,0,w,0,y,w,h)

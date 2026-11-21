@@ -80,7 +80,7 @@ def degradation(rgb,level):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--quick',type=Path,default=Path('app/src/main/assets/ai/QuickSRNet-small-x4-128.tflite'))
-    parser.add_argument('--x4v3',type=Path,default=Path('app/src/main/assets/ai/RealESRGAN-general-x4v3.tflite'))
+    parser.add_argument('--x4v3',type=Path,default=Path('app/src/androidTest/assets/baseline/x4v3.tflite'))
     parser.add_argument('--out',type=Path,required=True)
     parser.add_argument('--private-input',type=Path,action='append',default=[])
     parser.add_argument('--private-out',type=Path)

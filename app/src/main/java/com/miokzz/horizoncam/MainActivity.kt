@@ -511,7 +511,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             openingTimeout = null
             if (firstFrameAt == 0L) {
                 firstFrameAt = SystemClock.elapsedRealtime()
-                logTransition("first-frame")
+                logTransition(if (locked) "camera-open" else "first-preview-frame")
             }
         }
         if (::ui.isInitialized) render()
@@ -618,7 +618,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             "camera=${details?.selectedCameraId} physicalRequested=${details?.selectedPhysicalCameraId} " +
             "physicalActive=${details?.activePhysicalCameraId} requested=$targetZoom applied=$displayZoom " +
             "extraCrop=$extraCrop previewScale=${ui.photoPreview.scaleX} buffer=${resolution?.resolution} " +
-            "viewportCrop=${resolution?.cropRect} bindToFrameMs=${firstFrameAt-bindingStartedAt} capture=${details?.capture}")
+            "viewportCrop=${resolution?.cropRect} readyMs=${if(firstFrameAt>0) firstFrameAt-bindingStartedAt else null} evidence=${if(locked) "camera-open" else "preview-streaming"} capture=${details?.capture}")
     }
 
     private fun applyCameraZoom(cam: Camera, ratio: Float) {
@@ -745,6 +745,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     onFailure = { focusMessage = "Foco interrompido" })
                 Log.i(TAG, "focusCallback session=$token elapsedMs=${SystemClock.elapsedRealtime()-start} result=$focusMessage capture=${lenses?.diagnostics()?.capture}")
                 renderStatus()
+                ui.focusIndicator.postDelayed({
+                    if (token == session && !distantFocus) { focusMessage = null; renderStatus() }
+                }, 2200)
             }, main)
         }
         ui.focusIndicator.apply {
@@ -782,10 +785,21 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             if (mode == ShootingMode.PHOTO && photoSettings.format == PhotoFormat.JPEG) {
                 val trace = lenses?.diagnostics()
                 Log.i(TAG, "Disparo zoom=$displayZoom recorte=$extraCrop camera=${trace?.selectedCameraId} fisicaSolicitada=${trace?.selectedPhysicalCameraId} ativaHAL=${trace?.activePhysicalCameraId}")
-                val physical = trace?.selectedPhysicalCameraId ?: trace?.activePhysicalCameraId
-                AutoPhotos.capture(applicationContext, engine.capture, displayZoom, extraCrop, main,
-                    physicalId = { trace?.selectedPhysicalCameraId ?: lenses?.diagnostics()?.activePhysicalCameraId },
-                    boundSensor = physical) { error ->
+                val captureEpoch = session
+                val captureCamera = camera
+                val captureKey = lens?.key
+                val captureZoom = displayZoom
+                val captureCrop = extraCrop
+                fun currentCaptureSensor(): String? {
+                    if (session != captureEpoch || camera !== captureCamera || zoomPending ||
+                        abs(displayZoom - captureZoom) > 0.0001f || abs(extraCrop - captureCrop) > 0.0001f) return null
+                    val current = lenses?.diagnostics() ?: return null
+                    if (current.selectedKey != captureKey || current.capture == null) return null
+                    return current.selectedPhysicalCameraId ?: current.activePhysicalCameraId
+                }
+                val physical = currentCaptureSensor()
+                AutoPhotos.capture(applicationContext, engine.capture, captureZoom, captureCrop, main,
+                    physicalId = ::currentCaptureSensor, boundSensor = physical) { error ->
                     takingPhoto = false
                     if (!isDestroyed) {
                         if (error != null) toast("Falha ao guardar a captura: ${error.localizedMessage}")
@@ -1129,7 +1143,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             "Zoom confirmado: ${formatZoom(displayZoom)} · solicitado: ${formatZoom(targetZoom)}",
             "Recorte adicional: $extraCrop · escala do visor: ${ui.photoPreview.scaleX}",
             "Resultado AF/AE: ${info?.capture ?: "aguardando"}",
-            "Primeira prévia: ${if (firstFrameAt>0) firstFrameAt-bindingStartedAt else null} ms · sessão $session",
+            "${if(locked) "Abertura da câmera" else "Primeira prévia"}: ${if (firstFrameAt>0) firstFrameAt-bindingStartedAt else null} ms · sessão $session",
             "Buffer: ${resolution?.resolution ?: "—"} · rotação ${resolution?.rotationDegrees ?: "—"}°",
             if (photoMode) "Foto: ${photoSettings.format} · alta resolução: ${photoSettings.highResolution} · HDR: $hdrRequested" else "Configuração da gravação: ${video?.diagnostics()}",
             if (locked) "Horizon Lock: ${sensor.sourceName} · ${video?.effect?.processor?.diagnostics() ?: "aguardando"}" else "",

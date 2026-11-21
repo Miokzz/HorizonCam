@@ -124,7 +124,7 @@ object LegacyRestorer {
 
     @Synchronized private fun modelBuffer(context: Context): ByteBuffer {
         verifiedModel?.let { return it.duplicate().order(ByteOrder.nativeOrder()) }
-        val bytes = context.assets.open("baseline/x4v3.tflite").use { it.readBytes() }
+        val bytes = context.assets.open(RestorationModel.ASSET).use { it.readBytes() }
         val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
         check(bytes.size == RestorationModel.BYTES && hash == RestorationModel.SHA256)
         val model = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply { put(bytes); rewind() }

@@ -42,7 +42,7 @@ data class ReconstructionPlan(val prior: PhotoPrior, val guideW: Int, val guideH
  */
 object DetailTransfer {
     fun pixel(base: Int, low: Int, prediction: Int, leftY: Int, rightY: Int, upY: Int, downY: Int,
-              zoom: Float, scene: SceneEvidence, blind: Boolean): Int {
+              zoom: Float, scene: SceneEvidence, blind: Boolean, nativeSampling: Boolean): Int {
         val y = y(base)
         val lx = abs(leftY-rightY)
         val ly = abs(upY-downY)
@@ -77,12 +77,16 @@ object DetailTransfer {
             blind -> 0.20f + 0.42f*noise
             else -> 0.08f + 0.32f*noise
         }
-        val correction = delta.coerceIn(-cap,cap) * strength - highFrequency * remove
+        // The native-size validation sweep favoured half the neural correction and
+        // at most 5% attenuation of the spatial detail measured in the capture.
+        val injection = if (nativeSampling) strength * 0.5f else strength
+        val loss = if (nativeSampling) min(remove, 0.05f) else remove
+        val correction = delta.coerceIn(-cap,cap) * injection - highFrequency * loss
         fun channel(value: Int, shift: Int): Int {
             val predicted = (prediction ushr shift) and 255
             val originalLow = (low ushr shift) and 255
             val chroma = (predicted-originalLow-delta).coerceIn(-14,14)
-            return (value + correction + strength*0.46f*chroma + 0.5f).toInt().coerceIn(0,255)
+            return (value + correction + injection*0.46f*chroma + 0.5f).toInt().coerceIn(0,255)
         }
         return (255 shl 24) or (channel(r,16) shl 16) or (channel(g,8) shl 8) or channel(b,0)
     }

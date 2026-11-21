@@ -57,7 +57,7 @@ internal object InferenceRuntime {
     }
     private fun clear() { current?.close(); current=null; active=null }
     private fun direct(size: Int) = ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
-    private fun key(m: PhotoPrior) = "v2-${m.hash}-${Build.FINGERPRINT}"
+    private fun key(m: PhotoPrior) = "v3-${m.hash}-${Build.FINGERPRINT}"
     private fun bytes(context: Context, model: PhotoPrior): ByteBuffer {
         val data=context.assets.open(model.asset).use { it.readBytes() }
         val digest=MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { "%02x".format(it.toInt() and 255) }
@@ -65,9 +65,13 @@ internal object InferenceRuntime {
         return direct(data.size).apply { put(data); rewind() }
     }
     private fun open(model: ByteBuffer, label: String): Engine {
-        val gpu = if (label=="GPU-delegate-fp32") GpuDelegate(GpuDelegateFactory.Options()
-            .setPrecisionLossAllowed(false)
-            .setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)) else null
+        val gpu = when (label) {
+            "GPU-default" -> GpuDelegate()
+            "GPU-fp32-requested" -> GpuDelegate(GpuDelegateFactory.Options()
+                .setPrecisionLossAllowed(false)
+                .setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED))
+            else -> null
+        }
         try {
             val options=Interpreter.Options().setNumThreads(if (label=="CPU-2") 2 else 4).setUseXNNPACK(gpu==null)
             if (gpu!=null) options.addDelegate(gpu)
@@ -87,7 +91,7 @@ internal object InferenceRuntime {
         if (cached!=null) runCatching { open(model,cached) }.getOrNull()?.let { return it }
         val options=mutableListOf("CPU-2","CPU-4")
         val gpuOk=runCatching { CompatibilityList().use { it.isDelegateSupportedOnThisDevice } }.getOrDefault(false)
-        if (gpuOk) options += "GPU-delegate-fp32"
+        if (gpuOk) options.addAll(listOf("GPU-default", "GPU-fp32-requested"))
         var reference: FloatArray?=null
         var best="CPU-2"
         var fastest=Double.POSITIVE_INFINITY
@@ -97,6 +101,7 @@ internal object InferenceRuntime {
                 open(model,label).use { engine ->
                     engine.rgb.rewind(); engine.rgb.put(input); engine.invoke()
                     val sample=FloatArray(4096) { engine.prediction.get(it * 191) }
+                    if (reference == null && engine.gpu != null) return@use
                     val ref=reference ?: sample.also { reference=it }
                     var total=0.0
                     var peak=0f

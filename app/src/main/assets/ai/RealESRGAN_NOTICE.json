@@ -1,74 +1,14 @@
 {
-  "source_url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
+  "model": "Real-ESRGAN general-x4v3",
+  "weights_url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
   "weights_sha256": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
-  "model_sha256": "23c281028af47e692dc84fda1fdbc681c3c1038f6d0329c1a849b08c6ec6f11b",
-  "model_bytes": 4884868,
-  "operators": [
-    "ADD",
-    "CONV_2D",
-    "DELEGATE",
-    "DEPTH_TO_SPACE",
-    "GATHER",
-    "MINIMUM",
-    "MUL",
-    "RELU",
-    "RESIZE_NEAREST_NEIGHBOR"
-  ],
-  "input": [
-    1,
-    50,
-    50,
-    3
-  ],
-  "output": [
-    1,
-    200,
-    200,
-    3
-  ],
-  "dtype": "float32",
-  "nominal_rgb_range": [
-    0,
-    255
-  ],
-  "normalization_inside_graph": true,
-  "tensorflow": "2.20.0",
-  "torch": "2.15.0+cpu",
-  "operator_versions": [
-    {
-      "builtin_code": 18,
-      "version": 1
-    },
-    {
-      "builtin_code": 3,
-      "version": 1
-    },
-    {
-      "builtin_code": 57,
-      "version": 1
-    },
-    {
-      "builtin_code": 19,
-      "version": 1
-    },
-    {
-      "builtin_code": 0,
-      "version": 1
-    },
-    {
-      "builtin_code": 36,
-      "version": 1
-    },
-    {
-      "builtin_code": 5,
-      "version": 1
-    },
-    {
-      "builtin_code": 97,
-      "version": 1
-    }
-  ],
+  "model_sha256": "1d8860d0608528a669562b431c654ac1616ab943ae4048b27b6211381b3fd869",
+  "model_bytes": 2470028,
+  "input": [1, 128, 128, 3],
+  "output": [1, 512, 512, 3],
+  "nominal_rgb_range": [0, 255],
+  "storage": "FP16 convolution weights; FP32 input and output",
+  "conversion": "tools/model/convert_context_model.py",
   "license": "BSD-3-Clause",
-  "license_file": "RealESRGAN_LICENSE_BSD3.txt",
-  "architecture_source": "https://raw.githubusercontent.com/xinntao/Real-ESRGAN/v0.2.5.0/realesrgan/archs/srvgg_arch.py"
+  "license_file": "RealESRGAN_LICENSE_BSD3.txt"
 }

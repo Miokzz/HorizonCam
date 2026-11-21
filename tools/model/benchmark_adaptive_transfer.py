@@ -94,7 +94,7 @@ def overlap_save(rgb,model,halo,scale):
     return output,calls
 
 
-def transfer(base,low,prediction,zoom,s,blind):
+def transfer(base,low,prediction,zoom,s,blind,native_sampling=False):
     y=luminance(base);ly=luminance(low);py=luminance(prediction)
     padded=np.pad(y,1,mode='edge');left=padded[1:-1,:-2];right=padded[1:-1,2:];up=padded[:-2,1:-1];down=padded[2:,1:-1]
     contrast=np.maximum(np.abs(left-right),np.abs(up-down));lap=np.abs(4*y-left-right-up-down)
@@ -107,6 +107,9 @@ def transfer(base,low,prediction,zoom,s,blind):
         .65+.16*min(zoom/10,1)+.10*noise if blind else .50+.12*noise))
     cap=np.where(skin,17,np.where(reliable,24,np.where((contrast<3)&(np.abs(high)<2)&(np.abs(delta)>32),22,62 if blind else 38)))
     remove=np.where(reliable,.04,np.where(skin,.12+.20*noise,.20+.42*noise if blind else .08+.32*noise))
+    if native_sampling:
+        strength=strength*.5
+        remove=np.minimum(remove,.05)
     correction=np.clip(delta,-cap,cap)*strength-high*remove
     chroma=np.clip(prediction.astype(np.int32)-low.astype(np.int32)-delta[...,None],-14,14)
     return pack(base+correction[...,None]+strength[...,None]*.46*chroma)
@@ -118,7 +121,7 @@ def restore_v2(original,zoom,iso,upscale,seconds,models):
     guide=original if (gw,gh)==(w,h) else resize(original,gw,gh)
     then=time.perf_counter();neural,calls=overlap_save(guide,models[prior],4 if prior=='fast' else 34,scale)
     prediction=resize(neural,ow,oh);low=resize(guide,ow,oh);base=resize(original,ow,oh)
-    output=transfer(base,low,prediction,zoom,s,prior=='max')
+    output=transfer(base,low,prediction,zoom,s,prior=='max',native_sampling=upscale==1)
     return output,{'prior':prior,'guide':[gw,gh],'neural_scale':scale,'tiles':calls,'elapsed_ms':(time.perf_counter()-then)*1000,'scene':s}
 
 
@@ -191,7 +194,7 @@ def main():
             'ssim':float(structural_similarity(reference,prediction,channel_axis=2,data_range=255)),
             'lpips_alex':perceptual,'mae':float(np.abs(reference.astype(float)-prediction).mean())}
     models={'fast':Model(ASSETS/'QuickSRNet-small-x4-128.tflite'),'max':Model(ASSETS/'RealESRGAN-context-f16.tflite'),
-            'old':Model(ASSETS/'RealESRGAN-general-x4v3.tflite')}
+            'old':Model(Path('app/src/androidTest/assets/baseline/x4v3.tflite'))}
     code_paths=['NativeRestorer.kt','PhotoReconstruction.kt','InferenceRuntime.kt']
     current_hashes={name:hashlib.sha256((Path('app/src/main/java/com/miokzz/horizoncam/ai')/name).read_bytes()).hexdigest() for name in code_paths}
     report={'scope':'REPRESENTATIVE HOST E2E, CPU4threads actualTFLite;PIL bilinear approximates Android filtered bitmap;noGPU/deviceparity',

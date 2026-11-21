@@ -20,11 +20,14 @@ class MediaPublicationTest {
             }
             val bitmap = BitmapFactory.decodeFile(source.path)
             try {
-                val tag = "HorizonCam · teste de publicação"
+                val dims = "${bitmap.width}×${bitmap.height}"
+                val tag = "HorizonCam · teste de publicação | input/output $dims → $dims"
                 val uri = AiPhotoFiles.save(app, Uri.fromFile(source), bitmap, "HC_PUBLICATION_TEST", tag)
                 try {
                     app.contentResolver.openInputStream(uri)!!.use {
-                        assertEquals("HorizonCam | teste de publicacao", ExifInterface(it).getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION))
+                        val ascii = "${bitmap.width}x${bitmap.height}"
+                        assertEquals("HorizonCam | teste de publicacao | input/output $ascii -> $ascii",
+                            ExifInterface(it).getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION))
                     }
                     app.contentResolver.openInputStream(uri)!!.use {
                         val decoded = BitmapFactory.decodeStream(it)

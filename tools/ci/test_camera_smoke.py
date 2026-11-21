@@ -62,6 +62,8 @@ class MediaOracleTest(unittest.TestCase):
             validate_ai_output(1024, 1024, 256, "ordinary camera JPEG")
 
     def test_ai_rejects_metadata_disagreeing_with_real_output(self):
+        validate_ai_output(1024, 1024, 256,
+            "pretrained ESRGAN; estimated details; input/output 256x256 -> 1024x1024")
         with self.assertRaises(AssertionError):
             validate_ai_output(1024, 1024, 256,
                 "pretrained ESRGAN; estimated details; input/output 128×128 → 512×512")
