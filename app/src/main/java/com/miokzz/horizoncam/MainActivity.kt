@@ -51,12 +51,21 @@ import com.miokzz.horizoncam.camera.RearLensManager
 import com.miokzz.horizoncam.camera.ZoomRoute
 import com.miokzz.horizoncam.databinding.ActivityMainBinding
 import com.miokzz.horizoncam.media.CaptureLibrary
+import com.miokzz.horizoncam.photo.AdvancedPhotoCapabilities
+import com.miokzz.horizoncam.photo.AdvancedPhotoControls
+import com.miokzz.horizoncam.photo.AdvancedPhotoSettings
+import com.miokzz.horizoncam.photo.ManualPhotoSettings
+import com.miokzz.horizoncam.photo.HdrPhotoExtension
+import com.miokzz.horizoncam.ui.PhotoControlsDialog
+import com.miokzz.horizoncam.photo.PhotoFormat
 import com.miokzz.horizoncam.photo.PhotoEngine
 import com.miokzz.horizoncam.stabilization.AngleMath
 import com.miokzz.horizoncam.video.VideoEngine
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
+
+private enum class ShootingMode { PHOTO, VIDEO, PRO }
 
 @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
@@ -76,12 +85,20 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var video: VideoEngine? = null
     private var capabilities: CameraCapabilities? = null
     private var eisSupported = false
-    private var photoMode = false
+    private var mode = ShootingMode.VIDEO
+    private val photoMode get() = mode != ShootingMode.VIDEO
+    private var photoSettings = AdvancedPhotoSettings()
+    private var photoCaps: AdvancedPhotoCapabilities? = null
+    private var hdrRequested = false
+    private var hdr: HdrPhotoExtension? = null
+    private val photoDialogs by lazy { PhotoControlsDialog(this) }
     private var requestedQuality = Quality.FHD
     private var fps = 30
     private var displayZoom = 1f
     private var pinchZoom = 1f
     private var recording: Recording? = null
+    private val manualOverrides = mutableSetOf<String>()
+    private var applyingManual = false
     private var takingPhoto = false
     private var paused = false
     private var stopping = false
@@ -94,7 +111,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var session = 0
     private var physicalLog: String? = null
     private val locked get() = !photoMode && horizon.isEnabled()
-    private val busy get() = recording != null || takingPhoto || awaitingMic
+    private val busy get() = recording != null || takingPhoto || awaitingMic || applyingManual
     private val presets get() = listOf(0.6f to ui.zoom06Button, 1f to ui.zoom1Button,
         2f to ui.zoom2Button, 3f to ui.zoom3Button)
 
@@ -127,7 +144,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         }
         library = CaptureLibrary(this)
         sensor = GravityRollSensor(this) { reading -> horizon.pushRoll(reading.timestampNs, reading.rollDegrees.toFloat()) }
-        photoMode = prefs.getBoolean("photoMode", false)
+        val previous = if (prefs.getBoolean("photoMode", false)) ShootingMode.PHOTO else ShootingMode.VIDEO
+        mode = runCatching { ShootingMode.valueOf(prefs.getString("shootingMode", previous.name)!!) }.getOrDefault(previous)
         audio = prefs.getBoolean("sound", true)
         if (!sensor.isAvailable) horizon.setMode(StabilizationMode.OFF)
         if (prefs.contains("stabilization")) {
@@ -142,8 +160,11 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 runCatching { startActivity(library.viewIntent(uri)) }.onFailure { toast("Mídia indisponível.") }
             } ?: toast("Sua próxima captura aparecerá aqui.")
         }
-        ui.modePhoto.setOnClickListener { selectMode(true) }
-        ui.modeVideo.setOnClickListener { selectMode(false) }
+        ui.modePhoto.setOnClickListener { selectMode(ShootingMode.PHOTO) }
+        ui.modeVideo.setOnClickListener { selectMode(ShootingMode.VIDEO) }
+        ui.modePro.setOnClickListener { selectMode(ShootingMode.PRO) }
+        ui.modePro.text = "Pro"
+        ui.modePro.contentDescription = "Modo Pro"
         ui.recordButton.setOnClickListener { shutter() }
         ui.pauseButton.setOnClickListener {
             val active = recording ?: return@setOnClickListener
@@ -212,10 +233,12 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         }, main)
     }
 
-    private fun selectMode(toPhoto: Boolean) {
-        if (busy || photoMode == toPhoto) return
-        photoMode = toPhoto
-        prefs.edit().putBoolean("photoMode", photoMode).apply()
+    private fun selectMode(next: ShootingMode) {
+        if (busy || mode == next) return
+        mode = next
+        hdrRequested = false
+        photoSettings = AdvancedPhotoSettings()
+        prefs.edit().putString("shootingMode", next.name).apply()
         haptic()
         syncSensor()
         rebind()
@@ -223,6 +246,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun releaseSession() {
         session++
+        applyingManual = false
         camera?.cameraInfo?.apply {
             cameraState.removeObservers(this@MainActivity)
             if (lens?.isPhysicalOnly != true) zoomState.removeObservers(this@MainActivity)
@@ -266,10 +290,11 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             val info = owner.availableCameraInfos.firstOrNull { Camera2CameraInfo.from(it).cameraId == choice.cameraId }
                 ?: owner.getCameraInfo(choice.selector)
             capabilities = runCatching { CameraCapabilities.inspect(this, info) }.getOrNull()
+            photoCaps = runCatching { AdvancedPhotoCapabilities.inspect(this, info, choice.physicalCameraId) }.getOrNull()
             eisSupported = runCatching { Preview.getPreviewCapabilities(info).isStabilizationSupported &&
                 Recorder.getVideoCapabilities(info).isStabilizationSupported }.getOrDefault(false)
             val group = if (photoMode) {
-                PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider).also { photo = it }.group
+                PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider, photoSettings, photoCaps, hdrRequested).also { photo = it }.group
             } else {
                 if (horizon.mode() == StabilizationMode.STEADY && (!eisSupported || !allowEis)) {
                     horizon.setMode(StabilizationMode.OFF)
@@ -286,9 +311,17 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     } }
                 }.also { video = it }.group
             }
-            val bound = owner.bindToLifecycle(this, choice.selector, group)
+            val captureSelector = if (hdrRequested && photoMode) {
+                val selected = hdr?.selection(choice, true)
+                check(selected?.hdrEnabled == true) { selected?.reason ?: "HDR indisponível" }
+                selected.selector
+            } else choice.selector
+            val bound = owner.bindToLifecycle(this, captureSelector, group)
             camera = bound
             manager.onBound(choice, bound)
+            if ((mode == ShootingMode.PRO && photoSettings.manual != ManualPhotoSettings()) || choice.cameraId in manualOverrides) {
+                photoCaps?.let { applyManual(bound, photoSettings.manual, it) }
+            }
             horizon.setCameraRealtimeTimestamp(Camera2CameraInfo.from(info)
                 .getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
                 CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME)
@@ -327,6 +360,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val choice = lens
         Log.w(TAG, "Configuração recusada ${choice?.key}", error)
         when {
+            photoMode && (photoSettings != AdvancedPhotoSettings() || hdrRequested) -> {
+                if (hdrRequested && choice != null) hdr?.onBindRejected(choice, error.message ?: "Sessão HDR recusada")
+                photoSettings = AdvancedPhotoSettings()
+                hdrRequested = false
+                toast("Esta combinação de foto foi recusada. Voltando ao JPEG automático.")
+                rebind()
+            }
             manager != null && choice != null && choice != manager.defaultOption -> {
                 manager.onBindRejected(choice, error.message ?: "configuração")
                 lens = manager.defaultOption
@@ -411,6 +451,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val cam = camera ?: return
         val w = ui.previewContainer.width.coerceAtLeast(1).toFloat()
         val h = ui.previewContainer.height.coerceAtLeast(1).toFloat()
+        val manualFocus = mode == ShootingMode.PRO && photoSettings.manual.focusDistanceDiopters != null
+        val manualExposure = mode == ShootingMode.PRO && photoSettings.manual.iso != null
         val point = if (!locked) ui.photoPreview.meteringPointFactory.createPoint(x, y) else {
             val g = horizon.frameGeometry(SystemClock.elapsedRealtimeNanos())
             val inv = AngleMath.correctionMatrix(g.rotationDegrees.toDouble(), g.cropScale.toDouble(), 16.0 / 9).inverse()
@@ -418,7 +460,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(
                 ((1 + p.first) / 2).toFloat().coerceIn(0f, 1f), ((1 - p.second) / 2).toFloat().coerceIn(0f, 1f))
         }
-        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+        val flags = (if (manualFocus) 0 else FocusMeteringAction.FLAG_AF) or (if (manualExposure) 0 else FocusMeteringAction.FLAG_AE)
+        if (flags == 0) return
+        val action = FocusMeteringAction.Builder(point, flags)
             .setAutoCancelDuration(3, TimeUnit.SECONDS).build()
         if (cam.cameraInfo.isFocusMeteringSupported(action)) observeControl(cam.cameraControl.startFocusAndMetering(action), "Foco")
         ui.focusIndicator.apply {
@@ -429,7 +473,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             postDelayed(hideFocus, 900)
         }
         val ev = cam.cameraInfo.exposureState
-        if (ev.isExposureCompensationSupported) ui.exposureSlider.apply {
+        if (!manualExposure && ev.isExposureCompensationSupported) ui.exposureSlider.apply {
             max = ev.exposureCompensationRange.upper - ev.exposureCompensationRange.lower
             progress = ev.exposureCompensationIndex - ev.exposureCompensationRange.lower
             isVisible = true
@@ -485,6 +529,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                         paused = false
                         pausedCommand = false
                         horizon.stopRecording()
+                        if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) horizon.clearOrientation()
                         val uri = event.outputResults.outputUri
                         if (uri != Uri.EMPTY && (!event.hasError() ||
                             event.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE ||
@@ -583,6 +628,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             if (!photoMode) menu.add(0, 2, 1, if (audio) "Desligar microfone" else "Ligar microfone")
             menu.add(0, 3, 2, "Escolher câmera traseira").isEnabled = ready && !busy
             menu.add(0, 4, 3, "Diagnóstico da sessão")
+            if (photoMode) menu.add(0, 6, 4, "Formato e resolução").isEnabled = ready && !busy
+            if (mode == ShootingMode.PRO) menu.add(0, 7, 5, "Controles manuais").isEnabled = ready && !busy
+            if (mode == ShootingMode.PHOTO) menu.add(0, 8, 6, if (hdrRequested) "Desligar HDR" else "Verificar HDR da câmera").isEnabled = ready && !busy
             if (failure != null) menu.add(0, 5, 4, "Tentar abrir a câmera")
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
@@ -591,10 +639,88 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     3 -> lensMenu()
                     4 -> showDiagnostics()
                     5 -> retry()
+                    6 -> photoFormats()
+                    7 -> manualDialog()
+                    8 -> toggleHdr()
                 }
                 true
             }
             show()
+        }
+    }
+
+    private fun photoFormats() {
+        val caps = photoCaps ?: return
+        photoDialogs.format(caps, photoSettings) { settings ->
+            if (!busy && photoMode) {
+                photoSettings = settings
+                hdrRequested = false
+                rebind()
+            }
+        }
+    }
+
+    private fun manualDialog() {
+        val caps = photoCaps ?: return
+        val cam = camera ?: return
+        val token = session
+        photoDialogs.manual(caps, photoSettings.manual) { manual ->
+            if (session == token && !busy && mode == ShootingMode.PRO) {
+                applyManual(cam, manual, caps)
+            }
+        }
+    }
+
+    private fun applyManual(cam: Camera, manual: ManualPhotoSettings, caps: AdvancedPhotoCapabilities) {
+        val token = session
+        val id = lens?.cameraId ?: return
+        if (manual != ManualPhotoSettings()) manualOverrides.add(id)
+        applyingManual = true
+        render()
+        try {
+            val future = AdvancedPhotoControls.apply(cam, manual, caps)
+            future.addListener({
+                if (token == session && !isDestroyed) {
+                    applyingManual = false
+                    runCatching { future.get() }
+                        .onSuccess {
+                            if (manual == ManualPhotoSettings()) manualOverrides.remove(id)
+                            photoSettings = photoSettings.copy(manual = manual)
+                        }
+                        .onFailure {
+                            photoSettings = photoSettings.copy(manual = ManualPhotoSettings())
+                            if (manual == ManualPhotoSettings()) {
+                                fail("Falha ao restaurar a câmera · toque para tentar", it)
+                            } else {
+                                toast("Controles recusados. Voltando ao automático.")
+                                rebind()
+                            }
+                        }
+                    render()
+                }
+            }, main)
+        } catch (e: Exception) {
+            applyingManual = false
+            photoSettings = photoSettings.copy(manual = ManualPhotoSettings())
+            toast("Combinação manual indisponível.")
+            Log.w(TAG, "Controles manuais: parâmetros recusados", e)
+            render()
+        }
+    }
+
+    private fun toggleHdr() {
+        if (hdrRequested) { hdrRequested = false; rebind(); return }
+        val choice = lens ?: return
+        val helper = hdr ?: HdrPhotoExtension(this, provider ?: return).also { hdr = it }
+        val token = session
+        helper.query(choice) { result ->
+            if (!isDestroyed && token == session && !busy && mode == ShootingMode.PHOTO) {
+                if (result.supported) {
+                    hdrRequested = true
+                    photoSettings = AdvancedPhotoSettings()
+                    rebind()
+                } else toast(result.reason ?: "Esta câmera não oferece HDR.")
+            }
         }
     }
 
@@ -624,9 +750,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             "Câmera da sessão: ${info?.selectedCameraId ?: "—"}",
             "Saída física solicitada: ${info?.selectedPhysicalCameraId ?: "automática"}",
             "Sensor ativo informado pelo HAL: ${info?.activePhysicalCameraId ?: "não informado"}",
-            "Zoom na câmera: ${formatZoom(displayZoom)}",
+            "Zoom relativo à principal: ${formatZoom(displayZoom)}",
             "Buffer: ${resolution?.resolution ?: "—"} · rotação ${resolution?.rotationDegrees ?: "—"}°",
-            if (photoMode) "JPEG · qualidade 95" else "FPS solicitado: $fps · EIS: ${video?.nativeEis == true}",
+            if (photoMode) "Foto: ${photoSettings.format} · alta resolução: ${photoSettings.highResolution} · HDR: $hdrRequested" else "FPS solicitado: $fps · EIS: ${video?.nativeEis == true}",
             if (locked) "Horizon Lock: ${sensor.sourceName} · ${video?.effect?.processor?.diagnostics() ?: "aguardando"}" else "",
             ids, info?.rejection?.let { "Configuração recusada: $it" }.orEmpty()
         ).filter { it.isNotBlank() }.joinToString("\n")
@@ -650,7 +776,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.root.setLockedVideoMode(locked)
         ui.photoPreview.isVisible = !locked
         ui.previewView.isVisible = locked
-        ui.modePhoto.isSelected = photoMode
+        ui.modePro.isSelected = mode == ShootingMode.PRO
+        ui.modePro.isEnabled = !busy && photoCaps?.let { it.manual.supportsManualExposure || it.manual.supportsManualFocus || it.manual.awbModes.isNotEmpty() } == true
+        ui.modePhoto.isSelected = mode == ShootingMode.PHOTO
         ui.modeVideo.isSelected = !photoMode
         ui.modePhoto.isEnabled = !busy
         ui.modeVideo.isEnabled = !busy
@@ -697,7 +825,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             paused -> "Pausado"
             recording != null && locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos()) -> "REC · referência fraca"
             recording != null -> if (audio) "● REC" else "● REC · sem áudio"
-            photoMode -> "Foto · JPEG"
+            photoMode -> listOf(if (mode == ShootingMode.PRO) "Pro" else "Foto",
+                if (photoSettings.format == PhotoFormat.RAW_DNG) "DNG" else "JPEG",
+                if (hdrRequested) "HDR" else if (photoSettings.highResolution) "Alta resolução" else null)
+                .filterNotNull().joinToString(" · ")
             locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos()) -> "Buscando horizonte…"
             locked -> "Horizon Lock · 360°"
             !audio -> "Vídeo · sem áudio"
@@ -741,9 +872,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     override fun onStop() {
-        if (recording != null) stopVideo()
+        if (recording != null) stopVideo() else horizon.clearOrientation()
         sensor.stop()
-        horizon.clearOrientation()
         super.onStop()
     }
 
@@ -754,6 +884,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     override fun onDestroy() {
+        hdr?.close()
         sensor.release()
         recording?.stop()
         releaseSession()

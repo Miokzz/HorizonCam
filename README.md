@@ -11,6 +11,12 @@ Câmera Android independente em Kotlin. O alvo de validação é o Galaxy S24 SM
 - Toque no indicador de estado para consultar os IDs da câmera, a saída física solicitada, o sensor ativo informado pelo HAL, a resolução negociada e o diagnóstico de estabilização. O número de zoom sozinho não comprova a origem óptica.
 - A miniatura abre a última foto ou vídeo. Os modos em desenvolvimento ficam desativados.
 
+## Fase 2 · Fotografia avançada
+
+Em **Foto → Ajustes → Formato e resolução**, escolha JPEG rápido, a resolução adicional de JPEG anunciada pela câmera, ou DNG quando disponível. O DNG preserva a área do sensor RAW. O visor 4:3 e o arquivo bruto podem ter enquadramentos diferentes. A disponibilidade depende da combinação de lente e resolução.
+
+**Pro → Ajustes → Controles manuais** oferece os controles aceitos pela sessão. ISO e obturador são definidos em conjunto; foco usa dioptrias e o balanço de branco usa os presets anunciados pelo HAL. **Foto → Ajustes → Verificar HDR da câmera** consulta a extensão HDR pública do fabricante. Quando disponível, ela usa JPEG automático e pode levar mais tempo para disparar.
+
 ## Instalar e testar
 
 1. Em [GitHub Actions](https://github.com/Miokzz/HorizonCam/actions/workflows/build-apk.yml), abra a execução correspondente ao commit que deseja testar. Baixe **HorizonCam-S24-debug**, extraia e instale `app-debug.apk`.

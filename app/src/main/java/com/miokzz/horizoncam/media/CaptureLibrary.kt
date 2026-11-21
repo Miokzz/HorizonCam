@@ -31,10 +31,11 @@ class CaptureLibrary(context: Context) : AutoCloseable {
         if (closed) return
         worker.execute {
             runCatching {
-                if (app.contentResolver.getType(uri) == "image/jpeg") {
+                val mime = app.contentResolver.getType(uri).orEmpty()
+                if (mime.startsWith("image/")) {
                     val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     app.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
-                    Log.i(TAG, "JPEG saved ${options.outWidth}x${options.outHeight}")
+                    Log.i(TAG, "$mime saved ${options.outWidth}x${options.outHeight}")
                 } else {
                     val reader = MediaMetadataRetriever()
                     try {
