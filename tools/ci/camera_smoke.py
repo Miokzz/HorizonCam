@@ -30,6 +30,10 @@ def assert_visible_scene(image):
             "Camera image is blank/dark/unvarying; no usable emulated preview/frame")
 
 
+class HierarchyUnavailable(AssertionError):
+    pass
+
+
 class Smoke:
     def __init__(self, output):
         self.output = output
@@ -81,7 +85,7 @@ class Smoke:
                 return root
             except (RuntimeError, ET.ParseError, subprocess.TimeoutExpired):
                 time.sleep(0.3)
-        raise AssertionError("UIAutomator could not produce a fresh UI hierarchy")
+        raise HierarchyUnavailable("UIAutomator could not produce a fresh UI hierarchy")
 
     def find(self, root, resource=None, text=None):
         for node in root.iter("node"):
@@ -211,14 +215,36 @@ class Smoke:
         crop = self.wait(visible, f"{label}: preview never showed usable camera pixels", seconds=30)
         crop.save(self.output / (label + "-preview-center.png"))
 
-    def capture_photo(self, label, portrait):
+    def capture_photo(self, label, portrait, auto=False):
         self.tap("modePhoto")
         self.rotate(portrait)
         self.wait_node("recordButton", "Tirar foto")
         self.check_preview(label)
         before = self.media_paths(True)
         self.tap("recordButton")
-        remote = self.new_media(True, before)
+        if auto:
+            def signed_final():
+                fresh = self.media_paths(True) - before
+                require(len(fresh) <= 1, "Normal Foto published more than one JPEG (intermediate leaked)")
+                if not fresh:
+                    return None
+                remote = next(iter(fresh))
+                path = self.output / (label + ".jpg")
+                path.unlink(missing_ok=True)
+                self.adb("pull", remote, str(path), check=False)
+                try:
+                    with Image.open(path) as candidate:
+                        candidate.load()
+                        description = candidate.getexif().get(270, "")
+                        if "Real-ESRGAN" not in str(description) or "textura estimada" not in str(description):
+                            return None
+                except (OSError, ValueError):
+                    return None
+                return remote
+            remote = self.wait(signed_final,
+                "Normal Foto did not publish its single signed Real-ESRGAN final JPEG within6min", seconds=360)
+        else:
+            remote = self.new_media(True, before)
         self.wait_node("recordButton", "Tirar foto")
         path = self.pull(remote, label)
         self.last_jpeg = path
@@ -230,8 +256,19 @@ class Smoke:
             displayed = ImageOps.exif_transpose(image)
             validate_geometry(*displayed.size, portrait, 4 / 3)
             assert_visible_scene(displayed)
+            description = image.getexif().get(270, "")
+            if auto:
+                # The worker logs the upright native source dimensions, independently of saved EXIF.
+                logs = self.adb("logcat", "-d", "-s", "HorizonAuto:I", "*:S")
+                (self.output / (label + "-auto-worker.txt")).write_text(logs, encoding="utf-8")
+                dimensions = re.findall(r"Real-ESRGAN (\d+)x(\d+) grid=", logs)
+                require(bool(dimensions), "No actual Real-ESRGAN worker completion evidence")
+                require(tuple(map(int, dimensions[-1])) == displayed.size,
+                        "Normal Foto changed the native source framing/dimensions")
+                require(len(self.media_paths(True) - before) == 1, "Normal Foto left extra public JPEGs")
             self.report["captures"].append({"name": label, "kind": "JPEG", "encoded": encoded,
-                "displayed": displayed.size, "exif_orientation": orientation})
+                "displayed": displayed.size, "exif_orientation": orientation,
+                "automatic_blind_restoration": auto, "image_description": description})
         self.snapshot(label + "-saved")
 
     def capture_ai(self):
@@ -255,7 +292,12 @@ class Smoke:
         latest_root = None
         def finished():
             nonlocal saw_running, latest_root
-            latest_root = self.hierarchy()
+            try:
+                latest_root = self.hierarchy()
+            except HierarchyUnavailable:
+                # UIAutomator waits for accessibility idle; tile progress can update continuously.
+                # Keep waiting for the actual file/completed UI, never reuse a stale XML success.
+                return False
             description = self.find(latest_root, resource="description")
             text = description.get("text", "") if description is not None else ""
             require(not any(message in text.lower() for message in ("falha", "cancelado", "insuficiente", "inválido")),
@@ -264,8 +306,10 @@ class Smoke:
             process = self.find(latest_root, resource="process")
             if progress is not None or (process is not None and process.get("enabled") == "false"):
                 saw_running = True
-            after = self.find(latest_root, resource="showAfter")
-            return after is not None and process is not None and process.get("enabled") == "true" and progress is None
+            # Comparison controls can be above the visible ScrollView viewport. Completion
+            # requires the enabled action plus a new real AI output, then we scroll to compare.
+            saved = any(Path(path).name.startswith("HC_AI_") for path in self.media_paths(True) - before)
+            return saved and process is not None and process.get("enabled") == "true" and progress is None
         self.wait(finished, "Android AI inference did not complete with comparison controls", seconds=300)
         fresh = self.media_paths(True) - before
         outputs = [path for path in fresh if Path(path).name.startswith("HC_AI_")]
@@ -337,7 +381,7 @@ class Smoke:
         self.wait_node("modePhoto")
         self.snapshot(label + "-saved")
 
-    def run(self, apk, ai=False):
+    def run(self, apk, ai=False, auto_photo=False):
         serial = self.adb("get-serialno").strip()
         require(serial.startswith("emulator-"), "Refusing camera smoke on a non-emulator device")
         require(self.shell("getprop", "ro.kernel.qemu").strip() == "1", "QEMU emulator identity required")
@@ -366,13 +410,16 @@ class Smoke:
         self.sensor_thread.start()
         self.shell("am", "start", "-W", "-n", COMPONENT)
         self.wait_node("recordButton")
+        if auto_photo:
+            selected_photo = self.wait_node("modePhoto")
+            require(selected_photo.get("selected") == "true", "First launch did not default to Foto")
         self.tap("modePhoto")
         self.rotate(True)
         self.wait_node("recordButton", "Tirar foto")
         placeholder = self.thumbnail("gallery-empty")
-        self.capture_photo("photo-portrait", True)
+        self.capture_photo("photo-portrait", True, auto=auto_photo)
         self.check_thumbnail(placeholder, "gallery-photo")
-        self.capture_photo("photo-landscape", False)
+        self.capture_photo("photo-landscape", False, auto=auto_photo)
         self.tap("modeVideo")
         self.set_stabilization("Desligada")
         self.rotate(True)
@@ -429,10 +476,11 @@ def main():
     parser.add_argument("--apk", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=Path("work/camera-smoke"))
     parser.add_argument("--ai", action="store_true", help="Also execute real Android native-patch ESRGAN inference")
+    parser.add_argument("--auto-photo", action="store_true", help="Require automatic native-size signed Real-ESRGAN Foto output")
     args = parser.parse_args()
     smoke = Smoke(args.output)
     try:
-        smoke.run(args.apk, ai=args.ai)
+        smoke.run(args.apk, ai=args.ai, auto_photo=args.auto_photo)
     except Exception as error:
         smoke.finish(error)
         raise

@@ -17,7 +17,17 @@ Em **Foto → Ajustes → Formato e resolução**, escolha JPEG rápido, a resol
 
 **Pro → Ajustes → Controles manuais** oferece os controles aceitos pela sessão. ISO e obturador são definidos em conjunto; foco usa dioptrias e o balanço de branco usa os presets anunciados pelo HAL. **Foto → Ajustes → Verificar HDR da câmera** consulta a extensão HDR pública do fabricante. Quando disponível, ela usa JPEG automático e pode levar mais tempo para disparar.
 
-## Fase 3 · Horizon AI
+## Foto automática · 0,6× a 30×
+
+Escolha o enquadramento com a pinça ou toque no indicador de zoom para escolher em décimos. Em **Foto / JPEG**, o disparador guarda a captura em armazenamento privado, libera a câmera e enfileira a revelação local com Real-ESRGAN general-x4v3. A galeria recebe um JPEG. A interface informa quando a inferência é interrompida e o app precisa preservar o JPEG da câmera. A câmera pública determina a menor ampliação disponível. Acima de seu limite o visor e o JPEG aplicam o mesmo recorte central. O metadado do JPEG identifica a estimativa neural.
+
+O processamento trabalha com até 12,6 MP e um modelo que estima textura. Fotos normais preservam uma fração maior do sinal medido; zoom alto e ISO elevado recebem maior contribuição do modelo. Quando há recorte adicional por software, a reconstrução pode usar a saída de 2× ou 4× dentro do limite de memória. Também é possível escolher explicitamente JPEG do sensor ou DNG em **Pro**. Consulte a [origem dos pesos, conversão e métricas](tools/model/README.md).
+
+## Fase 4 · Noturno e multiframe
+
+O modo **Noturno** captura cinco quadros reais e tenta uma exposição mais curta para proteger altas luzes. A fusão estima movimento, alinha os quadros e rejeita regiões incompatíveis. **Foto → Ajustes → Fusão de detalhe** permite testar reconstrução multiframe 2× quando existe diversidade subpixel mensurável. A resolução de trabalho tem lado maior de até 1280 px no Noturno ou 960 px na entrada de super-resolução. Uma sequência gera uma única foto na galeria. Movimentos grandes podem levar ao salvamento de um quadro de referência. No zoom que exige recorte adicional, Foto usa a restauração automática para conservar o campo de visão.
+
+## Laboratório opcional · Horizon AI
 
 **Mais → Horizon AI** abre a última foto JPEG ou permite escolher uma imagem local. O motor executa no telefone o gerador ESRGAN pré-treinado em blocos sobrepostos. **Cena inteira** processa uma versão com até 640 pixels no lado maior. **Detalhe** processa até 256 × 256 pixels nativos ao redor do ponto selecionado. A saída tem quatro vezes a largura e a altura da entrada efetiva.
 

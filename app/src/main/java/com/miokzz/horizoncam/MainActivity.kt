@@ -48,10 +48,14 @@ import androidx.core.view.isVisible
 import com.miokzz.horizoncam.camera.CameraCapabilities
 import com.miokzz.horizoncam.camera.LensOption
 import com.miokzz.horizoncam.camera.RearLensManager
+import com.miokzz.horizoncam.camera.StillFraming
 import com.miokzz.horizoncam.camera.ZoomRoute
 import com.miokzz.horizoncam.databinding.ActivityMainBinding
 import com.miokzz.horizoncam.media.CaptureLibrary
 import com.miokzz.horizoncam.media.RestorationJobs
+import com.miokzz.horizoncam.media.BurstJobs
+import com.miokzz.horizoncam.photo.BurstCapture
+import com.miokzz.horizoncam.media.AutoPhotos
 import com.miokzz.horizoncam.photo.AdvancedPhotoCapabilities
 import com.miokzz.horizoncam.photo.AdvancedPhotoControls
 import com.miokzz.horizoncam.photo.AdvancedPhotoSettings
@@ -66,7 +70,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
-private enum class ShootingMode { PHOTO, VIDEO, PRO }
+private enum class ShootingMode { PHOTO, VIDEO, PRO, NIGHT }
 
 @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
@@ -96,10 +100,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var requestedQuality = Quality.FHD
     private var fps = 30
     private var displayZoom = 1f
+    private var extraCrop = 1f
+    private var zoomCommand = 0
+    private var zoomPending = false
+    private val autoJpeg get() = mode == ShootingMode.PHOTO && photoSettings.format == PhotoFormat.JPEG
     private var pinchZoom = 1f
     private var recording: Recording? = null
     private val manualOverrides = mutableSetOf<String>()
     private var applyingManual = false
+    private var burst: BurstCapture? = null
+    private var burstProgress = ""
+    private var burstDetail = false
+    private var burstZoom = 1f
     private var takingPhoto = false
     private var paused = false
     private var stopping = false
@@ -145,7 +157,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         }
         library = CaptureLibrary(this)
         sensor = GravityRollSensor(this) { reading -> horizon.pushRoll(reading.timestampNs, reading.rollDegrees.toFloat()) }
-        val previous = if (prefs.getBoolean("photoMode", false)) ShootingMode.PHOTO else ShootingMode.VIDEO
+        val previous = if (prefs.getBoolean("photoMode", true)) ShootingMode.PHOTO else ShootingMode.VIDEO
         mode = runCatching { ShootingMode.valueOf(prefs.getString("shootingMode", previous.name)!!) }.getOrDefault(previous)
         audio = prefs.getBoolean("sound", true)
         if (!sensor.isAvailable) horizon.setMode(StabilizationMode.OFF)
@@ -163,6 +175,27 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         }
         ui.modePhoto.setOnClickListener { selectMode(ShootingMode.PHOTO) }
         ui.modeVideo.setOnClickListener { selectMode(ShootingMode.VIDEO) }
+        ui.modeNight.text = "Noturno"
+        ui.modeNight.contentDescription = "Modo Noturno multiframe"
+        ui.modeNight.setOnClickListener { selectMode(ShootingMode.NIGHT) }
+        BurstJobs.states.observe(this) { state ->
+            if (!state.running && state.detail.isNotEmpty()) {
+                val uri = state.output ?: state.reference
+                if (uri != null && prefs.getString("burstSeen", null) != uri.toString()) {
+                    remember(uri, state.detail, burstZoom)
+                    prefs.edit().putString("burstSeen", uri.toString()).apply()
+                } else if (uri == null) toast(state.detail)
+            }
+            renderStatus()
+        }
+        AutoPhotos.recover(applicationContext)
+        AutoPhotos.states.observe(this) { state ->
+            if (state.uri != null && prefs.getString("autoSeen", null) != state.uri.toString()) {
+                remember(state.uri, state.message, state.zoom)
+                prefs.edit().putString("autoSeen", state.uri.toString()).apply()
+            }
+            renderStatus()
+        }
         ui.modePro.setOnClickListener { selectMode(ShootingMode.PRO) }
         ui.modeMore.text = "Mais"
         ui.modeMore.contentDescription = "Mais opções de fotografia"
@@ -221,6 +254,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.statusText.setOnLongClickListener { showDiagnostics(); true }
         presets.forEach { (value, button) -> button.setOnClickListener { zoomTo(value); haptic() } }
         installGestures(ui.previewView)
+        ui.zoomReadout.setOnClickListener { choosePhotoZoom() }
         installGestures(ui.photoPreview)
         ui.exposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -262,7 +296,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun selectMode(next: ShootingMode) {
         if (busy || mode == next) return
+        displayZoom /= extraCrop
+        extraCrop = 1f
         mode = next
+        burstDetail = false
         hdrRequested = false
         photoSettings = AdvancedPhotoSettings()
         prefs.edit().putString("shootingMode", next.name).apply()
@@ -273,6 +310,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun releaseSession() {
         session++
+        zoomPending = false
+        zoomCommand++
         applyingManual = false
         camera?.cameraInfo?.apply {
             cameraState.removeObservers(this@MainActivity)
@@ -357,14 +396,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             if (!choice.isPhysicalOnly) {
                 val state = bound.cameraInfo.zoomState.value
                 val initial = (displayZoom / choice.relativeZoom).coerceIn(state?.minZoomRatio ?: choice.minCameraZoom, state?.maxZoomRatio ?: choice.maxCameraZoom)
-                if (initial != 1f) observeControl(bound.cameraControl.setZoomRatio(initial), "Zoom")
+                extraCrop = if (autoJpeg) StillFraming.digitalRatio(displayZoom, initial * choice.relativeZoom) else 1f
+                if (initial != 1f) applyCameraZoom(bound, initial)
                 bound.cameraInfo.zoomState.observe(this) { zoom ->
                     if (token == session && zoom != null) {
-                        displayZoom = zoom.zoomRatio * choice.relativeZoom
+                        displayZoom = (zoom.zoomRatio * choice.relativeZoom * extraCrop).coerceAtMost(if (autoJpeg) 30f else Float.MAX_VALUE)
                         renderZoom()
                     }
                 }
-            } else displayZoom = choice.relativeZoom
+            } else {
+                extraCrop = if (autoJpeg) StillFraming.digitalRatio(displayZoom, choice.relativeZoom) else 1f
+                displayZoom = choice.relativeZoom * extraCrop
+            }
             bound.cameraInfo.torchState.observe(this) { if (session == token) ui.flashButton.isSelected = it == 1 }
             bound.cameraInfo.cameraState.observe(this) { state ->
                 if (session != token) return@observe
@@ -418,15 +461,56 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun zoomTo(requested: Float, preferred: String? = null) {
         if (!ready || takingPhoto || awaitingMic || stopping) return
-        val route = route(requested, preferred) ?: return
+        val desired = if (autoJpeg) requested.coerceAtMost(StillFraming.MAX_ZOOM) else requested
+        val route = route(desired, preferred) ?: return
+        val crop = if (autoJpeg && preferred == null)
+            StillFraming.digitalRatio(desired, route.displayZoom) else 1f
+        extraCrop = crop
+        displayZoom = route.displayZoom * crop
         if (route.requiresRebind) {
             if (busy) return
             lens = lenses?.option(route.targetKey) ?: return
-            displayZoom = route.displayZoom
             rebind()
         } else if (lens?.isPhysicalOnly != true) {
-            camera?.cameraControl?.setZoomRatio(route.cameraZoomRatio)?.let { observeControl(it, "Zoom") }
+            camera?.let { applyCameraZoom(it, route.cameraZoomRatio) }
+            renderZoom()
+        } else renderZoom()
+    }
+
+    private fun applyCameraZoom(cam: Camera, ratio: Float) {
+        val ticket = ++zoomCommand
+        zoomPending = true
+        val applied = cam.cameraControl.setZoomRatio(ratio)
+        if (autoJpeg) ui.recordButton.isEnabled = false
+        applied.addListener({
+            if (ticket != zoomCommand || isDestroyed) return@addListener
+            zoomPending = false
+            runCatching { applied.get() }.onFailure {
+                extraCrop = 1f
+                displayZoom = (cam.cameraInfo.zoomState.value?.zoomRatio ?: 1f) * (lens?.relativeZoom ?: 1f)
+                toast("A câmera recusou a ampliação solicitada.")
+            }
+            render()
+        }, main)
+    }
+
+    private fun choosePhotoZoom() {
+        if (!autoJpeg || busy || !ready) return
+        val min = ((route(0.01f)?.displayZoom ?: 1f) * 10).toInt().coerceIn(1, 300)
+        val slider = SeekBar(this).apply {
+            max = 300 - min
+            progress = (displayZoom * 10 + 0.5f).toInt().coerceIn(min, 300) - min
+            contentDescription = "Zoom em décimos"
         }
+        val dialog = AlertDialog.Builder(this).setTitle(formatZoom(displayZoom)).setView(slider)
+            .setPositiveButton("Aplicar") { _, _ -> zoomTo((min + slider.progress) / 10f) }
+            .setNegativeButton("Cancelar", null).create()
+        slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) { dialog.setTitle(formatZoom((min + value) / 10f)) }
+            override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+        })
+        dialog.show()
     }
 
     private fun observeControl(future: com.google.common.util.concurrent.ListenableFuture<*>, name: String) {
@@ -450,6 +534,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             override fun onScaleBegin(detector: ScaleGestureDetector): Boolean { pinchZoom = displayZoom; return ready }
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 pinchZoom = (pinchZoom * detector.scaleFactor).coerceIn(0.05f, 1000f)
+                if (autoJpeg) pinchZoom = pinchZoom.coerceAtMost(StillFraming.MAX_ZOOM)
                 zoomTo(pinchZoom)
                 return true
             }
@@ -475,6 +560,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     private fun focusAt(x: Float, y: Float) {
+        if (takingPhoto) return
         val cam = camera ?: return
         val w = ui.previewContainer.width.coerceAtLeast(1).toFloat()
         val h = ui.previewContainer.height.coerceAtLeast(1).toFloat()
@@ -514,12 +600,26 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun shutter() {
         if (recording != null) { stopVideo(); return }
-        if (!ready || busy || failure != null) return
+        if (!ready || busy || failure != null || (autoJpeg && zoomPending)) return
+        if (mode == ShootingMode.NIGHT || (mode == ShootingMode.PHOTO && burstDetail && extraCrop == 1f)) {
+            startBurst()
+            return
+        }
         haptic()
         if (photoMode) {
             val engine = photo ?: return
             takingPhoto = true
             render()
+            if (mode == ShootingMode.PHOTO && photoSettings.format == PhotoFormat.JPEG) {
+                AutoPhotos.capture(applicationContext, engine.capture, displayZoom, extraCrop, main) { error ->
+                    takingPhoto = false
+                    if (!isDestroyed) {
+                        if (error != null) toast("Falha ao guardar a captura: ${error.localizedMessage}")
+                        afterCapture()
+                    }
+                }
+                return
+            }
             val done: (Result<Uri>) -> Unit = { result ->
                 takingPhoto = false
                 result.onSuccess { uri -> remember(uri, "Foto salva") }
@@ -532,6 +632,37 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             render()
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
         } else beginVideo()
+    }
+
+    private fun startBurst() {
+        val cam = camera ?: return
+        val capture = photo?.capture ?: return
+        if (BurstJobs.states.value?.running == true || RestorationJobs.states.value?.running == true) {
+            toast("Aguarde a conclusão do processamento em andamento.")
+            return
+        }
+        takingPhoto = true
+        burstZoom = displayZoom
+        burstProgress = "Preparando sequência…"
+        render()
+        haptic()
+        val sequence = BurstCapture(cacheDir, cam, capture, main, mode == ShootingMode.NIGHT,
+            { lenses?.diagnostics()?.activePhysicalCameraId },
+            { completed, total -> burstProgress = "Capturando · $completed/$total"; renderStatus() },
+            { result ->
+                burst = null
+                takingPhoto = false
+                result.onSuccess { frames -> BurstJobs.process(applicationContext, frames, burstDetail) }
+                    .onFailure { error ->
+                        if (!isDestroyed && error !is java.util.concurrent.CancellationException) {
+                            Log.w(TAG, "Sequência interrompida", error)
+                            toast("A captura da sequência foi interrompida.")
+                        }
+                    }
+                if (!isDestroyed) afterCapture()
+            })
+        burst = sequence
+        sequence.start()
     }
 
     private fun beginVideo() {
@@ -588,10 +719,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         render()
     }
 
-    private fun remember(uri: Uri, message: String) {
+    private fun remember(uri: Uri, message: String, captureZoom: Float = displayZoom) {
         library.remember(uri)
         if (contentResolver.getType(uri) == "image/jpeg") {
-            prefs.edit().putString("lastJpeg", uri.toString()).putFloat("lastJpegZoom", displayZoom).apply()
+            prefs.edit().putString("lastJpeg", uri.toString()).putFloat("lastJpegZoom", captureZoom).apply()
         }
         if (!isDestroyed && !isFinishing) {
             library.inspectAndLoad(uri, ui.galleryThumbnail::setImageBitmap)
@@ -658,9 +789,12 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             if (!photoMode) menu.add(0, 2, 1, if (audio) "Desligar microfone" else "Ligar microfone")
             menu.add(0, 3, 2, "Escolher câmera traseira").isEnabled = ready && !busy
             menu.add(0, 4, 3, "Diagnóstico da sessão")
-            if (photoMode) menu.add(0, 6, 4, "Formato e resolução").isEnabled = ready && !busy
+            if (photoMode && mode != ShootingMode.NIGHT) menu.add(0, 6, 4, "Formato e resolução").isEnabled = ready && !busy
             if (mode == ShootingMode.PRO) menu.add(0, 7, 5, "Controles manuais").isEnabled = ready && !busy
             if (mode == ShootingMode.PHOTO) menu.add(0, 8, 6, if (hdrRequested) "Desligar HDR" else "Verificar HDR da câmera").isEnabled = ready && !busy
+            if (mode == ShootingMode.PHOTO) menu.add(0, 9, 7,
+                if (burstDetail) "Desligar fusão de detalhe" else "Ativar fusão de detalhe · 5 quadros").isEnabled = ready && !busy
+            if (BurstJobs.states.value?.running == true) menu.add(0, 10, 8, "Cancelar processamento da sequência")
             if (failure != null) menu.add(0, 5, 4, "Tentar abrir a câmera")
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
@@ -672,6 +806,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     6 -> photoFormats()
                     7 -> manualDialog()
                     8 -> toggleHdr()
+                    9 -> {
+                        burstDetail = !burstDetail
+                        hdrRequested = false
+                        photoSettings = AdvancedPhotoSettings()
+                        rebind()
+                    }
+                    10 -> BurstJobs.cancel()
                 }
                 true
             }
@@ -684,6 +825,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         photoDialogs.format(caps, photoSettings) { settings ->
             if (!busy && photoMode) {
                 photoSettings = settings
+                burstDetail = false
                 hdrRequested = false
                 rebind()
             }
@@ -747,6 +889,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             if (!isDestroyed && token == session && !busy && mode == ShootingMode.PHOTO) {
                 if (result.supported) {
                     hdrRequested = true
+                    burstDetail = false
                     photoSettings = AdvancedPhotoSettings()
                     rebind()
                 } else toast(result.reason ?: "Esta câmera não oferece HDR.")
@@ -792,6 +935,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun formatZoom(value: Float) = String.format(Locale.getDefault(), "%.2f×", value)
     private fun renderZoom() {
+        ui.photoPreview.scaleX = extraCrop
+        ui.photoPreview.scaleY = extraCrop
+        ui.zoomReadout.isClickable = autoJpeg && !busy
         ui.zoomReadout.text = formatZoom(displayZoom)
         presets.forEach { (value, button) ->
             val candidate = route(value)
@@ -806,6 +952,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.root.setLockedVideoMode(locked)
         ui.photoPreview.isVisible = !locked
         ui.previewView.isVisible = locked
+        ui.modeNight.isSelected = mode == ShootingMode.NIGHT
+        ui.modeNight.isEnabled = !busy
         ui.modePro.isSelected = mode == ShootingMode.PRO
         ui.modePro.isEnabled = !busy && photoCaps?.let { it.manual.supportsManualExposure || it.manual.supportsManualFocus || it.manual.awbModes.isNotEmpty() } == true
         ui.modePhoto.isSelected = mode == ShootingMode.PHOTO
@@ -828,15 +976,16 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             StabilizationMode.OFF -> "Off"
         }
         ui.quickControlsButton.isEnabled = !busy
-        ui.flashButton.isEnabled = ready && camera?.cameraInfo?.hasFlashUnit() == true
+        ui.flashButton.isEnabled = ready && !takingPhoto && camera?.cameraInfo?.hasFlashUnit() == true
         val rec = recording != null
+        ui.exposureSlider.isEnabled = !takingPhoto
         ui.galleryThumbnail.isEnabled = !busy
         ui.pauseButton.isVisible = rec
         ui.pauseButton.isEnabled = !stopping
         ui.pauseButton.text = if (paused) "▶" else "Ⅱ"
         ui.pauseButton.contentDescription = if (paused) "Retomar gravação" else "Pausar gravação"
         ui.timerText.isVisible = rec
-        ui.recordButton.isEnabled = (rec && !stopping) || (ready && failure == null && !busy)
+        ui.recordButton.isEnabled = (rec && !stopping) || (ready && failure == null && !busy && (!autoJpeg || !zoomPending))
         ui.recordButton.alpha = if (ui.recordButton.isEnabled) 1f else 0.5f
         ui.recordButton.contentDescription = when { rec -> "Parar gravação"; photoMode -> "Tirar foto"; else -> "Iniciar gravação" }
         val inner = ui.recordInner
@@ -851,11 +1000,17 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val text = when {
             failure != null -> failure!!
             !ready -> "Abrindo câmera…"
-            takingPhoto -> "Salvando JPEG…"
+            burst != null -> burstProgress
+            takingPhoto -> "Salvando foto…"
             stopping -> "Finalizando MP4…"
             paused -> "Pausado"
             recording != null && locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos()) -> "REC · referência fraca"
             recording != null -> if (audio) "● REC" else "● REC · sem áudio"
+            BurstJobs.states.value?.running == true && photoMode -> BurstJobs.states.value!!.detail
+            AutoPhotos.states.value?.running == true && photoMode -> AutoPhotos.states.value!!.message
+            mode == ShootingMode.NIGHT -> "Noturno · 5 quadros"
+            autoJpeg && extraCrop > 1.001f -> "Foto · zoom digital · IA"
+            mode == ShootingMode.PHOTO && burstDetail -> "Foto · fusão de detalhe"
             photoMode -> listOf(if (mode == ShootingMode.PRO) "Pro" else "Foto",
                 if (photoSettings.format == PhotoFormat.RAW_DNG) "DNG" else "JPEG",
                 if (hdrRequested) "HDR" else if (photoSettings.highResolution) "Alta resolução" else null)
@@ -903,6 +1058,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     override fun onStop() {
+        burst?.cancel()
         if (recording != null) stopVideo() else horizon.clearOrientation()
         sensor.stop()
         super.onStop()
@@ -915,6 +1071,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     override fun onDestroy() {
+        burst?.cancel()
         hdr?.close()
         sensor.release()
         recording?.stop()

@@ -19,6 +19,11 @@ Checks fail the job when the app cannot complete any required flow:
 
 - Portrait and landscape JPEG capture: actual JPEG decode, EXIF-adjusted 3:4/4:3
   dimensions, nonblank image, shutter restored after save.
+- With `--auto-photo` (current CI): fresh install must default to Foto. Each shot
+  has up to six minutes to publish exactly one final JPEG carrying the real
+  Real-ESRGAN/estimated-texture EXIF signature. Its dimensions must match the
+  independently logged upright native source. Private processing must not leak a
+  second public JPEG. A camera-only fallback is not mislabeled as restored success.
 - Conventional video with stabilization explicitly **Off**, in both orientations:
   actual MP4 video stream, cardinal playback rotation, displayed 9:16/16:9,
   square pixels, usable encoded bytes and duration; a decoded frame must exist
@@ -37,6 +42,8 @@ Checks fail the job when the app cannot complete any required flow:
   disclosure, switch Original/AI comparison, and verify the camera JPEG is unchanged.
   Progress state is recorded when observed; a fast completion may precede the
   first XML dump. Missing output, inference errors and timeout still fail the run.
+  Busy accessibility trees during tile progress are retried within the bounded
+  inference wait; stale XML can never satisfy a successful comparison check.
 
 `work/camera-smoke/report.json` records observed media metadata and pass/failure.
 Artifacts include the actual five captures, ffprobe JSON, decoded MP4 frames,

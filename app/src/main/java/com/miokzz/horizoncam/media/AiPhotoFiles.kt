@@ -62,7 +62,7 @@ object AiPhotoFiles {
         }
     }
 
-    fun save(context: Context, source: Uri, bitmap: Bitmap, prefix: String, description: String): Uri {
+    fun save(context: Context, source: Uri, bitmap: Bitmap, prefix: String, description: String, reserved: Uri? = null): Uri {
         val resolver = context.contentResolver
         val original = resolver.openInputStream(source)?.use { runCatching { ExifInterface(it) }.getOrNull() }
         val values = ContentValues().apply {
@@ -71,9 +71,9 @@ object AiPhotoFiles {
             put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HorizonCam")
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
-        val uri = requireNotNull(resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
+        val uri = reserved ?: requireNotNull(resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
         try {
-            requireNotNull(resolver.openOutputStream(uri)).use { check(bitmap.compress(Bitmap.CompressFormat.JPEG, 96, it)) }
+            requireNotNull(resolver.openOutputStream(uri, "wt")).use { check(bitmap.compress(Bitmap.CompressFormat.JPEG, 96, it)) }
             requireNotNull(resolver.openFileDescriptor(uri, "rw")).use { file ->
                 val exif = ExifInterface(file.fileDescriptor)
                 listOf(ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL, ExifInterface.TAG_DATETIME_ORIGINAL,
