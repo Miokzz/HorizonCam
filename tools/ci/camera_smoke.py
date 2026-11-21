@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import math
 import re
 import subprocess
 import threading
@@ -17,52 +16,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageOps, ImageStat
+from media_checks import require, validate_geometry, validate_probe
 
 PACKAGE = "com.miokzz.horizoncam.gl"
 COMPONENT = f"{PACKAGE}/com.miokzz.horizoncam.MainActivity"
-
-
-def require(condition, message):
-    if not condition:
-        raise AssertionError(message)
-
-
-def media_geometry(width, height, rotation):
-    require(width > 0 and height > 0, "Missing or invalid encoded dimensions")
-    require(math.isfinite(rotation) and abs(rotation / 90 - round(rotation / 90)) < 0.01,
-            f"Unexpected non-cardinal display rotation {rotation}")
-    return (height, width) if round(rotation) % 180 else (width, height)
-
-
-def validate_geometry(width, height, portrait, aspect):
-    require(min(width, height) >= 240, f"Unexpected tiny camera output: {width}x{height}")
-    require((height > width) == portrait,
-            f"Wrong displayed orientation: {width}x{height}, portrait expected={portrait}")
-    actual = max(width, height) / min(width, height)
-    require(abs(actual - aspect) < 0.035, f"Wrong displayed aspect: {actual:.4f}, expected {aspect:.4f}")
-
-
-def validate_probe(probe, portrait, locked=False):
-    streams = [s for s in probe.get("streams", []) if s.get("codec_type") == "video"]
-    require(len(streams) == 1, "Expected exactly one encoded video stream")
-    video = streams[0]
-    rotation = float(video.get("tags", {}).get("rotate", 0))
-    for side in video.get("side_data_list", []):
-        if "rotation" in side:
-            rotation = float(side["rotation"])
-    width, height = int(video["width"]), int(video["height"])
-    effective = media_geometry(width, height, rotation)
-    validate_geometry(*effective, portrait=portrait, aspect=16 / 9)
-    sar = video.get("sample_aspect_ratio", "1:1")
-    require(sar in ("1:1", "N/A", None), f"Non-square video pixels: {sar}")
-    duration = float(probe.get("format", {}).get("duration", video.get("duration", 0)))
-    require(math.isfinite(duration) and 2 <= duration <= 45, f"Invalid recording duration {duration}")
-    require(int(probe.get("format", {}).get("size", 0)) > 10_000, "MP4 is missing usable encoded data")
-    if locked:
-        require(width > height and round(rotation) % 180 == 0,
-                "Horizon Lock must encode landscape pixels with landscape playback metadata")
-    return {"encoded": [width, height], "displayed": list(effective),
-            "rotation": rotation, "duration": duration, "codec": video.get("codec_name"), "sar": sar}
 
 
 def assert_visible_scene(image):
@@ -204,10 +161,21 @@ class Smoke:
             return max(ImageStat.Stat(ImageChops.difference(placeholder, current)).mean) > 5
         self.wait(changed, "Saved capture never replaced the gallery placeholder", seconds=20)
 
+    def check_preview(self, label, locked=False):
+        node = self.wait_node("previewView" if locked else "photoPreview", enabled=False)
+        image = self.snapshot(label + "-preview")
+        crop = image.crop(self.bounds(node))
+        # Exclude scrims, status/zoom controls and crop borders when checking real camera pixels.
+        width, height = crop.size
+        crop = crop.crop((width // 4, height // 3, width * 3 // 4, height * 2 // 3))
+        assert_visible_scene(crop)
+        crop.save(self.output / (label + "-preview-center.png"))
+
     def capture_photo(self, label, portrait):
         self.tap("modePhoto")
         self.rotate(portrait)
         self.wait_node("recordButton", "Tirar foto")
+        self.check_preview(label)
         before = self.media_paths(True)
         self.tap("recordButton")
         remote = self.new_media(True, before)
@@ -226,6 +194,7 @@ class Smoke:
 
     def capture_video(self, label, portrait, locked=False):
         self.wait_node("recordButton", "Iniciar gravação")
+        self.check_preview(label, locked)
         before = self.media_paths(False)
         self.tap("recordButton")
         root = self.hierarchy()

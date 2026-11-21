@@ -1,8 +1,7 @@
 """Regression tests for the CI oracle, not substitutes for emulator captures."""
-import copy
 import unittest
 
-from camera_smoke import media_geometry, validate_geometry, validate_probe
+from media_checks import media_geometry, validate_geometry, validate_probe
 
 
 class MediaOracleTest(unittest.TestCase):

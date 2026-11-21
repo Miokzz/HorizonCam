@@ -36,7 +36,10 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ffmpeg python3-pil
-          sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          test -n "$SDKMANAGER"
+          "$SDKMANAGER" 'platforms;android-36' 'build-tools;36.0.0'
       - name: Validate smoke assertions and build APK
         run: |
           /usr/bin/python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
