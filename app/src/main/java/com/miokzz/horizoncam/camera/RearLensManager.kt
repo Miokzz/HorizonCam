@@ -37,13 +37,19 @@ data class LensOption(
         maxCameraZoom, isPhysicalOnly)
 }
 
+data class CaptureTelemetry(
+    val atMs: Long, val frame: Long, val afState: Int?, val aeState: Int?,
+    val focalLength: Float?, val focusDistance: Float?, val crop: String?, val zoomRatio: Float?
+)
+
 data class LensDiagnostics(
     val selectedKey: String?,
     val selectedCameraId: String?,
     val selectedPhysicalCameraId: String?,
     /** The logical capture result's reported active physical ID, NOT inferred output routing. */
     val activePhysicalCameraId: String?,
-    val rejection: String?
+    val rejection: String?,
+    val capture: CaptureTelemetry? = null
 )
 
 /**
@@ -61,6 +67,8 @@ class RearLensManager private constructor(
     private val rejected = mutableMapOf<String, String>()
     private val runtimeSpecs = mutableMapOf<String, LensZoomSpec>()
     @Volatile private var selected: LensOption? = null
+    @Volatile private var telemetry: CaptureTelemetry? = null
+    @Volatile private var telemetryToken = 0L
 
     fun option(key: String): LensOption? = options.firstOrNull { it.key == key }
 
@@ -101,13 +109,15 @@ class RearLensManager private constructor(
     @Synchronized fun onBindRejected(option: LensOption, reason: String) {
         if (option.key != defaultOption.key) rejected[option.key] = reason.take(240)
         selected = null
-        evidence.reset()
+        telemetry = null
+        evidence.reset().also { telemetryToken = it }
     }
 
     /** Call before every unbind and on lifecycle stop; attach will start a fresh epoch. */
     fun invalidateCaptureDiagnostics() {
         selected = null
-        evidence.reset()
+        telemetry = null
+        evidence.reset().also { telemetryToken = it }
     }
 
     /**
@@ -117,7 +127,8 @@ class RearLensManager private constructor(
      */
     fun attachCaptureDiagnostics(previewBuilder: Preview.Builder, option: LensOption) {
         selected = null
-        val token = evidence.reset()
+        telemetry = null
+        val token = evidence.reset().also { telemetryToken = it }
         Camera2Interop.Extender(previewBuilder)
             .setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest,
@@ -127,25 +138,31 @@ class RearLensManager private constructor(
                         result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)
                     }.getOrNull()
                     evidence.record(token, result.frameNumber, reported, session)
+                    if (telemetryToken == token && selected?.key == option.key) telemetry = CaptureTelemetry(
+                        SystemClock.elapsedRealtime(), result.frameNumber, result.get(CaptureResult.CONTROL_AF_STATE),
+                        result.get(CaptureResult.CONTROL_AE_STATE), result.get(CaptureResult.LENS_FOCAL_LENGTH),
+                        result.get(CaptureResult.LENS_FOCUS_DISTANCE), result.get(CaptureResult.SCALER_CROP_REGION)?.toShortString(),
+                        if (android.os.Build.VERSION.SDK_INT >= 30) result.get(CaptureResult.CONTROL_ZOOM_RATIO) else null)
                 }
 
                 override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest,
-                    failure: CaptureFailure) { evidence.clear(token, session) }
+                    failure: CaptureFailure) { evidence.clear(token, session); if (telemetryToken == token) telemetry = null }
 
                 override fun onCaptureSequenceAborted(session: CameraCaptureSession,
-                    sequenceId: Int) { evidence.clear(token, session) }
+                    sequenceId: Int) { evidence.clear(token, session); if (telemetryToken == token) telemetry = null }
             })
             .setSessionStateCallback(object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) { evidence.beginSession(token, session) }
-                override fun onConfigureFailed(session: CameraCaptureSession) { evidence.endSession(token, session) }
-                override fun onClosed(session: CameraCaptureSession) { evidence.endSession(token, session) }
+                override fun onConfigureFailed(session: CameraCaptureSession) { evidence.endSession(token, session); if (telemetryToken == token) telemetry = null }
+                override fun onClosed(session: CameraCaptureSession) { evidence.endSession(token, session); if (telemetryToken == token) telemetry = null }
             })
     }
 
     @Synchronized fun diagnostics(): LensDiagnostics {
         val bound = selected
         return LensDiagnostics(bound?.key, bound?.cameraId, bound?.physicalCameraId,
-            evidence.activePhysicalId(), rejected.entries.lastOrNull()?.let { "${it.key}: ${it.value}" })
+            evidence.activePhysicalId(), rejected.entries.lastOrNull()?.let { "${it.key}: ${it.value}" },
+            telemetry?.takeIf { SystemClock.elapsedRealtime() - it.atMs in 0..1500 })
     }
 
     companion object {
@@ -207,9 +224,13 @@ class RearLensManager private constructor(
             val chars = manager.getCameraCharacteristics(id)
             val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                 ?.firstOrNull()?.takeIf { it > 0f }?.toDouble() ?: return@runCatching null
-            val width = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+            val sensorWidth = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
                 ?.width?.toDouble()?.takeIf { it > 0.0 } ?: return@runCatching null
-            Math.toDegrees(2.0 * atan(width / (2.0 * focal)))
+            val pixels = chars.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+            val active = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            val activeFraction = if (pixels != null && active != null && pixels.width > 0)
+                active.width().toDouble() / pixels.width else 1.0
+            Math.toDegrees(2.0 * atan(sensorWidth * activeFraction / (2.0 * focal)))
         }.getOrNull()
 
         private fun label(ratio: Float, primary: Boolean, physical: Boolean, id: String): String {

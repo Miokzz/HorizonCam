@@ -52,15 +52,21 @@ object ZoomRouter {
             safeRequested <= spec.maxDisplayZoom + EPSILON
 
         val explicit = usable.firstOrNull { it.key == preferredKey }
-        // For a still, prefer a physically addressable longer focal length which can contain
-        // the complete requested field. The logical camera remains the fallback on bind failure.
-        val longLens = if (stillPhoto && !recording) usable.filter {
-            it.relativeZoom >= 1.5f && it.relativeZoom <= safeRequested && it.key != defaultKey
-        }.maxWithOrNull(compareBy<LensZoomSpec> { it.relativeZoom }.thenBy { !it.fixedPhysicalStream }) else null
+        // Select the sensor band using the requested total framing. A calibrated tele FOV
+        // close to 3x must still be attempted at the nominal 3x boundary.
+        val band = when { safeRequested < 1f -> 0; safeRequested < 3f -> 1; else -> 2 }
+        val dedicated = if (stillPhoto && !recording) usable.filter { candidate ->
+            candidate.key != defaultKey && when (band) {
+                0 -> candidate.relativeZoom < 0.85f && candidate.relativeZoom <= safeRequested + 0.06f
+                1 -> candidate.relativeZoom in 0.85f..1.2f
+                else -> candidate.relativeZoom >= 1.5f && candidate.relativeZoom <= safeRequested + 0.08f
+            }
+        }.minWithOrNull(compareBy<LensZoomSpec> { !it.fixedPhysicalStream }
+            .thenBy { abs(it.relativeZoom - when(band) { 0 -> 0.6f; 1 -> 1f; else -> 3f }) }) else null
         val target = when {
             recording -> current // A recording must never trigger unbind/rebind.
             explicit != null -> explicit
-            longLens != null -> longLens
+            dedicated != null -> dedicated
             current.key in rejected -> default
             default.key !in rejected && contains(default) -> default // Preserve logical continuity.
             current.key !in rejected && contains(current) -> current
