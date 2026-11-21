@@ -12,8 +12,8 @@ android {
         minSdk = 29
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 110
-        versionName = "2.0.0-rc1"
+        versionCode = 111
+        versionName = "2.0.0-rc2"
     }
 
     providers.environmentVariable("HORIZONCAM_CI_KEYSTORE").orNull?.let { path ->

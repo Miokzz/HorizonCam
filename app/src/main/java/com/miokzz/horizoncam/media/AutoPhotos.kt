@@ -101,38 +101,33 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             return Result.retry()
         }
         return try {
-            val target = reserve(file, marker)
-            var message = "Foto restaurada"
-            if (!published(target)) {
-                val restored = try {
-                    restore(file, target, zoom, crop)
-                    true
-                } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { Log.w("HorizonAuto", "Restauro indisponível para $name", e); false }
-                catch (e: OutOfMemoryError) { Log.w("HorizonAuto", "Limite de memória para $name", e); false }
-                if (!restored) {
-                    if (isStopped) throw CancellationException()
-                    // A failed JPEG write can remove the pending row. Reserve a new one if needed.
-                    val originalTarget = reserve(file, marker)
-                    if (crop > 1f) {
-                        val framed = decodeFramed(file, crop)
-                        try { AiPhotoFiles.save(app, Uri.fromFile(file), framed, "HC",
-                            "Zoom ${zoom}x · JPEG da câmera com recorte digital", originalTarget) }
-                        finally { framed.recycle() }
-                    } else {
-                        requireNotNull(resolver.openOutputStream(originalTarget, "wt")).use { out ->
-                            file.inputStream().use { it.copyTo(out) }
-                        }
-                        check(resolver.update(originalTarget, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null) == 1)
-                    }
-                    message = "JPEG da câmera salvo · restauração indisponível"
+            val encoded = File(file.parentFile, "${file.nameWithoutExtension}.result")
+            val previous = if (marker.isFile) Uri.parse(marker.readText()) else null
+            val saved = if (previous != null && published(previous)) previous else {
+                if (!encoded.isFile) {
+                    val temp = File(file.parentFile, "${file.nameWithoutExtension}.rendering")
+                    try {
+                        try { restore(file, temp, zoom, crop) }
+                        catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { preserve(file, temp, crop, zoom, e) }
+                        catch (e: OutOfMemoryError) { preserve(file, temp, crop, zoom, e) }
+                        check(temp.renameTo(encoded)) { "Falha ao confirmar JPEG privado." }
+                    } finally { temp.delete() }
                 }
+                if (isStopped) throw CancellationException()
+                val target = reserve(file, marker)
+                // Only open the public row after the final JPEG (including EXIF) is durable.
+                // A transient MediaStore failure retries publication, never discards the inference.
+                AiPhotoFiles.copyAndPublish(app, encoded, target)
+                target
             }
-            val saved = Uri.parse(marker.readText())
+            val neural = encoded.isFile && runCatching { ExifInterface(encoded)
+                .getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION)?.contains("Real-ESRGAN") == true }.getOrDefault(false)
+            val message = if (neural) "Foto restaurada" else "JPEG da câmera salvo · restauração indisponível"
             check(app.getSharedPreferences("horizoncam", Context.MODE_PRIVATE).edit()
                 .putString("autoFinalUri", saved.toString()).putString("autoFinalMessage", message)
                 .putFloat("autoFinalZoom", zoom).commit())
-            if (file.delete()) marker.delete()
+            if (file.delete()) { marker.delete(); encoded.delete() }
             AutoPhotos.post(AutoPhotos.State(false, message, saved, zoom))
             Result.success()
         } catch (e: CancellationException) { Result.retry() }
@@ -143,7 +138,16 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         }
     }
 
-    private fun restore(file: File, target: Uri, zoom: Float, crop: Float) {
+    private fun preserve(file: File, target: File, crop: Float, zoom: Float, error: Throwable) {
+        Log.w("HorizonAuto", "Restauro indisponível para ${file.name}", error)
+        if (isStopped) throw CancellationException()
+        if (crop <= 1f) { file.copyTo(target, overwrite = true); return }
+        val framed = decodeFramed(file, crop)
+        try { AiPhotoFiles.encode(app, Uri.fromFile(file), framed, target, "Zoom ${zoom}x · JPEG com recorte digital") }
+        finally { framed.recycle() }
+    }
+
+    private fun restore(file: File, target: File, zoom: Float, crop: Float) {
         val exif = ExifInterface(file)
         val iso = exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 100)
         val source = decodeFramed(file, crop)
@@ -163,8 +167,8 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             }, { isStopped || tooHot })
             try {
                 if (isStopped) throw CancellationException()
-                AiPhotoFiles.save(app, Uri.fromFile(file), result.bitmap, "HC",
-                    "Horizon AI · Real-ESRGAN general-x4v3 · textura estimada · zoom ${zoom}x", target)
+                AiPhotoFiles.encode(app, Uri.fromFile(file), result.bitmap, target,
+                    "Horizon AI · Real-ESRGAN general-x4v3 · textura estimada · zoom ${zoom}x")
                 val before = CaptureMetrics.summary(source)
                 val after = CaptureMetrics.summary(result.bitmap)
                 Log.i("HorizonAuto", "scene zoom=$zoom residual=$crop iso=$iso before=$before after=$after pssKb=${android.os.Debug.getPss()}")
@@ -202,7 +206,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             put(MediaStore.Images.Media.DATE_TAKEN, file.name.substringBefore('_').toLong())
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
-        val uri = requireNotNull(resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
+        val uri = requireNotNull(resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values))
         try {
             val temp = File(marker.parentFile, "${marker.name}.tmp")
             temp.writeText(uri.toString())

@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: camera-smoke-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   camera-smoke:

@@ -16,3 +16,7 @@ O workflow de build executa `:app:testDebugUnitTest`, `:app:lintDebug` e `:app:a
 | Alternar Foto/Vídeo durante 20 ciclos, sair e voltar ao app | Câmera e GPU recuperam sem travamento ou mídias incompletas | Pendente |
 
 Toque no indicador de estado para consultar a sessão. Para reunir evidência física, salve um MP4 original e registre o trecho correspondente do Logcat com `adb logcat -s HorizonCam HorizonCamGL HorizonCamMedia`. A rotação do contêiner é parte da orientação de reprodução. Para verificar um arquivo use `ffprobe -v error -show_streams -show_format -of json video.mp4`.
+
+## Alvo de geometria
+
+Em um ambiente Python separado, instale as dependências de `tools/calibration/requirements.txt`. O script `tools/calibration/horizon_chart.py` gera o alvo e mede o giro, a inversão e a proporção do círculo em um JPEG ou MP4. A perspectiva pode imitar deformação. Use o alvo nivelado e perpendicular ao eixo óptico e confirme a montagem antes de interpretar o resultado. Mire em todos os marcadores durante a volta. Também é preciso observar ou registrar o giro físico do telefone. Os testes sintéticos estão em `tools/calibration/test_horizon_chart.py`.

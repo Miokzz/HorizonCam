@@ -11,6 +11,7 @@ import android.graphics.Rect
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.MediaStore
+import java.io.File
 import kotlin.math.roundToInt
 
 object AiPhotoFiles {
@@ -62,35 +63,38 @@ object AiPhotoFiles {
         }
     }
 
-    fun save(context: Context, source: Uri, bitmap: Bitmap, prefix: String, description: String, reserved: Uri? = null): Uri {
+    fun encode(context: Context, source: Uri, bitmap: Bitmap, file: File, description: String) {
+        val original = context.contentResolver.openInputStream(source)?.use { runCatching { ExifInterface(it) }.getOrNull() }
+        file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.JPEG, 96, it)) }
+        val exif = ExifInterface(file)
+        val tags = listOf(ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL, ExifInterface.TAG_DATETIME_ORIGINAL,
+            ExifInterface.TAG_FOCAL_LENGTH, ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_F_NUMBER,
+            ExifInterface.TAG_WHITE_BALANCE, ExifInterface.TAG_FLASH, ExifInterface.TAG_ISO_SPEED_RATINGS)
+        tags.forEach { tag -> original?.getAttribute(tag)?.let { exif.setAttribute(tag, it) } }
+        exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+        exif.setAttribute(ExifInterface.TAG_SOFTWARE, "HorizonCam 2.0")
+        exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, description)
+        exif.saveAttributes()
+    }
+
+    fun copyAndPublish(context: Context, jpeg: File, uri: Uri) {
         val resolver = context.contentResolver
-        val original = resolver.openInputStream(source)?.use { runCatching { ExifInterface(it) }.getOrNull() }
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "${prefix}_${System.currentTimeMillis()}.jpg")
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HorizonCam")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
-        val uri = reserved ?: requireNotNull(resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
+        requireNotNull(resolver.openOutputStream(uri, "wt")).use { out -> jpeg.inputStream().use { it.copyTo(out) } }
+        check(resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null) == 1)
+    }
+
+    fun save(context: Context, source: Uri, bitmap: Bitmap, prefix: String, description: String): Uri {
+        val resolver = context.contentResolver
+        val jpeg = File.createTempFile("hc-render-", ".jpg", context.cacheDir)
         try {
-            requireNotNull(resolver.openOutputStream(uri, "wt")).use { check(bitmap.compress(Bitmap.CompressFormat.JPEG, 96, it)) }
-            requireNotNull(resolver.openFileDescriptor(uri, "rw")).use { file ->
-                val exif = ExifInterface(file.fileDescriptor)
-                listOf(ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL, ExifInterface.TAG_DATETIME_ORIGINAL,
-                    ExifInterface.TAG_FOCAL_LENGTH, ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_F_NUMBER,
-                    ExifInterface.TAG_ISO_SPEED_RATINGS).forEach { tag ->
-                    original?.getAttribute(tag)?.let { exif.setAttribute(tag, it) }
-                }
-                exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-                exif.setAttribute(ExifInterface.TAG_SOFTWARE, "HorizonCam 2.0")
-                exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, description)
-                exif.saveAttributes()
+            encode(context, source, bitmap, jpeg, description)
+            val values = CaptureLibrary.values(true).apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "${prefix}_${System.currentTimeMillis()}.jpg")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
             }
-            check(resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null) == 1)
-            return uri
-        } catch (error: Throwable) {
-            resolver.delete(uri, null, null)
-            throw error
-        }
+            val uri = requireNotNull(resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values))
+            try { copyAndPublish(context, jpeg, uri); return uri }
+            catch (e: Throwable) { runCatching { resolver.delete(uri, null, null) }; throw e }
+        } finally { jpeg.delete() }
     }
 }
