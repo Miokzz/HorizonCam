@@ -78,3 +78,17 @@ including those losses, are in `validation_report.json`; scripts save all baseli
 Observed 65×65 tiled float32 inference was approximately 0.40s on this Windows development CPU,
 not a phone benchmark. Two synthetic crops do not establish general photo quality or parity
 with any phone maker's proprietary restoration pipeline.
+
+## Android handset run
+
+The companion test APK bundles only the two public-domain NASA astronaut fixture pairs from the validation script. It exercises the shipping NativeRestorer, its normal output dimensions, and its actual blending for 1×, 2.3×, 7.8×, 16.5× and 30×. These are matched-framing restoration measurements on controlled degradations. Zoom here varies blending strength. Tests of the physical camera and viewport require actual captures.
+
+Install the app and companion test APK from the same Actions run and signing key. On a connected device run:
+
+```sh
+adb install -r app-debug.apk
+adb install -r -t app-debug-androidTest.apk
+adb shell am instrument -w -r -e class com.miokzz.horizoncam.RestorationDeviceTest com.miokzz.horizoncam.gl.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The test prints reference PSNR before/after, tiles and native elapsed time per fixture. Camera logs under HorizonAuto record latency, source grid, PSS and separate scene metrics on actual shots. The flat-region noise and edge estimates cannot measure identity preservation or prove the correctness of generated detail.

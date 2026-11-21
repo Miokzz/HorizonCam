@@ -51,7 +51,7 @@ jobs:
           key: horizoncam-debug-keystore-v1
 
       - name: Build debug APK
-        run: gradle --stacktrace :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+        run: gradle --stacktrace :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
 
       - name: Save persistent debug signing key
         if: success() && steps.debug-key-restore.outputs.cache-hit != 'true'
@@ -72,6 +72,14 @@ jobs:
         with:
           name: HorizonCam-S24-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload physical-device quality test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorizonCam-device-tests
+          path: app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           if-no-files-found: error
           retention-days: 30
 

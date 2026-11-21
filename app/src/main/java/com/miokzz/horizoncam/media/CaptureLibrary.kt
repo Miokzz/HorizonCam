@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.media.MediaMetadataRetriever
+import com.miokzz.horizoncam.video.VideoFileDiagnostics
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Log
@@ -37,16 +37,8 @@ class CaptureLibrary(context: Context) : AutoCloseable {
                     app.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
                     Log.i(TAG, "$mime saved ${options.outWidth}x${options.outHeight}")
                 } else {
-                    val reader = MediaMetadataRetriever()
-                    try {
-                        reader.setDataSource(app, uri)
-                        val width = reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                        val height = reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                        val rotation = reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
-                        Log.i(TAG, "MP4 saved ${width}x${height} rotation=$rotation")
-                    } finally {
-                        reader.release()
-                    }
+                    val details = VideoFileDiagnostics.inspect(app, uri, maxSamples = 600)
+                    Log.i(TAG, "MP4 saved ${details.encodedWidth}x${details.encodedHeight} rotation=${details.rotationDegrees} cadence=${details.cadence}")
                 }
                 app.contentResolver.loadThumbnail(uri, Size(144, 144), null)
             }.onSuccess { bitmap ->

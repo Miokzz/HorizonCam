@@ -359,8 +359,15 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             photoCaps = runCatching { AdvancedPhotoCapabilities.inspect(this, info, choice.physicalCameraId) }.getOrNull()
             eisSupported = runCatching { Preview.getPreviewCapabilities(info).isStabilizationSupported &&
                 Recorder.getVideoCapabilities(info).isStabilizationSupported }.getOrDefault(false)
-            val group = if (photoMode) {
-                PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider, photoSettings, photoCaps, hdrRequested).also { photo = it }.group
+            val captureSelector = if (hdrRequested && photoMode) {
+                val selected = hdr?.selection(choice, true)
+                check(selected?.hdrEnabled == true) { selected?.reason ?: "HDR indisponível" }
+                selected.selector
+            } else choice.selector
+            val bound = if (photoMode) {
+                val engine = PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider, photoSettings, photoCaps, hdrRequested)
+                photo = engine
+                owner.bindToLifecycle(this, captureSelector, engine.group)
             } else {
                 if (horizon.mode() == StabilizationMode.STEADY && (!eisSupported || !allowEis)) {
                     horizon.setMode(StabilizationMode.OFF)
@@ -370,19 +377,15 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 val aspect = if (locked || !portrait) Rational(16, 9) else Rational(9, 16)
                 val surface = if (locked) ui.previewView else ui.photoPreview.surfaceProvider
                 val eis = allowEis && eisSupported && horizon.mode() == StabilizationMode.STEADY && fps == 30 && requestedQuality == Quality.FHD
-                VideoEngine(horizon, builder, surface, rotation, aspect, requestedQuality, fps, eis) { error ->
+                val engine = VideoEngine(horizon, builder, surface, rotation, aspect, requestedQuality, fps, eis, info) { error ->
                     main.execute { if (session == token && !isDestroyed) {
                         if (recording != null) stopVideo()
                         fail("Falha no processamento de vídeo", error)
                     } }
-                }.also { video = it }.group
+                }
+                video = engine
+                owner.bindToLifecycle(this, captureSelector, engine.sessionConfig)
             }
-            val captureSelector = if (hdrRequested && photoMode) {
-                val selected = hdr?.selection(choice, true)
-                check(selected?.hdrEnabled == true) { selected?.reason ?: "HDR indisponível" }
-                selected.selector
-            } else choice.selector
-            val bound = owner.bindToLifecycle(this, captureSelector, group)
             camera = bound
             manager.onBound(choice, bound)
             if ((mode == ShootingMode.PRO && photoSettings.manual != ManualPhotoSettings()) || choice.cameraId in manualOverrides) {
@@ -443,7 +446,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 toast("A lente recusou este modo. Usando a câmera automática.")
                 rebind()
             }
-            !photoMode && allowEis && video?.nativeEis == true -> rebind(false)
+            !photoMode && allowEis && horizon.mode() == StabilizationMode.STEADY -> rebind(false)
             !photoMode && fps != 30 -> { fps = 30; toast("Gravação disponível a 30 fps."); rebind() }
             !photoMode && requestedQuality == Quality.UHD -> {
                 requestedQuality = Quality.FHD; toast("4K indisponível nesta combinação."); rebind()
@@ -456,12 +459,12 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val choice = lens ?: return null
         val state = if (choice.isPhysicalOnly) null else camera?.cameraInfo?.zoomState?.value
         return lenses?.route(requested, choice.key, state?.minZoomRatio ?: choice.minCameraZoom,
-            state?.maxZoomRatio ?: choice.maxCameraZoom, recording != null, preferred)
+            state?.maxZoomRatio ?: choice.maxCameraZoom, recording != null, preferred, stillPhoto = autoJpeg && !hdrRequested)
     }
 
     private fun zoomTo(requested: Float, preferred: String? = null) {
         if (!ready || takingPhoto || awaitingMic || stopping) return
-        val desired = if (autoJpeg) requested.coerceAtMost(StillFraming.MAX_ZOOM) else requested
+        val desired = if (autoJpeg && preferred == null) requested.coerceIn(0.6f, StillFraming.MAX_ZOOM) else requested
         val route = route(desired, preferred) ?: return
         val crop = if (autoJpeg && preferred == null)
             StillFraming.digitalRatio(desired, route.displayZoom) else 1f
@@ -496,7 +499,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun choosePhotoZoom() {
         if (!autoJpeg || busy || !ready) return
-        val min = ((route(0.01f)?.displayZoom ?: 1f) * 10).toInt().coerceIn(1, 300)
+        val min = kotlin.math.ceil((route(0.01f)?.displayZoom ?: 1f) * 10 - 0.001f).toInt().coerceIn(6, 300)
         val slider = SeekBar(this).apply {
             max = 300 - min
             progress = (displayZoom * 10 + 0.5f).toInt().coerceIn(min, 300) - min
@@ -611,6 +614,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             takingPhoto = true
             render()
             if (mode == ShootingMode.PHOTO && photoSettings.format == PhotoFormat.JPEG) {
+                val trace = lenses?.diagnostics()
+                Log.i(TAG, "Disparo zoom=$displayZoom recorte=$extraCrop camera=${trace?.selectedCameraId} fisicaSolicitada=${trace?.selectedPhysicalCameraId} ativaHAL=${trace?.activePhysicalCameraId}")
                 AutoPhotos.capture(applicationContext, engine.capture, displayZoom, extraCrop, main) { error ->
                     takingPhoto = false
                     if (!isDestroyed) {
@@ -751,7 +756,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             menu.add(0, 2, 1, "Ultra HD · 4K").isEnabled = cap.uhd && horizon.mode() != StabilizationMode.STEADY
             setOnMenuItemClickListener {
                 requestedQuality = if (it.itemId == 2) Quality.UHD else Quality.FHD
-                if (requestedQuality == Quality.UHD) fps = 30
+                if (!cap.supportsFps(requestedQuality, fps)) fps = 30
                 rebind()
                 true
             }
@@ -925,7 +930,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             "Sensor ativo informado pelo HAL: ${info?.activePhysicalCameraId ?: "não informado"}",
             "Zoom relativo à principal: ${formatZoom(displayZoom)}",
             "Buffer: ${resolution?.resolution ?: "—"} · rotação ${resolution?.rotationDegrees ?: "—"}°",
-            if (photoMode) "Foto: ${photoSettings.format} · alta resolução: ${photoSettings.highResolution} · HDR: $hdrRequested" else "FPS solicitado: $fps · EIS: ${video?.nativeEis == true}",
+            if (photoMode) "Foto: ${photoSettings.format} · alta resolução: ${photoSettings.highResolution} · HDR: $hdrRequested" else "Configuração da gravação: ${video?.diagnostics()}",
             if (locked) "Horizon Lock: ${sensor.sourceName} · ${video?.effect?.processor?.diagnostics() ?: "aguardando"}" else "",
             ids, info?.rejection?.let { "Configuração recusada: $it" }.orEmpty()
         ).filter { it.isNotBlank() }.joinToString("\n")
@@ -942,7 +947,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         presets.forEach { (value, button) ->
             val candidate = route(value)
             button.isEnabled = ready && !takingPhoto && !awaitingMic && !stopping && candidate != null &&
-                abs(candidate.displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value)
+                ((autoJpeg && value >= candidate.displayZoom) ||
+                    abs(candidate.displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value))
             button.isSelected = abs(displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value)
         }
     }
@@ -965,10 +971,17 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.fpsButton.isVisible = !photoMode
         ui.lockButton.isVisible = !photoMode
         ui.qualityButton.isEnabled = ready && !busy
-        ui.qualityButton.text = if (requestedQuality == Quality.UHD) "4K" else "FHD"
-        ui.fpsButton.isEnabled = ready && !busy && (fps == 60 || (capabilities?.fps60 == true &&
-            requestedQuality == Quality.FHD && horizon.mode() != StabilizationMode.STEADY))
-        ui.fpsButton.text = fps.toString()
+        val selectedVideo = video?.diagnostics()
+        ui.qualityButton.text = selectedVideo?.selectedQuality?.replace("UHD", "4K")
+            ?: if (requestedQuality == Quality.UHD) "4K" else "FHD"
+        ui.fpsButton.isEnabled = ready && !busy && (fps == 60 || (capabilities?.supportsFps(requestedQuality, 60) == true && horizon.mode() != StabilizationMode.STEADY))
+        val cadence = selectedVideo?.configuredFpsRange
+        ui.fpsButton.text = when {
+            selectedVideo == null -> fps.toString()
+            cadence == null -> "Auto"
+            cadence.lower == cadence.upper -> cadence.upper.toString()
+            else -> "≤${cadence.upper}"
+        }
         ui.lockButton.isEnabled = !busy
         ui.lockButton.text = when (horizon.mode()) {
             StabilizationMode.HORIZONTAL_LOCK -> "360°"

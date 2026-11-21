@@ -72,7 +72,8 @@ class RearLensManager private constructor(
         minZoom: Float,
         maxZoom: Float,
         recording: Boolean,
-        preferredKey: String? = null
+        preferredKey: String? = null,
+        stillPhoto: Boolean = false
     ): ZoomRoute {
         option(currentKey)?.takeUnless { it.isPhysicalOnly }?.let { current ->
             if (minZoom.isFinite() && maxZoom.isFinite() && minZoom > 0f && maxZoom >= minZoom) {
@@ -82,7 +83,7 @@ class RearLensManager private constructor(
         }
         return ZoomRouter.route(requested, currentKey, defaultOption.key,
             options.map { runtimeSpecs[it.key] ?: it.zoomSpec }, recording,
-            rejected.keys.toSet(), preferredKey)
+            rejected.keys.toSet(), preferredKey, stillPhoto)
     }
 
     /** Call on main after a successful bind. Reading physical CameraInfo zoomState is avoided. */

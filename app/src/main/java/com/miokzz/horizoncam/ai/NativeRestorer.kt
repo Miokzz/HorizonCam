@@ -101,7 +101,8 @@ object NativeRestorer {
                             val pixel = areaSample(prediction, AiGeometry.HALO * 4 + x * samples,
                                 AiGeometry.HALO * 4 + y * samples, samples)
                             // Low-ISO wide shots retain most of the measured high-frequency signal.
-                            val restored = blend(source[local], pixel, strength)
+                            val neighbour = source[if (x > 0) local - 1 else if (y > 0) local - w else local]
+                            val restored = RestorationStrength.protect(source[local], pixel, neighbour, strength)
                             previous[local] = blend(previous[local], restored, weight.toFloat() / (prior + weight))
                             accumulated[global] = (prior + weight).toShort()
                         }

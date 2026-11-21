@@ -19,6 +19,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import com.miokzz.horizoncam.ai.CaptureMetrics
 import com.miokzz.horizoncam.ai.NativeRestorer
 import java.io.File
 import java.util.UUID
@@ -160,6 +161,9 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                 if (isStopped) throw CancellationException()
                 AiPhotoFiles.save(app, Uri.fromFile(file), result.bitmap, "HC",
                     "Horizon AI · Real-ESRGAN general-x4v3 · textura estimada · zoom ${zoom}x", target)
+                val before = CaptureMetrics.summary(source)
+                val after = CaptureMetrics.summary(result.bitmap)
+                Log.i("HorizonAuto", "scene zoom=$zoom residual=$crop iso=$iso before=$before after=$after pssKb=${android.os.Debug.getPss()}")
                 Log.i("HorizonAuto", "Real-ESRGAN ${source.width}x${source.height} grid=${result.modelWidth}x${result.modelHeight} ms=${result.elapsedMs}")
             } finally { result.bitmap.recycle() }
         } finally { source.recycle() }

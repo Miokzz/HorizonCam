@@ -10,8 +10,9 @@ android {
         applicationId = "com.miokzz.horizoncam.gl"
         minSdk = 29
         targetSdk = 36
-        versionCode = 108
-        versionName = "2.0.0-phase4"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionCode = 109
+        versionName = "2.0.0-phase5"
     }
 
     buildTypes {
@@ -49,4 +50,6 @@ dependencies {
     implementation("androidx.camera:camera-extensions:$cameraX")
     implementation("androidx.camera:camera-view:$cameraX")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("junit:junit:4.13.2")
 }

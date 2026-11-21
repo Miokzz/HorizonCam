@@ -33,6 +33,10 @@ O modo **Noturno** captura cinco quadros reais e tenta uma exposição mais curt
 
 A tela mostra os blocos concluídos e permite cancelar ou voltar à câmera. O JPEG derivado identifica o processamento nos metadados. Após salvar, alterne entre **Original** e **Horizon AI** para comparar o mesmo enquadramento. Para testes comparativos consulte [Avaliação de zoom](docs/ZOOM_EVALUATION.md) e [modelo e licença](docs/HORIZON_AI.md).
 
+## Fase 5 · Modos de vídeo
+
+A lista de 30/60 fps considera a qualidade e as combinações de prévia e gravação que o CameraX expõe. Ao abrir a sessão o app consulta novamente a combinação completa, incluindo o efeito Horizon Lock ou a estabilização nativa. Quando a faixa é variável, a interface mostra o seu teto. Quando a consulta é inconclusiva a 30 fps, a câmera pode usar a cadência automática. O diagnóstico registra a qualidade selecionada, o recorte e o resultado da leitura dos timestamps do MP4.
+
 ## Instalar e testar
 
 1. Em [GitHub Actions](https://github.com/Miokzz/HorizonCam/actions/workflows/build-apk.yml), abra a execução correspondente ao commit que deseja testar. Baixe **HorizonCam-S24-debug**, extraia e instale `app-debug.apk`.

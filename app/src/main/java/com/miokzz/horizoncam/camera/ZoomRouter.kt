@@ -40,7 +40,8 @@ object ZoomRouter {
         options: List<LensZoomSpec>,
         recording: Boolean,
         rejected: Set<String> = emptySet(),
-        preferredKey: String? = null
+        preferredKey: String? = null,
+        stillPhoto: Boolean = false
     ): ZoomRoute {
         require(options.any { it.key == defaultKey })
         val safeRequested = requested.takeIf { it.isFinite() && it > 0f } ?: 1f
@@ -51,9 +52,15 @@ object ZoomRouter {
             safeRequested <= spec.maxDisplayZoom + EPSILON
 
         val explicit = usable.firstOrNull { it.key == preferredKey }
+        // For a still, prefer a physically addressable longer focal length which can contain
+        // the complete requested field. The logical camera remains the fallback on bind failure.
+        val longLens = if (stillPhoto && !recording) usable.filter {
+            it.relativeZoom >= 1.5f && it.relativeZoom <= safeRequested && it.key != defaultKey
+        }.maxWithOrNull(compareBy<LensZoomSpec> { it.relativeZoom }.thenBy { !it.fixedPhysicalStream }) else null
         val target = when {
             recording -> current // A recording must never trigger unbind/rebind.
             explicit != null -> explicit
+            longLens != null -> longLens
             current.key in rejected -> default
             default.key !in rejected && contains(default) -> default // Preserve logical continuity.
             current.key !in rejected && contains(current) -> current
