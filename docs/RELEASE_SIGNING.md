@@ -10,3 +10,6 @@ Para produzir uma release verdadeiramente assinada, o proprietário deve, **loca
 4. Compilar `gradle :app:assembleRelease`, verificar assinatura via `apksigner verify --print-certs`, e instalar em hardware.
 
 Release assinado não é gerado automaticamente enquanto não houver chave do proprietário configurada.
+
+
+Os APKs de teste atuais do workflow usam o secret de repositório `HORIZONCAM_TEST_KEYSTORE_V1` e uma chave exclusiva para builds de desenvolvimento. O certificado SHA-256 é `4b90c2ec8c6090ee53014eeedd9938fa337465b767677c496804487d5487a7af`. O pipeline verifica o certificado do app e do teste instrumentado antes de publicar. Alguns APKs anteriores usam certificados diferentes. O Android só aceita atualização direta quando o certificado coincide. A chave privada de teste fica fora do Git.

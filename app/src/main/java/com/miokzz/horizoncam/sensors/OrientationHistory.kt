@@ -55,7 +55,8 @@ class OrientationHistory(private val capacity: Int = 512) {
         }
         if (timestampNs == last.t) return FrameSample(last.roll, true, 0.0)
         var newer = last
-        for (older in samples.reversed()) {
+        for (index in samples.lastIndex - 1 downTo 0) {
+            val older = samples[index]
             if (older.t == timestampNs) return FrameSample(older.roll, true, 0.0)
             if (older.t < timestampNs) {
                 val span = newer.t - older.t

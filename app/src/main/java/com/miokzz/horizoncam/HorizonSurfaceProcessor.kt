@@ -23,7 +23,9 @@ class HorizonSurfaceProcessor(
         val info: SurfaceOutput,
         val surface: Surface,
         val transform: FloatArray = FloatArray(16),
-        val sensorToBufferGlDegrees: Float
+        val sensorToBufferGlDegrees: Float,
+        val aspect: Float = info.size.width.toFloat() / info.size.height.coerceAtLeast(1),
+        val crop: Float = AngleMath.safeFixedCrop(aspect.toDouble()).toFloat()
     )
 
     private val egl = EglCore()
@@ -41,6 +43,14 @@ class HorizonSurfaceProcessor(
     // CameraEffect(PREVIEW | VIDEO_CAPTURE) can provide multiple output surfaces.
     // Keep all of them alive and draw each processed frame to every target.
     private val outputs = IdentityHashMap<SurfaceOutput, OutputTarget>()
+
+    // All mutations and drawing run on the same GL looper. Replace the array only when
+    // CameraX adds/removes a surface, including exceptional removal while drawing a frame.
+    private var drawTargets = emptyArray<OutputTarget>()
+    private fun updateOutputs() {
+        drawTargets = outputs.values.toTypedArray()
+        registeredTargets = outputs.keys.fold(0) { mask, key -> mask or key.targets }
+    }
 
     private val cameraTextureMatrix = FloatArray(16)
     private val vertexMatrix = FloatArray(16)
@@ -119,7 +129,7 @@ class HorizonSurfaceProcessor(
                 if (target != null) {
                     egl.unregister(target.surface)
                 }
-                registeredTargets = outputs.keys.fold(0) { mask, key -> mask or key.targets }
+                updateOutputs()
                 surfaceOutput.close()
             }
 
@@ -135,7 +145,7 @@ class HorizonSurfaceProcessor(
                 "${it.info.size.width}x${it.info.size.height}@${it.sensorToBufferGlDegrees.toInt()}"
             }
             android.util.Log.i("HorizonCamGL", "Output $outputShapes targets=${surfaceOutput.targets}")
-            registeredTargets = outputs.keys.fold(0) { mask, key -> mask or key.targets }
+            updateOutputs()
         } catch (t: Throwable) {
             surfaceOutput.close()
             throw ProcessingException().apply { initCause(t) }
@@ -160,15 +170,13 @@ class HorizonSurfaceProcessor(
             sensorFrameAgeMs = frame.sensorAgeMs
             timestampsMatched = frame.timestampValid
 
-            val targets = outputs.values.toList()
-            for (target in targets) {
-                if (!outputs.containsKey(target.info)) continue
+            for (target in drawTargets) {
 
                 target.info.updateTransformMatrix(target.transform, cameraTextureMatrix)
 
                 val size = target.info.size
-                val aspect = size.width.toFloat() / size.height.coerceAtLeast(1)
-                val zoom = if (state.isEnabled()) AngleMath.safeFixedCrop(aspect.toDouble()).toFloat() else 1f
+                val aspect = target.aspect
+                val zoom = if (state.isEnabled()) target.crop else 1f
                 // CameraX still applies its static sensor-mount/target rotation
                 // downstream. Proper 2D rotations commute, so the dynamic
                 // correction has the SAME sign in native and target axes.
@@ -186,7 +194,7 @@ class HorizonSurfaceProcessor(
                     outputs.remove(target.info)
                     runCatching { egl.unregister(target.surface) }
                     runCatching { target.info.close() }
-                    registeredTargets = outputs.keys.fold(0) { mask, key -> mask or key.targets }
+                    updateOutputs()
                 }
             }
             renderedFrames++
@@ -221,7 +229,7 @@ class HorizonSurfaceProcessor(
                     target.info.close()
                 }
                 outputs.clear()
-                registeredTargets = 0
+                updateOutputs()
             }
             // Keep the GL executor/context alive until every producer has been
             // returned by CameraX. Releasing sooner races encoder/camera writes.

@@ -47,10 +47,7 @@ object NativeRestorer {
             destination = output
             val accumulated = ShortArray(count.toInt())
             val tiles = AiGeometry.tiles(guideW, guideH)
-            val bytes = context.assets.open(RestorationModel.ASSET).use { it.readBytes() }
-            require(bytes.size == RestorationModel.BYTES &&
-                MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) } == RestorationModel.SHA256)
-            val model = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply { put(bytes); rewind() }
+            val model = modelBuffer(context)
             val options = Interpreter.Options().setNumThreads(2)
             Interpreter(model, options).use { interpreter ->
                 val inputTensor = interpreter.getInputTensor(0)
@@ -118,6 +115,18 @@ object NativeRestorer {
             if (baseline !== original) baseline?.recycle()
             if (guide !== original) guide.recycle()
         }
+    }
+
+    private var verifiedModel: ByteBuffer? = null
+
+    @Synchronized private fun modelBuffer(context: Context): ByteBuffer {
+        verifiedModel?.let { return it.duplicate().order(ByteOrder.nativeOrder()) }
+        val bytes = context.assets.open(RestorationModel.ASSET).use { it.readBytes() }
+        val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
+        check(bytes.size == RestorationModel.BYTES && hash == RestorationModel.SHA256)
+        val model = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply { put(bytes); rewind() }
+        verifiedModel = model.asReadOnlyBuffer()
+        return model
     }
 
     fun samplingFactor(longEdge: Int): Int = when {

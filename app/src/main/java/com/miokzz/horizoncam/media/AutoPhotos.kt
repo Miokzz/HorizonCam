@@ -149,14 +149,18 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         val source = decodeFramed(file, crop)
         try {
             var lastPercent = -1
+            val power = app.getSystemService(PowerManager::class.java)
+            var tooHot = false
             val upscale = com.miokzz.horizoncam.camera.StillFraming.reconstructionScale(source.width, source.height, crop, NativeRestorer.MAX_PIXELS)
             val result = NativeRestorer.restore(app, source, zoom, iso, upscale, { progress ->
                 val percent = 100 * progress.completedTiles / progress.totalTiles
                 if (lastPercent != percent) {
                     AutoPhotos.post(AutoPhotos.State(true, "Revelando foto · $percent%"))
                     lastPercent = percent
+                    tooHot = (power?.currentThermalStatus ?: 0) >= PowerManager.THERMAL_STATUS_SEVERE
+                    if (tooHot) AutoPhotos.post(AutoPhotos.State(true, "Restauração aguardando resfriamento"))
                 }
-            }, { isStopped })
+            }, { isStopped || tooHot })
             try {
                 if (isStopped) throw CancellationException()
                 AiPhotoFiles.save(app, Uri.fromFile(file), result.bitmap, "HC",

@@ -37,6 +37,10 @@ A tela mostra os blocos concluídos e permite cancelar ou voltar à câmera. O J
 
 A lista de 30/60 fps considera a qualidade e as combinações de prévia e gravação que o CameraX expõe. Ao abrir a sessão o app consulta novamente a combinação completa, incluindo o efeito Horizon Lock ou a estabilização nativa. Quando a faixa é variável, a interface mostra o seu teto. Quando a consulta é inconclusiva a 30 fps, a câmera pode usar a cadência automática. O diagnóstico registra a qualidade selecionada, o recorte e o resultado da leitura dos timestamps do MP4.
 
+## Fase 6 · Recursos e temperatura
+
+Foto libera o disparador após guardar o JPEG privado. O WorkManager serializa as revelações e retoma a fila se o processo for encerrado. Ao detectar temperatura severa, o app deixa o original na fila e tenta novamente depois. Em temperatura crítica, o gravador solicita a finalização do MP4. O renderizador mantém os destinos GL e interpola a orientação sem copiar o histórico a cada frame. Os resultados da câmera dependem do aparelho, firmware, iluminação e movimento.
+
 ## Instalar e testar
 
 1. Em [GitHub Actions](https://github.com/Miokzz/HorizonCam/actions/workflows/build-apk.yml), abra a execução correspondente ao commit que deseja testar. Baixe **HorizonCam-S24-debug**, extraia e instale `app-debug.apk`.

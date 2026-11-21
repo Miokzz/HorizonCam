@@ -36,7 +36,6 @@ import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.Quality
-import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
@@ -89,6 +88,16 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var photo: PhotoEngine? = null
     private var video: VideoEngine? = null
     private var capabilities: CameraCapabilities? = null
+    private val videoCapsCache = mutableMapOf<String, CameraCapabilities>()
+    private val photoCapsCache = mutableMapOf<String, AdvancedPhotoCapabilities>()
+    private val power by lazy { getSystemService(android.os.PowerManager::class.java) }
+    private val thermalListener = android.os.PowerManager.OnThermalStatusChangedListener { level ->
+        Log.i(TAG, "Nível térmico do sistema: $level")
+        if (level >= android.os.PowerManager.THERMAL_STATUS_CRITICAL && recording != null && !stopping) {
+            toast("Temperatura crítica: finalizando o MP4.")
+            stopVideo()
+        }
+    }
     private var eisSupported = false
     private var mode = ShootingMode.VIDEO
     private val photoMode get() = mode != ShootingMode.VIDEO
@@ -355,10 +364,11 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
             val info = owner.availableCameraInfos.firstOrNull { Camera2CameraInfo.from(it).cameraId == choice.cameraId }
                 ?: owner.getCameraInfo(choice.selector)
-            capabilities = runCatching { CameraCapabilities.inspect(this, info) }.getOrNull()
-            photoCaps = runCatching { AdvancedPhotoCapabilities.inspect(this, info, choice.physicalCameraId) }.getOrNull()
-            eisSupported = runCatching { Preview.getPreviewCapabilities(info).isStabilizationSupported &&
-                Recorder.getVideoCapabilities(info).isStabilizationSupported }.getOrDefault(false)
+            capabilities = if (photoMode) null else runCatching {
+                videoCapsCache.getOrPut(choice.key) { CameraCapabilities.inspect(this, info) }
+            }.getOrNull()
+            photoCaps = runCatching { photoCapsCache.getOrPut(choice.key) { AdvancedPhotoCapabilities.inspect(this, info, choice.physicalCameraId) } }.getOrNull()
+            eisSupported = capabilities?.nativeEisDeclared == true
             val captureSelector = if (hdrRequested && photoMode) {
                 val selected = hdr?.selection(choice, true)
                 check(selected?.hdrEnabled == true) { selected?.reason ?: "HDR indisponível" }
@@ -672,6 +682,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun beginVideo() {
         val engine = video ?: return
+        if ((power?.currentThermalStatus ?: 0) >= android.os.PowerManager.THERMAL_STATUS_CRITICAL) {
+            toast("Aguarde o aparelho resfriar para gravar.")
+            return
+        }
         if (locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos())) {
             toast("Aponte a câmera para a cena e aguarde a referência de gravidade.")
             render()
@@ -923,7 +937,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val resolution = photo?.capture?.resolutionInfo ?: video?.capture?.resolutionInfo
         val ids = capabilities?.availableLenses?.joinToString("\n") { entry ->
             "ID ${entry.id}: ${entry.physicalIds.sorted().joinToString().ifBlank { "sem IDs físicos anunciados" }}"
-        }.orEmpty()
+        } ?: manager?.options.orEmpty().joinToString("\n") { it.label }
         val report = listOf(
             "Câmera da sessão: ${info?.selectedCameraId ?: "—"}",
             "Saída física solicitada: ${info?.selectedPhysicalCameraId ?: "automática"}",
@@ -1053,6 +1067,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     override fun onResume() {
         super.onResume()
+        power?.addThermalStatusListener(main, thermalListener)
         WindowInsetsControllerCompat(window, ui.root).apply {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -1064,6 +1079,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     override fun onPause() {
+        power?.removeThermalStatusListener(thermalListener)
         ui.root.removeCallbacks(telemetry)
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(this)
         if (recording == null) { sensor.stop(); horizon.clearOrientation() }

@@ -7,12 +7,22 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.miokzz.horizoncam.gl"
+        applicationId = if (providers.gradleProperty("horizonFieldBuild").isPresent)
+            "com.miokzz.horizoncam.gl.field" else "com.miokzz.horizoncam.gl"
         minSdk = 29
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 109
-        versionName = "2.0.0-phase5"
+        versionCode = 110
+        versionName = "2.0.0-rc1"
+    }
+
+    providers.environmentVariable("HORIZONCAM_CI_KEYSTORE").orNull?.let { path ->
+        signingConfigs.getByName("debug") {
+            storeFile = file(path)
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
