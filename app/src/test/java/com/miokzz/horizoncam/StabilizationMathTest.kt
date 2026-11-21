@@ -8,6 +8,27 @@ import org.junit.Test
 import kotlin.math.*
 
 class StabilizationMathTest {
+    @Test fun denserTimestampedAttitudeReducesInterpolationErrorForSyntheticRollTremor() {
+        // A numerical sampling regression, not proof of stabilization on a phone.
+        fun roll(t: Long) = -90.0 + 3.0 * sin(2.0 * PI * 8.0 * t / 1e9)
+        fun error(sampleIntervalNs: Long): Double {
+            val history = OrientationHistory()
+            val base = 1_000_000_000L
+            var sample = 0L
+            while (sample <= 1_000_000_000L) {
+                history.append(base + sample, roll(sample))
+                sample += sampleIntervalNs
+            }
+            return (1..59).sumOf { frame ->
+                val t = frame * 1_000_000_000L / 60
+                val measured = history.sample(base + t, true)
+                assertTrue(measured.validTimestamp)
+                (measured.rollDegrees - roll(t)).pow(2)
+            } / 59
+        }
+        assertTrue(error(5_000_000L) < error(20_000_000L) / 10.0)
+    }
+
     @Test fun crossingPlusMinus180IsSmooth() {
         assertEquals(2.0, AngleMath.delta(179.0, -179.0), 0.0001)
         val timeline = OrientationHistory()

@@ -62,6 +62,8 @@ class HorizonSurfaceProcessor(
     private var lastErrorAtMs = 0L
     @Volatile private var registeredTargets = 0
     @Volatile private var renderedFrames = 0L
+    @Volatile private var synchronizedFrames = 0L
+    @Volatile private var orientationFrames = 0L
 
     fun diagnostics(): String {
         val mask = registeredTargets
@@ -69,7 +71,8 @@ class HorizonSurfaceProcessor(
         val v = if (mask and CameraEffect.VIDEO_CAPTURE != 0) 1 else 0
         val sync = if (timestampsMatched) "SYNC" else "LATEST"
         return "P" + p + " V" + v + " F" + renderedFrames +
-            " E" + errorCount + " " + sync + " " + sensorFrameAgeMs.toInt() + "ms " + inputShape + ">" + outputShapes
+            " E" + errorCount + " " + sync + " " + sensorFrameAgeMs.toInt() + "ms " +
+            "matched=" + synchronizedFrames + "/" + orientationFrames + " " + inputShape + ">" + outputShapes
     }
 
     override fun onInputSurface(request: SurfaceRequest) {
@@ -85,6 +88,8 @@ class HorizonSurfaceProcessor(
             inputTexture?.setOnFrameAvailableListener(null)
 
             inputShape = "${request.resolution.width}x${request.resolution.height}"
+            synchronizedFrames = 0L
+            orientationFrames = 0L
             android.util.Log.i("HorizonCamGL", "Input $inputShape")
             val surfaceTexture = SurfaceTexture(rendererTextureId()).apply {
                 setDefaultBufferSize(request.resolution.width, request.resolution.height)
@@ -169,6 +174,10 @@ class HorizonSurfaceProcessor(
             val frame = state.frameGeometry(timestamp, arrivalTimeNs = android.os.SystemClock.elapsedRealtimeNanos())
             sensorFrameAgeMs = frame.sensorAgeMs
             timestampsMatched = frame.timestampValid
+            if (state.isEnabled()) {
+                orientationFrames++
+                if (frame.timestampValid) synchronizedFrames++
+            }
 
             for (target in drawTargets) {
 
@@ -198,6 +207,9 @@ class HorizonSurfaceProcessor(
                 }
             }
             renderedFrames++
+            if (renderedFrames % 300L == 0L) {
+                android.util.Log.i("HorizonCamGL", "Frame timing ${diagnostics()}")
+            }
         } catch (t: Throwable) {
             // Log and expose an explicit error; do not crash the GL looper.
             reportRenderError(t)

@@ -8,6 +8,7 @@ import android.hardware.SensorManager
 import android.os.Handler
 import android.os.HandlerThread
 import com.miokzz.horizoncam.sensors.RollFusion
+import com.miokzz.horizoncam.sensors.SensorCadence
 import kotlin.math.exp
 
 /** Public fused attitude preferred; gravity/accelerometer use the identical world-up sign. */
@@ -21,6 +22,7 @@ class GravityRollSensor(
         ?: manager.getDefaultSensor(Sensor.TYPE_GRAVITY)
         ?: manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
     private val fusion = RollFusion()
+    private val cadence = SensorCadence()
     private val rotation = FloatArray(9)
     private val sensorThread = HandlerThread("HorizonCam-Inertial").apply { start() }
     private val sensorHandler = Handler(sensorThread.looper)
@@ -29,18 +31,29 @@ class GravityRollSensor(
     private var previousAccelNs = 0L
     @Volatile private var activated = false
     private var startedAtNs = 0L
+    private var lastCadenceReportNs = 0L
     val isAvailable: Boolean get() = source != null
     val sourceName: String get() = source?.name ?: "Sensor de orientação indisponível"
 
     @Synchronized fun start() {
         if (activated) return
         fusion.reset()
+        cadence.reset()
+        lastCadenceReportNs = 0L
         previousAccelNs = 0L
         startedAtNs = android.os.SystemClock.elapsedRealtimeNanos()
         // SensorManager registration is synchronous. Samples are dispatched on
         // our sensor Handler, while this monitor serializes start/stop/events.
         activated = source?.let {
-            manager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, sensorHandler)
+            // GAME asks for ~50 Hz, undersampling a 60 fps camera. A bounded
+            // 200 Hz request improves frame-time interpolation without delaying
+            // the attitude or changing the approved world-up/360 degree math.
+            // Zero batching latency keeps samples available to the GL consumer.
+            val periodUs = SensorCadence.requestedPeriodUs(it.minDelay)
+            manager.registerListener(this, it, periodUs, 0, sensorHandler).also { enabled ->
+                android.util.Log.i("HorizonCamSensor",
+                    "source=${it.name} type=${it.type} requestedPeriodUs=$periodUs registered=$enabled")
+            }
         } ?: false
     }
 
@@ -56,6 +69,13 @@ class GravityRollSensor(
 
     @Synchronized override fun onSensorChanged(event: SensorEvent) {
         if (!activated || event.timestamp < startedAtNs) return
+        cadence.append(event.timestamp)
+        if (lastCadenceReportNs == 0L) lastCadenceReportNs = event.timestamp
+        if (event.timestamp - lastCadenceReportNs >= 5_000_000_000L) {
+            android.util.Log.i("HorizonCamSensor",
+                "measuredHz=${cadence.measuredHz()} longestGapMs=${cadence.longestIntervalNs / 1e6}")
+            lastCadenceReportNs = event.timestamp
+        }
         val down = when (event.sensor.type) {
             Sensor.TYPE_GAME_ROTATION_VECTOR, Sensor.TYPE_ROTATION_VECTOR -> {
                 SensorManager.getRotationMatrixFromVector(rotation, event.values)
