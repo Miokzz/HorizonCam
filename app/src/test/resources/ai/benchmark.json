@@ -1,0 +1,126 @@
+{
+  "model_sha256": "1a380d3744103e11ef343534aaff54815cae40769dcd00c023652a7e5bc47f4b",
+  "host": "Windows-11-10.0.26200-SP0",
+  "python": "3.12.10",
+  "runtime": "ai-edge-litert 2.4.0 CPU/XNNPACK, 2 threads (Android uses Interpreter 1.4.2)",
+  "tensors": [
+    {
+      "name": "input_0",
+      "shape": [
+        1,
+        50,
+        50,
+        3
+      ],
+      "dtype": "<class 'numpy.float32'>"
+    },
+    {
+      "name": "Identity",
+      "shape": [
+        1,
+        200,
+        200,
+        3
+      ],
+      "dtype": "<class 'numpy.float32'>"
+    }
+  ],
+  "graph_ops": {
+    "CONV_2D": 169,
+    "LEAKY_RELU": 136,
+    "CONCATENATION": 132,
+    "ADD": 47,
+    "MUL": 11,
+    "TRANSPOSE_CONV": 2
+  },
+  "fixtures": [
+    {
+      "completed_tiles": 9,
+      "total_tiles": 9,
+      "elapsed_ms": 846.6,
+      "mean_inference_tile_ms": 92.15,
+      "noise_estimate": 0.3316,
+      "edge_fraction": 0.1653,
+      "name": "synthetic",
+      "input_shape": [
+        60,
+        80,
+        3
+      ],
+      "output_shape": [
+        240,
+        320,
+        3
+      ],
+      "mean_abs_difference_ai_vs_bicubic": 2.4756,
+      "metrics_rgb_no_border_shave": {
+        "bicubic": {
+          "psnr_db": 21.0997,
+          "ssim": 0.77921
+        },
+        "raw_esrgan": {
+          "psnr_db": 22.2809,
+          "ssim": 0.7908
+        },
+        "horizon_ai_default": {
+          "psnr_db": 21.9632,
+          "ssim": 0.8117
+        }
+      }
+    },
+    {
+      "completed_tiles": 12,
+      "total_tiles": 12,
+      "elapsed_ms": 1202.51,
+      "mean_inference_tile_ms": 98.18,
+      "noise_estimate": 0.9947,
+      "edge_fraction": 0.5142,
+      "name": "nasa_astronaut",
+      "input_shape": [
+        64,
+        96,
+        3
+      ],
+      "output_shape": [
+        256,
+        384,
+        3
+      ],
+      "mean_abs_difference_ai_vs_bicubic": 3.6507,
+      "metrics_rgb_no_border_shave": {
+        "bicubic": {
+          "psnr_db": 26.0346,
+          "ssim": 0.82457
+        },
+        "raw_esrgan": {
+          "psnr_db": 27.87,
+          "ssim": 0.86346
+        },
+        "horizon_ai_default": {
+          "psnr_db": 28.1913,
+          "ssim": 0.87755
+        }
+      }
+    },
+    {
+      "completed_tiles": 121,
+      "total_tiles": 121,
+      "elapsed_ms": 18995.62,
+      "mean_inference_tile_ms": 154.94,
+      "noise_estimate": 1.3263,
+      "edge_fraction": 0.2753,
+      "name": "native_256_crop",
+      "input_shape": [
+        256,
+        256,
+        3
+      ],
+      "output_shape": [
+        1024,
+        1024,
+        3
+      ],
+      "mean_abs_difference_ai_vs_bicubic": 2.103
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+Registro histórico da versão 1.x. Para a geometria e os testes da linha 2.0, consulte [Arquitetura](ARCHITECTURE.md) e [Validação](TEST_MATRIX.md).
+
 # Auditoria das versões anteriores
 
 Evidências da conversa: gravações `55971.mp4`, `55972.mp4`, `56037.mp4`, `56038.mp4` e capturas de HUD foram analisadas durante os ciclos de depuração. O vídeo exportado anterior foi encontrado como retrato em um teste; isso não permite inferir o resultado da nova implementação sem hardware.

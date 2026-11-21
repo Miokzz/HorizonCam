@@ -1,0 +1,4 @@
+# Standalone oracle only; Python 3.12. Not needed by lightweight camera smoke.
+numpy==2.5.5
+Pillow==13.0.0
+opencv-contrib-python-headless==5.1.0.95
