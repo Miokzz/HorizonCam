@@ -170,7 +170,8 @@ class Smoke:
         folder = "/sdcard/Pictures/HorizonCam" if photo else "/sdcard/Movies/HorizonCam"
         result = self.shell("find", folder, "-type", "f", check=False)
         suffix = ".jpg" if photo else ".mp4"
-        return {line.strip() for line in result.splitlines() if line.startswith(folder + "/") and line.lower().endswith(suffix)}
+        return {line.strip() for line in result.splitlines() if line.startswith(folder + "/")
+                and line.lower().endswith(suffix) and not line.rsplit("/", 1)[-1].startswith(".")}
 
     def new_media(self, photo, before):
         def poll():

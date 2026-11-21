@@ -73,7 +73,11 @@ object AiPhotoFiles {
         tags.forEach { tag -> original?.getAttribute(tag)?.let { exif.setAttribute(tag, it) } }
         exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
         exif.setAttribute(ExifInterface.TAG_SOFTWARE, "HorizonCam 2.0")
-        exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, description)
+        // EXIF ImageDescription is ASCII. Explicitly normalize Portuguese text so
+        // other readers never get replacement characters in the processing description.
+        val asciiDescription = java.text.Normalizer.normalize(description.replace("·", "|").replace("×", "x"),
+            java.text.Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").filter { it.code in 32..126 }
+        exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, asciiDescription)
         exif.saveAttributes()
     }
 

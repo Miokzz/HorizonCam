@@ -24,7 +24,7 @@ class MediaPublicationTest {
                 val uri = AiPhotoFiles.save(app, Uri.fromFile(source), bitmap, "HC_PUBLICATION_TEST", tag)
                 try {
                     app.contentResolver.openInputStream(uri)!!.use {
-                        assertEquals(tag, ExifInterface(it).getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION))
+                        assertEquals("HorizonCam | teste de publicacao", ExifInterface(it).getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION))
                     }
                     app.contentResolver.openInputStream(uri)!!.use {
                         val decoded = BitmapFactory.decodeStream(it)
