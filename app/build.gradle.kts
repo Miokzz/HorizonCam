@@ -10,8 +10,8 @@ android {
         applicationId = "com.miokzz.horizoncam.gl"
         minSdk = 29
         targetSdk = 36
-        versionCode = 104
-        versionName = "1.0.0-rc5"
+        versionCode = 105
+        versionName = "2.0.0-phase1"
     }
 
     buildTypes {
@@ -45,4 +45,5 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraX")
     implementation("androidx.camera:camera-video:$cameraX")
     implementation("androidx.camera:camera-view:$cameraX")
-    testImplementation("junit:junit:4.13.2")}
+    testImplementation("junit:junit:4.13.2")
+}

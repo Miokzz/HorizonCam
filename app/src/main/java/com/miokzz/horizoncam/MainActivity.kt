@@ -1,873 +1,575 @@
 package com.miokzz.horizoncam
 
 import android.Manifest
-import android.content.ContentValues
-import android.content.pm.PackageManager
-import android.content.res.ColorStateList
-import android.graphics.Color
-import android.os.Bundle
-import android.net.Uri
+import android.content.Context
 import android.content.Intent
-import android.media.MediaMetadataRetriever
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.display.DisplayManager
+import android.net.Uri
+import android.os.Bundle
+import android.os.SystemClock
+import android.provider.Settings
+import android.util.Log
+import android.util.Rational
+import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.Surface
+import android.view.View
+import android.view.WindowManager
 import android.widget.PopupMenu
 import android.widget.SeekBar
-import android.view.View
-import android.view.GestureDetector
-import android.view.MotionEvent
-import android.util.Size
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import androidx.camera.core.FocusMeteringAction
-import androidx.camera.core.SurfaceOrientedMeteringPointFactory
-import com.miokzz.horizoncam.camera.CameraCapabilities
-import com.miokzz.horizoncam.camera.PublicLensDiscovery
-import com.miokzz.horizoncam.stabilization.AngleMath
-import android.content.pm.ActivityInfo
-import android.content.res.Configuration
-import android.view.Gravity
-import android.view.Surface
-import android.widget.FrameLayout
-import android.provider.MediaStore
-import android.util.Range
-import android.util.Rational
-import android.hardware.camera2.CameraCharacteristics
-import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.core.ViewPort
-import android.view.ScaleGestureDetector
-import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
-import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraInfo
+import androidx.camera.core.CameraState
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
-import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.FallbackStrategy
-import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
-import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
-import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.google.common.util.concurrent.ListenableFuture
+import androidx.core.view.isVisible
+import com.miokzz.horizoncam.camera.CameraCapabilities
+import com.miokzz.horizoncam.camera.LensOption
+import com.miokzz.horizoncam.camera.RearLensManager
+import com.miokzz.horizoncam.camera.ZoomRoute
 import com.miokzz.horizoncam.databinding.ActivityMainBinding
-import java.text.SimpleDateFormat
+import com.miokzz.horizoncam.media.CaptureLibrary
+import com.miokzz.horizoncam.photo.PhotoEngine
+import com.miokzz.horizoncam.stabilization.AngleMath
+import com.miokzz.horizoncam.video.VideoEngine
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
-@androidx.annotation.OptIn(markerClass = [androidx.camera.camera2.interop.ExperimentalCamera2Interop::class])
-class MainActivity : AppCompatActivity() {
-
-    private lateinit var binding: ActivityMainBinding
-    private lateinit var gravitySensor: GravityRollSensor
-    private lateinit var scaleGestureDetector: ScaleGestureDetector
-
-    private val horizonState = HorizonState()
-    private var horizonEffect: HorizonGlEffect? = null
-    private var cameraProvider: ProcessCameraProvider? = null
-    private var camera: Camera? = null
-    private var videoCapture: VideoCapture<Recorder>? = null
-    private var previewUseCase: Preview? = null
-    private var recording: Recording? = null
-
-    private var requestedQuality = Quality.FHD
-    private var requestedFps = 30
-    private var cameraStarting = false
-    private var nativeEisActive = false
-    private var eisSupported = false
-    private var capabilities: CameraCapabilities? = null
-    private var wideLens: PublicLensDiscovery.WideLens? = null
-    private var lensProbeCompleted = false
-    private var usingWide = false
-    private var torchEnabled = false
-    private var paused = false
-    private var lastVideoUri: Uri? = null
-    private val galleryExecutor = Executors.newSingleThreadExecutor()
+@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
+    private lateinit var ui: ActivityMainBinding
+    private lateinit var library: CaptureLibrary
+    private lateinit var sensor: GravityRollSensor
+    private val horizon = HorizonState()
     private val prefs by lazy { getSharedPreferences("horizoncam", MODE_PRIVATE) }
-    private var soundEnabled = true
-    private lateinit var tapDetector: GestureDetector
+    private val main by lazy { ContextCompat.getMainExecutor(this) }
 
-    private var showDiagnostics = false
-    private var lastDiagnosticsAt = 0L
-    private var selectedZoom = 1f
-    private var lastFocusTapX: Float? = null
-    private var lastFocusTapY: Float? = null
+    private var provider: ProcessCameraProvider? = null
+    private var requestingProvider = false
+    private var lenses: RearLensManager? = null
+    private var lens: LensOption? = null
+    private var camera: Camera? = null
+    private var photo: PhotoEngine? = null
+    private var video: VideoEngine? = null
+    private var capabilities: CameraCapabilities? = null
+    private var eisSupported = false
+    private var photoMode = false
+    private var requestedQuality = Quality.FHD
+    private var fps = 30
+    private var displayZoom = 1f
+    private var pinchZoom = 1f
+    private var recording: Recording? = null
+    private var takingPhoto = false
+    private var paused = false
+    private var stopping = false
+    private var awaitingMic = false
+    private var pausedCommand = false
+    private var ready = false
+    private var audio = true
+    private var failure: String? = null
+    private var boundRotation = -1
+    private var session = 0
+    private var physicalLog: String? = null
+    private val locked get() = !photoMode && horizon.isEnabled()
+    private val busy get() = recording != null || takingPhoto || awaitingMic
+    private val presets get() = listOf(0.6f to ui.zoom06Button, 1f to ui.zoom1Button,
+        2f to ui.zoom2Button, 3f to ui.zoom3Button)
 
-    private val permissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
-        val cameraGranted = result[Manifest.permission.CAMERA] == true
-        val audioGranted = result[Manifest.permission.RECORD_AUDIO] == true
-        if (cameraGranted && audioGranted) startCamera()
-        else Toast.makeText(this, getString(R.string.need_permissions), Toast.LENGTH_LONG).show()
+    private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        if (it) openCamera() else {
+            failure = "Permita o acesso à câmera"
+            render()
+        }
+    }
+    private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        awaitingMic = false
+        if (!granted) {
+            audio = false
+            prefs.edit().putBoolean("sound", false).apply()
+            toast("Microfone desativado. O vídeo será salvo sem áudio.")
+        }
+        if (ready && !photoMode && !busy) beginVideo() else render()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.attributes.layoutInDisplayCutoutMode =
-            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        enterImmersiveMode()
-
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-        updateControlsForOrientation()
-        binding.statusText.setOnLongClickListener {
-            showDiagnostics = !showDiagnostics
-            updateStatusText()
-            true
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ui = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(ui.root)
+        ViewCompat.setOnApplyWindowInsetsListener(ui.root) { view, insets ->
+            val safe = insets.getInsets(WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.systemBars())
+            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            insets
         }
-        binding.qualityButton.text = "FHD"
-        binding.fpsButton.text = "30"
-        binding.statusText.text = "H LOCK"
-
-        soundEnabled = prefs.getBoolean("sound", true)
-        binding.gridView.visibility = if (prefs.getBoolean("grid", false)) View.VISIBLE else View.GONE
-        lastVideoUri = prefs.getString("lastVideo", null)?.let(Uri::parse)
-        lastVideoUri?.let(::showLastVideo)
-
-        gravitySensor = GravityRollSensor(this) { reading ->
-            horizonState.pushRoll(reading.timestampNs, reading.rollDegrees.toFloat())
-            val time = android.os.SystemClock.uptimeMillis()
-            if (time - lastDiagnosticsAt > 240L) {
-                lastDiagnosticsAt = time
-                runOnUiThread { updateStatusText() }
+        library = CaptureLibrary(this)
+        sensor = GravityRollSensor(this) { reading -> horizon.pushRoll(reading.timestampNs, reading.rollDegrees.toFloat()) }
+        photoMode = prefs.getBoolean("photoMode", false)
+        audio = prefs.getBoolean("sound", true)
+        if (!sensor.isAvailable) horizon.setMode(StabilizationMode.OFF)
+        if (prefs.contains("stabilization")) {
+            runCatching { StabilizationMode.valueOf(prefs.getString("stabilization", "")!!) }
+                .getOrNull()?.takeIf { it != StabilizationMode.HORIZONTAL_LOCK || sensor.isAvailable }
+                ?.let(horizon::setMode)
+        }
+        ui.gridView.isVisible = prefs.getBoolean("grid", false)
+        library.latest?.let { library.inspectAndLoad(it, ui.galleryThumbnail::setImageBitmap) }
+        ui.galleryThumbnail.setOnClickListener {
+            library.latest?.let { uri ->
+                runCatching { startActivity(library.viewIntent(uri)) }.onFailure { toast("Mídia indisponível.") }
+            } ?: toast("Sua próxima captura aparecerá aqui.")
+        }
+        ui.modePhoto.setOnClickListener { selectMode(true) }
+        ui.modeVideo.setOnClickListener { selectMode(false) }
+        ui.recordButton.setOnClickListener { shutter() }
+        ui.pauseButton.setOnClickListener {
+            val active = recording ?: return@setOnClickListener
+            if (!pausedCommand && !stopping) {
+                pausedCommand = true
+                if (paused) active.resume() else active.pause()
+                haptic()
             }
         }
+        ui.quickControlsButton.setOnClickListener { settings() }
+        ui.lockButton.setOnClickListener { stabilizationMenu() }
+        ui.qualityButton.setOnClickListener { videoQualityMenu() }
+        ui.fpsButton.setOnClickListener {
+            if (!busy) {
+                fps = if (fps == 60) 30 else 60
+                rebind()
+            }
+        }
+        ui.flashButton.setOnClickListener {
+            val cam = camera ?: return@setOnClickListener
+            observeControl(cam.cameraControl.enableTorch(cam.cameraInfo.torchState.value != 1), "Lanterna")
+            haptic()
+        }
+        ui.statusText.setOnClickListener {
+            if (failure != null && !busy) retry() else showDiagnostics()
+        }
+        ui.statusText.setOnLongClickListener { showDiagnostics(); true }
+        presets.forEach { (value, button) -> button.setOnClickListener { zoomTo(value); haptic() } }
+        installGestures(ui.previewView)
+        installGestures(ui.photoPreview)
+        ui.exposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val cam = camera ?: return
+                if (!fromUser) return
+                val exposure = cam.cameraInfo.exposureState
+                val index = exposure.exposureCompensationRange.lower + progress
+                observeControl(cam.cameraControl.setExposureCompensationIndex(index), "Exposição")
+                ui.exposureSlider.contentDescription = String.format(Locale.getDefault(), "Exposição %+.1f EV", index * exposure.exposureCompensationStep.toFloat())
+            }
+            override fun onStartTrackingTouch(bar: SeekBar?) { ui.exposureSlider.removeCallbacks(hideExposure) }
+            override fun onStopTrackingTouch(bar: SeekBar?) { ui.exposureSlider.postDelayed(hideExposure, 3000) }
+        })
+        render()
+        if (hasCamera()) openCamera() else cameraPermission.launch(Manifest.permission.CAMERA)
+    }
 
-        scaleGestureDetector = ScaleGestureDetector(
-            this,
-            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                override fun onScale(detector: ScaleGestureDetector): Boolean {
-                    val cam = camera ?: return false
-                    val zoomState = cam.cameraInfo.zoomState.value ?: return false
-                    val target = (zoomState.zoomRatio * detector.scaleFactor)
-                        .coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
-                    cam.cameraControl.setZoomRatio(target)
-                    selectedZoom = if (usingWide) target * 0.6f else target
-                    updateZoomUi(selectedZoom)
-                    return true
+    private fun hasCamera() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    private fun retry() {
+        if (hasCamera()) openCamera() else if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        } else startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+    }
+
+    private fun openCamera() {
+        if (!hasCamera() || isDestroyed || isFinishing || busy || requestingProvider) return
+        failure = null
+        if (provider != null) { rebind(); return }
+        requestingProvider = true
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            requestingProvider = false
+            if (!isDestroyed && !isFinishing) runCatching {
+                provider = future.get()
+                rebind()
+            }.onFailure { fail("Falha ao abrir a câmera", it) }
+        }, main)
+    }
+
+    private fun selectMode(toPhoto: Boolean) {
+        if (busy || photoMode == toPhoto) return
+        photoMode = toPhoto
+        prefs.edit().putBoolean("photoMode", photoMode).apply()
+        haptic()
+        syncSensor()
+        rebind()
+    }
+
+    private fun releaseSession() {
+        session++
+        camera?.cameraInfo?.apply {
+            cameraState.removeObservers(this@MainActivity)
+            if (lens?.isPhysicalOnly != true) zoomState.removeObservers(this@MainActivity)
+            torchState.removeObservers(this@MainActivity)
+        }
+        ready = false
+        lenses?.invalidateCaptureDiagnostics()
+        provider?.unbindAll()
+        video?.close()
+        video = null
+        photo = null
+        camera = null
+        ui.exposureSlider.isVisible = false
+        ui.focusIndicator.isVisible = false
+        physicalLog = null
+    }
+
+    private fun rebind(allowEis: Boolean = true) {
+        if (busy || isDestroyed || isFinishing) return
+        releaseSession()
+        failure = null
+        render()
+        val owner = provider ?: return
+        val token = session
+        try {
+            val manager = lenses ?: RearLensManager.discover(this, owner).also { lenses = it }
+            if (lens == null && locked) {
+                val primary = manager.defaultOption
+                val wide = manager.route(0.6f, primary.key, primary.minCameraZoom, primary.maxCameraZoom, false)
+                if (abs(wide.displayZoom - 0.6f) <= 0.08f) {
+                    lens = manager.option(wide.targetKey)
+                    displayZoom = wide.displayZoom
                 }
             }
-        )
-
-        tapDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDown(event: MotionEvent): Boolean = true
-            override fun onSingleTapUp(event: MotionEvent): Boolean {
-                if (!scaleGestureDetector.isInProgress) {
-                    lastFocusTapX = event.x
-                    lastFocusTapY = event.y
-                    binding.previewView.performClick()
+            val choice = lens ?: manager.defaultOption
+            lens = choice
+            val builder = Preview.Builder()
+            manager.attachCaptureDiagnostics(builder, choice)
+            boundRotation = ui.root.display?.rotation ?: Surface.ROTATION_0
+            val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+            val info = owner.availableCameraInfos.firstOrNull { Camera2CameraInfo.from(it).cameraId == choice.cameraId }
+                ?: owner.getCameraInfo(choice.selector)
+            capabilities = runCatching { CameraCapabilities.inspect(this, info) }.getOrNull()
+            eisSupported = runCatching { Preview.getPreviewCapabilities(info).isStabilizationSupported &&
+                Recorder.getVideoCapabilities(info).isStabilizationSupported }.getOrDefault(false)
+            val group = if (photoMode) {
+                PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider).also { photo = it }.group
+            } else {
+                if (horizon.mode() == StabilizationMode.STEADY && (!eisSupported || !allowEis)) {
+                    horizon.setMode(StabilizationMode.OFF)
+                    toast("Estabilização nativa indisponível nesta combinação.")
                 }
+                val rotation = if (locked) Surface.ROTATION_90 else boundRotation
+                val aspect = if (locked || !portrait) Rational(16, 9) else Rational(9, 16)
+                val surface = if (locked) ui.previewView else ui.photoPreview.surfaceProvider
+                val eis = allowEis && eisSupported && horizon.mode() == StabilizationMode.STEADY && fps == 30 && requestedQuality == Quality.FHD
+                VideoEngine(horizon, builder, surface, rotation, aspect, requestedQuality, fps, eis) { error ->
+                    main.execute { if (session == token && !isDestroyed) {
+                        if (recording != null) stopVideo()
+                        fail("Falha no processamento de vídeo", error)
+                    } }
+                }.also { video = it }.group
+            }
+            val bound = owner.bindToLifecycle(this, choice.selector, group)
+            camera = bound
+            manager.onBound(choice, bound)
+            horizon.setCameraRealtimeTimestamp(Camera2CameraInfo.from(info)
+                .getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+                CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME)
+            val resolution = photo?.capture?.resolutionInfo ?: video?.capture?.resolutionInfo
+            Log.i(TAG, "session=$token mode=${if (photoMode) "foto" else "vídeo"} camera=${choice.cameraId} requestedPhysical=${choice.physicalCameraId} output=${resolution?.resolution} crop=${resolution?.cropRect} rotation=${resolution?.rotationDegrees} targetFps=$fps")
+            if (!choice.isPhysicalOnly) {
+                val state = bound.cameraInfo.zoomState.value
+                val initial = (displayZoom / choice.relativeZoom).coerceIn(state?.minZoomRatio ?: choice.minCameraZoom, state?.maxZoomRatio ?: choice.maxCameraZoom)
+                if (initial != 1f) observeControl(bound.cameraControl.setZoomRatio(initial), "Zoom")
+                bound.cameraInfo.zoomState.observe(this) { zoom ->
+                    if (token == session && zoom != null) {
+                        displayZoom = zoom.zoomRatio * choice.relativeZoom
+                        renderZoom()
+                    }
+                }
+            } else displayZoom = choice.relativeZoom
+            bound.cameraInfo.torchState.observe(this) { if (session == token) ui.flashButton.isSelected = it == 1 }
+            bound.cameraInfo.cameraState.observe(this) { state ->
+                if (session != token) return@observe
+                val code = state.error?.code
+                ready = state.type == CameraState.Type.OPEN && code == null
+                if (code != null) {
+                    failure = "Câmera indisponível · $code"
+                    Log.w(TAG, "session=$token cameraError=$code", state.error?.cause)
+                    if (code == CameraState.ERROR_STREAM_CONFIG && !busy) ui.root.post {
+                        if (session == token) fallback(allowEis, IllegalStateException("Configuração recusada ($code)"))
+                    }
+                } else if (ready) failure = null
+                render()
+            }
+        } catch (error: Exception) { fallback(allowEis, error) }
+    }
+
+    private fun fallback(allowEis: Boolean, error: Throwable) {
+        val manager = lenses
+        val choice = lens
+        Log.w(TAG, "Configuração recusada ${choice?.key}", error)
+        when {
+            manager != null && choice != null && choice != manager.defaultOption -> {
+                manager.onBindRejected(choice, error.message ?: "configuração")
+                lens = manager.defaultOption
+                toast("A lente recusou este modo. Usando a câmera automática.")
+                rebind()
+            }
+            !photoMode && allowEis && video?.nativeEis == true -> rebind(false)
+            !photoMode && fps != 30 -> { fps = 30; toast("Gravação disponível a 30 fps."); rebind() }
+            !photoMode && requestedQuality == Quality.UHD -> {
+                requestedQuality = Quality.FHD; toast("4K indisponível nesta combinação."); rebind()
+            }
+            else -> { releaseSession(); fail("Falha de câmera · toque para tentar", error) }
+        }
+    }
+
+    private fun route(requested: Float, preferred: String? = null): ZoomRoute? {
+        val choice = lens ?: return null
+        val state = if (choice.isPhysicalOnly) null else camera?.cameraInfo?.zoomState?.value
+        return lenses?.route(requested, choice.key, state?.minZoomRatio ?: choice.minCameraZoom,
+            state?.maxZoomRatio ?: choice.maxCameraZoom, recording != null, preferred)
+    }
+
+    private fun zoomTo(requested: Float, preferred: String? = null) {
+        if (!ready || takingPhoto || awaitingMic || stopping) return
+        val route = route(requested, preferred) ?: return
+        if (route.requiresRebind) {
+            if (busy) return
+            lens = lenses?.option(route.targetKey) ?: return
+            displayZoom = route.displayZoom
+            rebind()
+        } else if (lens?.isPhysicalOnly != true) {
+            camera?.cameraControl?.setZoomRatio(route.cameraZoomRatio)?.let { observeControl(it, "Zoom") }
+        }
+    }
+
+    private fun observeControl(future: com.google.common.util.concurrent.ListenableFuture<*>, name: String) {
+        val token = session
+        future.addListener({
+            if (token == session && !isDestroyed) runCatching { future.get() }.onFailure {
+                val cause = it.cause ?: it
+                if (cause !is androidx.camera.core.CameraControl.OperationCanceledException) {
+                    Log.w(TAG, "$name indisponível", cause)
+                    toast("$name indisponível nesta câmera.")
+                }
+            }
+        }, main)
+    }
+
+    private fun installGestures(view: View) {
+        var touchedWithTwo = false
+        var focusX = Float.NaN
+        var focusY = Float.NaN
+        val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean { pinchZoom = displayZoom; return ready }
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                pinchZoom = (pinchZoom * detector.scaleFactor).coerceIn(0.05f, 1000f)
+                zoomTo(pinchZoom)
+                return true
+            }
+        }).apply { isQuickScaleEnabled = false }
+        val tap = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                if (!touchedWithTwo) { focusX = e.x; focusY = e.y; view.performClick() }
                 return true
             }
         })
-        binding.previewView.setOnClickListener {
-            focusAt(
-                lastFocusTapX ?: binding.previewView.width / 2f,
-                lastFocusTapY ?: binding.previewView.height / 2f
-            )
-            lastFocusTapX = null
-            lastFocusTapY = null
+        view.setOnClickListener {
+            focusAt(if (focusX.isNaN()) view.width / 2f else focusX, if (focusY.isNaN()) view.height / 2f else focusY)
+            focusX = Float.NaN; focusY = Float.NaN
         }
-        binding.previewView.setOnTouchListener { _, event ->
-            scaleGestureDetector.onTouchEvent(event)
-            tapDetector.onTouchEvent(event)
+        view.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) touchedWithTwo = false
+            if (event.pointerCount > 1) touchedWithTwo = true
+            scale.onTouchEvent(event)
+            tap.onTouchEvent(event)
             true
         }
-
-        binding.exposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (!fromUser) return
-                val exposure = camera?.cameraInfo?.exposureState ?: return
-                val index = exposure.exposureCompensationRange.lower + progress
-                camera?.cameraControl?.setExposureCompensationIndex(index)
-            }
-            override fun onStartTrackingTouch(bar: SeekBar?) = Unit
-            override fun onStopTrackingTouch(bar: SeekBar?) {
-                binding.exposureSlider.postDelayed({
-                    binding.exposureSlider.visibility = View.GONE
-                }, 2500)
-            }
-        })
-
-        binding.lockButton.setOnClickListener { showStabilizationOptions() }
-        binding.lockButton.setOnLongClickListener {
-            // Diagnostics only. The app never asks the user to calibrate.
-            showDiagnostics = !showDiagnostics
-            updateStatusText()
-            true
-        }
-        binding.quickControlsButton.setOnClickListener { showQuickControls() }
-        binding.flashButton.setOnClickListener { toggleTorch() }
-        binding.galleryThumbnail.setOnClickListener { openLastVideo() }
-        binding.pauseButton.setOnClickListener { togglePause() }
-
-        binding.qualityButton.setOnClickListener {
-            if (recording != null) return@setOnClickListener
-            val next = if (requestedQuality == Quality.UHD) Quality.FHD else Quality.UHD
-            if (capabilities?.hasQuality(next) == false) {
-                toast("Resolução indisponível nesta câmera.")
-                return@setOnClickListener
-            }
-            if (horizonState.mode() == StabilizationMode.STEADY &&
-                next == Quality.UHD) {
-                toast("Super Steady disponível somente em FHD/30 neste pipeline.")
-                return@setOnClickListener
-            }
-            requestedQuality = next
-            if (requestedQuality == Quality.UHD && requestedFps == 60) {
-                requestedFps = 30
-                binding.fpsButton.text = "30"
-            }
-            binding.qualityButton.text = if (requestedQuality == Quality.UHD) "UHD" else "FHD"
-            restartCamera()
-        }
-
-        binding.fpsButton.setOnClickListener {
-            if (recording != null) return@setOnClickListener
-            if (requestedFps == 30 &&
-                (capabilities?.fps60 == false ||
-                    requestedQuality == Quality.UHD ||
-                    horizonState.mode() == StabilizationMode.STEADY)) {
-                toast("60 FPS não foi validado nesta combinação.")
-                return@setOnClickListener
-            }
-            requestedFps = if (requestedFps == 30) 60 else 30
-            binding.fpsButton.text = requestedFps.toString()
-            restartCamera()
-        }
-
-        binding.recordButton.setOnClickListener {
-            if (recording == null) startRecording() else stopRecording()
-        }
-
-        binding.zoom06Button.setOnClickListener { setZoom(0.6f) }
-        binding.zoom1Button.setOnClickListener { setZoom(1f) }
-        binding.zoom2Button.setOnClickListener { setZoom(2f) }
-        binding.zoom3Button.setOnClickListener { setZoom(3f) }
-
-        updateZoomUi(1f)
-        requestPermissionsOrStart()
     }
 
-    override fun onResume() {
-        super.onResume()
-        enterImmersiveMode()
-        gravitySensor.start()
-    }
-
-    override fun onPause() {
-        gravitySensor.stop()
-        super.onPause()
-    }
-
-    override fun onDestroy() {
-        gravitySensor.release()
-        recording?.stop()
-        recording = null
-        cameraProvider?.unbindAll()
-        horizonEffect?.close()
-        horizonEffect = null
-        galleryExecutor.shutdown()
-        super.onDestroy()
-    }
-
-    private fun enterImmersiveMode() {
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        WindowInsetsControllerCompat(window, binding.root).apply {
-            hide(WindowInsetsCompat.Type.systemBars())
-            systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
-    }
-
-    private fun requestPermissionsOrStart() {
-        val cameraOk = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
-        val audioOk = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (cameraOk && audioOk) {
-            startCamera()
-        } else {
-            permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
-        }
-    }
-
-    private fun startCamera() {
-        if (cameraStarting || isFinishing || isDestroyed) return
-        cameraStarting = true
-        binding.statusText.text = "STARTING"
-
-        val providerFuture: ListenableFuture<ProcessCameraProvider> =
-            ProcessCameraProvider.getInstance(this)
-
-        providerFuture.addListener({
-            try {
-                cameraProvider = providerFuture.get()
-                bindCameraWithFallback(requestedFps)
-            } catch (t: Throwable) {
-                cameraStarting = false
-                binding.statusText.text = "CAMERA ERROR"
-                Toast.makeText(this, "Falha ao abrir câmera: ${t.message}", Toast.LENGTH_LONG).show()
-            }
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun restartCamera() {
-        previewUseCase = null
-        cameraProvider?.unbindAll()
-        horizonEffect?.close()
-        horizonEffect = null
-        cameraStarting = false
-        startCamera()
-    }
-
-    private fun bindCameraWithFallback(fps: Int, allowEis: Boolean? = null) {
-        val provider = cameraProvider ?: return
-        provider.unbindAll()
-
-        if (!lensProbeCompleted) {
-            wideLens = runCatching {
-                PublicLensDiscovery.findAccessibleUltrawide(this, provider)
-            }.getOrNull()
-            lensProbeCompleted = true
-            if (horizonState.isEnabled() && wideLens != null) {
-                usingWide = true
-                selectedZoom = 0.6f
-            }
-        }
-        val selector = if (usingWide) wideLens?.selector
-            ?: CameraSelector.DEFAULT_BACK_CAMERA
-        else CameraSelector.DEFAULT_BACK_CAMERA
-
-        val halCanStabilize = runCatching {
-            val info = provider.getCameraInfo(selector)
-            Preview.getPreviewCapabilities(info).isStabilizationSupported &&
-                Recorder.getVideoCapabilities(info).isStabilizationSupported
-        }.getOrDefault(false)
-        eisSupported = halCanStabilize
-        val eis = allowEis ?: (
-            halCanStabilize &&
-            horizonState.mode() != StabilizationMode.OFF &&
-            requestedQuality == Quality.FHD && fps == 30
-        )
-
-        val outputRotation = if (horizonState.isEnabled()) {
-            Surface.ROTATION_90
-        } else {
-            binding.previewView.display?.rotation ?: Surface.ROTATION_0
-        }
-        val preview = Preview.Builder()
-            .setTargetRotation(outputRotation)
-            .apply { if (eis) setPreviewStabilizationEnabled(true) }
-            .build()
-            .also {
-                it.setSurfaceProvider(ContextCompat.getMainExecutor(this), binding.previewView)
-            }
-
-        val qualitySelector = QualitySelector.from(
-            requestedQuality,
-            FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD)
-        )
-
-        val recorder = Recorder.Builder()
-            .setQualitySelector(qualitySelector)
-            .build()
-
-        val capture = VideoCapture.Builder(recorder)
-            .setTargetRotation(outputRotation)
-            .setTargetFrameRate(Range(fps, fps))
-            .apply { if (eis) setVideoStabilizationEnabled(true) }
-            .build()
-
-        val effect = HorizonGlEffect.create(horizonState) { error ->
-            runOnUiThread {
-                binding.statusText.text = "OPENGL ERROR"
-                Toast.makeText(
-                    this,
-                    "Horizon OpenGL: ${error.message}",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-
-        // A shared CameraX crop/viewport is essential: PREVIEW and VIDEO
-        // must receive the same optics, then the GL shader uses one matrix.
-        val viewPort = ViewPort.Builder(Rational(16, 9), outputRotation)
-            .setScaleType(ViewPort.FILL_CENTER)
-            .build()
-        val group = UseCaseGroup.Builder()
-            .addUseCase(preview)
-            .addUseCase(capture)
-            .setViewPort(viewPort)
-            .addEffect(effect)
-            .build()
-
-        try {
-            horizonEffect?.close()
-            horizonEffect = effect
-            previewUseCase = preview
-            videoCapture = capture
-            camera = provider.bindToLifecycle(this, selector, group)
-            val source = runCatching {
-                Camera2CameraInfo.from(camera!!.cameraInfo)
-                    .getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
-            }.getOrNull()
-            horizonState.setCameraRealtimeTimestamp(
-                source == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
-            )
-            nativeEisActive = eis
-            cameraStarting = false
-            capabilities = runCatching {
-                CameraCapabilities.inspect(this, camera!!.cameraInfo)
-            }.getOrNull()
-            binding.flashButton.isEnabled = camera?.cameraInfo?.hasFlashUnit() == true
-            binding.flashButton.alpha = if (binding.flashButton.isEnabled) 1f else 0.35f
-            if (torchEnabled) camera?.cameraControl?.enableTorch(true)
-            val zoomRange = camera?.cameraInfo?.zoomState?.value
-            if (zoomRange != null) {
-                val opticalZoom = if (usingWide) 1f
-                    else selectedZoom.coerceIn(zoomRange.minZoomRatio, zoomRange.maxZoomRatio)
-                camera?.cameraControl?.setZoomRatio(opticalZoom)
-                selectedZoom = if (usingWide) 0.6f else opticalZoom
-            }
-            updateStatusText()
-            updateZoomAvailability()
-            updateZoomUi(selectedZoom)
-        } catch (t: Throwable) {
-            effect.close()
-
-            if (usingWide) {
-                // A physically accessible camera may still reject an encoder
-                // or GPU/VideoCapture combination. Never strand the preview.
-                usingWide = false
-                selectedZoom = 1f
-                toast("Ultra-wide não aceitou este modo. Usando a câmera principal.")
-                bindCameraWithFallback(fps)
-            } else if (eis) {
-                // Some devices report HAL stabilization but cannot combine it
-                // with an external GPU effect. Rebind without HAL EIS.
-                nativeEisActive = false
-                if (horizonState.mode() == StabilizationMode.STEADY) {
-                    horizonState.setMode(StabilizationMode.OFF)
-                    binding.lockButton.text = "OFF"
-                    toast("Estabilização nativa indisponível nesta combinação.")
-                }
-                bindCameraWithFallback(fps, false)
-            } else if (fps == 60) {
-                requestedFps = 30
-                binding.fpsButton.text = "30"
-                Toast.makeText(
-                    this,
-                    "60 fps indisponível nesta combinação. Usando 30.",
-                    Toast.LENGTH_SHORT
-                ).show()
-                bindCameraWithFallback(30)
-            } else {
-                cameraStarting = false
-                binding.statusText.text = "BIND ERROR"
-                Toast.makeText(
-                    this,
-                    "Combinação não suportada: ${t.message}",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-    }
-
-    private fun setZoom(requested: Float) {
+    private fun focusAt(x: Float, y: Float) {
         val cam = camera ?: return
-        val zoomState = cam.cameraInfo.zoomState.value ?: return
+        val w = ui.previewContainer.width.coerceAtLeast(1).toFloat()
+        val h = ui.previewContainer.height.coerceAtLeast(1).toFloat()
+        val point = if (!locked) ui.photoPreview.meteringPointFactory.createPoint(x, y) else {
+            val g = horizon.frameGeometry(SystemClock.elapsedRealtimeNanos())
+            val inv = AngleMath.correctionMatrix(g.rotationDegrees.toDouble(), g.cropScale.toDouble(), 16.0 / 9).inverse()
+            val p = inv.apply(2.0 * x / w - 1, 1 - 2.0 * y / h)
+            SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(
+                ((1 + p.first) / 2).toFloat().coerceIn(0f, 1f), ((1 - p.second) / 2).toFloat().coerceIn(0f, 1f))
+        }
+        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+            .setAutoCancelDuration(3, TimeUnit.SECONDS).build()
+        if (cam.cameraInfo.isFocusMeteringSupported(action)) observeControl(cam.cameraControl.startFocusAndMetering(action), "Foco")
+        ui.focusIndicator.apply {
+            translationX = x - w / 2
+            translationY = y - h / 2
+            isVisible = true
+            removeCallbacks(hideFocus)
+            postDelayed(hideFocus, 900)
+        }
+        val ev = cam.cameraInfo.exposureState
+        if (ev.isExposureCompensationSupported) ui.exposureSlider.apply {
+            max = ev.exposureCompensationRange.upper - ev.exposureCompensationRange.lower
+            progress = ev.exposureCompensationIndex - ev.exposureCompensationRange.lower
+            isVisible = true
+            removeCallbacks(hideExposure)
+            postDelayed(hideExposure, 3500)
+        }
+        haptic()
+    }
+    private val hideFocus = Runnable { ui.focusIndicator.isVisible = false }
+    private val hideExposure = Runnable { ui.exposureSlider.isVisible = false }
 
-        // Optical lens changes require a new CameraX session unless both
-        // physical cameras are exposed as one logical zoom stream.
-        if (requested <= 0.61f && wideLens != null && !usingWide) {
-            if (recording != null) {
-                toast("Não é possível trocar a lente física durante REC.")
-                return
+    private fun shutter() {
+        if (recording != null) { stopVideo(); return }
+        if (!ready || busy || failure != null) return
+        haptic()
+        if (photoMode) {
+            val engine = photo ?: return
+            takingPhoto = true
+            render()
+            val done: (Result<Uri>) -> Unit = { result ->
+                takingPhoto = false
+                result.onSuccess { uri -> remember(uri, "Foto salva") }
+                    .onFailure { Log.e(TAG, "Falha ao salvar JPEG", it); if (!isDestroyed) toast("Falha ao salvar foto.") }
+                if (!isDestroyed) afterCapture()
             }
-            usingWide = true
-            selectedZoom = 0.6f
-            restartCamera()
+            try { engine.shoot(contentResolver, main, done) } catch (e: Exception) { done(Result.failure(e)) }
+        } else if (audio && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            awaitingMic = true
+            render()
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        } else beginVideo()
+    }
+
+    private fun beginVideo() {
+        val engine = video ?: return
+        if (locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos())) {
+            toast("Aponte a câmera para a cena e aguarde a referência de gravidade.")
+            render()
             return
         }
-        if (requested >= 0.95f && usingWide) {
-            if (recording != null) {
-                toast("Não é possível trocar a lente física durante REC.")
-                return
-            }
-            usingWide = false
-            selectedZoom = requested
-            restartCamera()
-            return
-        }
-
-        val actual = if (usingWide) {
-            (requested / 0.6f).coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
-        } else {
-            requested.coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
-        }
-        cam.cameraControl.setZoomRatio(actual)
-        selectedZoom = if (usingWide) actual * 0.6f else actual
-        updateZoomUi(selectedZoom)
-
-        if (!usingWide && requested < zoomState.minZoomRatio - 0.01f) {
-            toast("A lente ultra-wide não é acessível pela API pública.")
-        }
-    }
-
-    private fun updateZoomAvailability() {
-        val state = camera?.cameraInfo?.zoomState?.value ?: return
-        val supportsUltra = wideLens != null ||
-            (!usingWide && state.minZoomRatio <= 0.61f)
-        binding.zoom06Button.isEnabled = supportsUltra
-        binding.zoom06Button.alpha = if (supportsUltra) 1f else 0.35f
-        binding.zoom2Button.isEnabled = usingWide || state.maxZoomRatio >= 2f
-        binding.zoom2Button.alpha = if (binding.zoom2Button.isEnabled) 1f else 0.35f
-        binding.zoom3Button.isEnabled = usingWide || state.maxZoomRatio >= 3f
-        binding.zoom3Button.alpha = if (binding.zoom3Button.isEnabled) 1f else 0.35f
-    }
-
-    private fun updateZoomUi(zoom: Float) {
-        val buttons = listOf(
-            0.6f to binding.zoom06Button,
-            1f to binding.zoom1Button,
-            2f to binding.zoom2Button,
-            3f to binding.zoom3Button
-        )
-        buttons.forEach { (value, button) ->
-            val selected = abs(zoom - value) < 0.22f
-            button.backgroundTintList = ColorStateList.valueOf(
-                if (selected) Color.WHITE else Color.argb(150, 0, 0, 0)
-            )
-            button.setTextColor(if (selected) Color.BLACK else Color.WHITE)
-        }
-    }
-
-    private fun startRecording() {
-        val capture = videoCapture ?: return
-        // Unlike the Samsung tutorial's recommended starting grip, this
-        // implementation permits REC in either pose. H Lock always encodes
-        // a consistent landscape output and never calibrates on REC.
-        horizonState.startRecording()
         paused = false
-        binding.pauseButton.text = "Ⅱ"
-
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
-            .format(System.currentTimeMillis())
-
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, "HorizonCam_$stamp")
-            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/HorizonCam")
-        }
-
-        val options = MediaStoreOutputOptions.Builder(
-            contentResolver,
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        ).setContentValues(values).build()
-
-        val pending = capture.output.prepareRecording(this, options)
-        val withAudio =
-            if (soundEnabled &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                pending.withAudioEnabled()
-            } else {
-                pending
-            }
-
-        setSettingsEnabled(false)
-        setRecordingUi(true)
-
-        recording = withAudio.start(ContextCompat.getMainExecutor(this)) { event ->
-            when (event) {
-                is VideoRecordEvent.Start -> {
-                    binding.timerText.visibility = android.view.View.VISIBLE
-                    binding.timerText.text = "00:00"
-                }
-
-                is VideoRecordEvent.Pause -> {
-                    paused = true
-                    binding.pauseButton.text = "▶"
-                }
-
-                is VideoRecordEvent.Resume -> {
-                    paused = false
-                    binding.pauseButton.text = "Ⅱ"
-                }
-
-                is VideoRecordEvent.Status -> {
-                    val seconds =
-                        event.recordingStats.recordedDurationNanos / 1_000_000_000L
-                    binding.timerText.text =
-                        String.format(Locale.US, "%02d:%02d", seconds / 60, seconds % 60)
-                }
-
-                is VideoRecordEvent.Finalize -> {
-                    recording?.close()
-                    recording = null
-                    horizonState.stopRecording()
-                    setSettingsEnabled(true)
-                    setRecordingUi(false)
-
-                    if (event.hasError()) {
-                        Toast.makeText(
-                            this,
-                            "Erro ao gravar: ${event.error}",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    } else {
-                        val saved = event.outputResults.outputUri
-                        verifySavedVideo(saved)
-                        toast("Vídeo salvo em Movies/HorizonCam")
+        stopping = false
+        pausedCommand = false
+        ui.timerText.text = "00:00"
+        try {
+            horizon.startRecording()
+            recording = engine.start(this, audio) { event ->
+                when (event) {
+                    is VideoRecordEvent.Finalize -> {
+                        recording?.close()
+                        recording = null
+                        stopping = false
+                        paused = false
+                        pausedCommand = false
+                        horizon.stopRecording()
+                        val uri = event.outputResults.outputUri
+                        if (uri != Uri.EMPTY && (!event.hasError() ||
+                            event.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE ||
+                            event.error == VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED ||
+                            event.error == VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED)) {
+                            remember(uri, "Vídeo salvo")
+                        } else {
+                            Log.e(TAG, "Finalize error=${event.error}", event.cause)
+                            if (!isDestroyed) toast("Falha ao finalizar vídeo (${event.error}).")
+                        }
+                        if (!isDestroyed) afterCapture()
+                    }
+                    else -> if (!isDestroyed) {
+                        val seconds = event.recordingStats.recordedDurationNanos / 1_000_000_000L
+                        ui.timerText.text = String.format(Locale.ROOT, "%02d:%02d", seconds / 60, seconds % 60)
+                        when (event) {
+                            is VideoRecordEvent.Pause -> { paused = true; pausedCommand = false; render() }
+                            is VideoRecordEvent.Resume -> { paused = false; pausedCommand = false; render() }
+                            is VideoRecordEvent.Start -> render()
+                        }
                     }
                 }
             }
+        } catch (e: Exception) {
+            horizon.stopRecording()
+            Log.e(TAG, "Recorder.start", e)
+            toast("O gravador não conseguiu iniciar.")
+        }
+        render()
+    }
+
+    private fun remember(uri: Uri, message: String) {
+        library.remember(uri)
+        if (!isDestroyed && !isFinishing) {
+            library.inspectAndLoad(uri, ui.galleryThumbnail::setImageBitmap)
+            toast(message)
         }
     }
 
-    private fun stopRecording() {
+    private fun stopVideo() {
+        if (stopping) return
+        stopping = true
         recording?.stop()
+        render()
     }
 
-    private fun setRecordingUi(isRecording: Boolean) {
-        binding.recordInner.setBackgroundResource(
-            if (isRecording) R.drawable.record_inner_active
-            else R.drawable.record_inner_idle
-        )
-
-        val sizeDp = if (isRecording) 28 else 54
-        val lp = binding.recordInner.layoutParams
-        lp.width = dp(sizeDp)
-        lp.height = dp(sizeDp)
-        binding.recordInner.layoutParams = lp
-
-        binding.timerText.visibility =
-            if (isRecording) android.view.View.VISIBLE else android.view.View.GONE
-        binding.pauseButton.visibility =
-            if (isRecording) View.VISIBLE else View.GONE
-        binding.recordButton.contentDescription =
-            if (isRecording) "Parar gravação" else "Iniciar gravação"
-        updateStatusText()
+    private fun afterCapture() {
+        if (!locked && ui.root.display?.rotation != boundRotation && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+            rebind()
+        } else render()
     }
 
-    private fun setSettingsEnabled(enabled: Boolean) {
-        binding.qualityButton.isEnabled = enabled
-        binding.fpsButton.isEnabled = enabled
-        binding.lockButton.isEnabled = enabled
-        binding.quickControlsButton.isEnabled = enabled
-    }
-
-    private fun pulseLockButton() {
-        binding.lockButton.animate()
-            .scaleX(1.12f)
-            .scaleY(1.12f)
-            .setDuration(90)
-            .withEndAction {
-                binding.lockButton.animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .setDuration(120)
-                    .start()
-            }
-            .start()
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        updateControlsForOrientation()
-
-        // Never rebind while rotating the phone. For ordinary video modes,
-        // the metadata follows screen orientation when not recording.
-        // Horizontal Lock uses an absolute landscape reference instead.
-        if (recording == null && horizonState.mode() != StabilizationMode.HORIZONTAL_LOCK) {
-            // Normal video follows display rotation. ViewPort cannot rotate
-            // after binding, so it must be rebuilt in conventional modes.
-            restartCamera()
-        }
-    }
-
-    private fun updateControlsForOrientation() {
-        val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-
-        val record = binding.recordButton.layoutParams as FrameLayout.LayoutParams
-        record.gravity = if (portrait) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                         else Gravity.END or Gravity.CENTER_VERTICAL
-        record.bottomMargin = if (portrait) dp(64) else 0
-        record.marginEnd = if (portrait) 0 else dp(26)
-        binding.recordButton.layoutParams = record
-
-        val zoom = binding.zoomControls.layoutParams as FrameLayout.LayoutParams
-        zoom.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-        zoom.bottomMargin = if (portrait) dp(165) else dp(22)
-        binding.zoomControls.layoutParams = zoom
-
-        val mode = binding.modeLabel.layoutParams as FrameLayout.LayoutParams
-        mode.gravity = if (portrait) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                       else Gravity.END or Gravity.CENTER_VERTICAL
-        mode.marginEnd = if (portrait) 0 else dp(124)
-        mode.bottomMargin = if (portrait) dp(155) else 0
-        binding.modeLabel.layoutParams = mode
-
-        val status = binding.statusText.layoutParams as FrameLayout.LayoutParams
-        status.topMargin = if (portrait) dp(74) else dp(18)
-        binding.statusText.layoutParams = status
-
-        val thumb = binding.galleryThumbnail.layoutParams as FrameLayout.LayoutParams
-        thumb.gravity = if (portrait) Gravity.BOTTOM or Gravity.START
-                        else Gravity.START or Gravity.CENTER_VERTICAL
-        thumb.marginStart = dp(18)
-        thumb.bottomMargin = if (portrait) dp(82) else 0
-        binding.galleryThumbnail.layoutParams = thumb
-
-        val pause = binding.pauseButton.layoutParams as FrameLayout.LayoutParams
-        pause.gravity = if (portrait) Gravity.BOTTOM or Gravity.END
-                        else Gravity.END or Gravity.CENTER_VERTICAL
-        pause.marginEnd = if (portrait) dp(40) else dp(129)
-        pause.bottomMargin = if (portrait) dp(78) else 0
-        binding.pauseButton.layoutParams = pause
-
-        val timer = binding.timerText.layoutParams as FrameLayout.LayoutParams
-        timer.topMargin = if (portrait) dp(115) else dp(62)
-        binding.timerText.layoutParams = timer
-
-        listOf(binding.statusText, binding.timerText, binding.qualityButton,
-            binding.fpsButton, binding.lockButton, binding.zoom06Button,
-            binding.zoom1Button, binding.zoom2Button, binding.zoom3Button,
-            binding.modeLabel).forEach { view ->
-                view.animate().cancel()
-                view.rotation = 0f
-            }
-    }
-
-    private fun updateStatusText() {
-        if (showDiagnostics) {
-            val gpu = horizonEffect?.processor?.diagnostics() ?: "P0 V0 F0"
-            binding.statusText.text = "v1.0 " + gpu +
-                (if (nativeEisActive) " EIS" else " GPU") + " / " +
-                String.format(Locale.US, "%.0f", horizonState.correctionDegrees()) + "°"
-        } else {
-            binding.statusText.text = when {
-                recording != null -> "● REC"
-                horizonState.mode() == StabilizationMode.HORIZONTAL_LOCK -> "H LOCK 360°"
-                horizonState.mode() == StabilizationMode.STEADY -> "SUPER STEADY"
-                else -> "VIDEO"
-            }
-        }
-    }
-
-    private fun toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-    }
-
-    private fun haptic() {
-        binding.root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
-    }
-
-    /** Each entry is backed by the selected pipeline, not a cosmetic toggle. */
-    private fun showStabilizationOptions() {
-        if (recording != null) return
-        PopupMenu(this, binding.lockButton).apply {
-            menu.add(0, 1, 0, "Desligado")
-            menu.add(0, 2, 1, "Super Steady")
-            menu.add(0, 3, 2, "Horizontal Lock 360°")
-            setOnMenuItemClickListener { item ->
-                val requested = when (item.itemId) {
-                    1 -> StabilizationMode.OFF
-                    2 -> StabilizationMode.STEADY
-                    else -> StabilizationMode.HORIZONTAL_LOCK
-                }
-                if (requested == StabilizationMode.STEADY && !eisSupported) {
-                    toast("Super Steady nativo não disponível nesta câmera.")
-                    return@setOnMenuItemClickListener true
-                }
-                if (horizonState.mode() != requested) {
-                    if (requested == StabilizationMode.STEADY) {
-                        requestedQuality = Quality.FHD
-                        requestedFps = 30
-                        binding.qualityButton.text = "FHD"
-                        binding.fpsButton.text = "30"
-                    }
-                    horizonState.setMode(requested)
-                    if (requested != StabilizationMode.HORIZONTAL_LOCK && usingWide) {
-                        usingWide = false
-                        selectedZoom = 1f
-                    } else if (requested == StabilizationMode.HORIZONTAL_LOCK &&
-                        wideLens != null && selectedZoom <= 1f) {
-                        usingWide = true
-                        selectedZoom = 0.6f
-                    }
-                    pulseLockButton()
-                    haptic()
-                    binding.lockButton.text = when (requested) {
-                        StabilizationMode.OFF -> "OFF"
-                        StabilizationMode.STEADY -> "STEADY"
-                        StabilizationMode.HORIZONTAL_LOCK -> "360°"
-                    }
-                    binding.lockButton.setTextColor(
-                        if (requested == StabilizationMode.OFF) Color.WHITE
-                        else Color.rgb(255, 216, 74)
-                    )
-                    restartCamera()
-                }
+    private fun videoQualityMenu() {
+        if (busy) return
+        val cap = capabilities ?: return
+        PopupMenu(this, ui.qualityButton).apply {
+            menu.add(0, 1, 0, "Full HD · 1080p").isEnabled = cap.fhd
+            menu.add(0, 2, 1, "Ultra HD · 4K").isEnabled = cap.uhd && horizon.mode() != StabilizationMode.STEADY
+            setOnMenuItemClickListener {
+                requestedQuality = if (it.itemId == 2) Quality.UHD else Quality.FHD
+                if (requestedQuality == Quality.UHD) fps = 30
+                rebind()
                 true
             }
             show()
         }
     }
 
-    private fun showQuickControls() {
-        PopupMenu(this, binding.quickControlsButton).apply {
-            menu.add(0, 101, 0,
-                if (binding.gridView.visibility == View.VISIBLE) "Ocultar grade" else "Mostrar grade")
-            menu.add(0, 102, 1,
-                if (soundEnabled) "Áudio: ligado" else "Áudio: desligado")
-            menu.add(0, 103, 2,
-                if (showDiagnostics) "Ocultar diagnóstico" else "Exibir diagnóstico")
-            menu.add(0, 104, 3, "Lentes e capacidades")
-            setOnMenuItemClickListener { item ->
-                when (item.itemId) {
-                    101 -> {
-                        val show = binding.gridView.visibility != View.VISIBLE
-                        binding.gridView.visibility = if (show) View.VISIBLE else View.GONE
-                        prefs.edit().putBoolean("grid", show).apply()
-                    }
-                    102 -> {
-                        soundEnabled = !soundEnabled
-                        prefs.edit().putBoolean("sound", soundEnabled).apply()
-                    }
-                    103 -> {
-                        showDiagnostics = !showDiagnostics
-                        updateStatusText()
-                    }
-                    104 -> {
-                        val cap = capabilities
-                        if (cap != null) {
-                            val fovs = cap.availableLenses.joinToString { lens ->
-                                val fov = lens.approximateHorizontalFovDegrees
-                                lens.id + ":" + (if (fov == null) "?" else "%.0f°".format(fov))
-                            }
-                            toast("Camera2: ${cap.cameraId} • FOV: ${fovs.ifBlank { "indisponível" }}")
-                        } else toast("A câmera ainda não abriu.")
-                    }
+    private fun stabilizationMenu() {
+        if (busy) return
+        PopupMenu(this, ui.lockButton).apply {
+            menu.add(0, 1, 0, "Desligada")
+            menu.add(0, 2, 1, "Estabilização nativa").isEnabled = eisSupported
+            menu.add(0, 3, 2, "Horizon Lock · 360°").isEnabled = sensor.isAvailable
+            setOnMenuItemClickListener {
+                val mode = when (it.itemId) {
+                    2 -> StabilizationMode.STEADY
+                    3 -> StabilizationMode.HORIZONTAL_LOCK
+                    else -> StabilizationMode.OFF
                 }
+                horizon.setMode(mode)
+                prefs.edit().putString("stabilization", mode.name).apply()
+                if (mode == StabilizationMode.STEADY) { fps = 30; requestedQuality = Quality.FHD }
+                syncSensor()
+                rebind()
                 haptic()
                 true
             }
@@ -875,151 +577,198 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun toggleTorch() {
-        val cam = camera ?: return
-        if (!cam.cameraInfo.hasFlashUnit()) {
-            toast("Esta lente não oferece lanterna.")
-            return
-        }
-        torchEnabled = !torchEnabled
-        cam.cameraControl.enableTorch(torchEnabled)
-        binding.flashButton.setIconTint(
-            ColorStateList.valueOf(
-                if (torchEnabled) Color.rgb(255, 216, 74) else Color.WHITE
-            )
-        )
-        haptic()
-    }
-
-    /**
-     * Maps the presentation-only center crop and canonical GL correction
-     * approximately back into the logical CameraX surface.
-     */
-    private fun focusAt(x: Float, y: Float) {
-        val cam = camera ?: return
-        val vw = binding.previewView.width.toFloat().coerceAtLeast(1f)
-        val vh = binding.previewView.height.toFloat().coerceAtLeast(1f)
-        val videoAspect = 16.0 / 9.0
-        val viewAspect = vw / vh
-        var cx = 2.0 * x / vw - 1.0
-        var cy = 1.0 - 2.0 * y / vh
-        if (videoAspect > viewAspect) cx *= viewAspect / videoAspect
-        else cy *= videoAspect / viewAspect
-
-        val model = horizonState.frameGeometry(android.os.SystemClock.elapsedRealtimeNanos())
-        val inverse = AngleMath.correctionMatrix(
-            model.rotationDegrees.toDouble(),
-            model.cropScale.toDouble(),
-            videoAspect
-        ).inverse()
-        val sensorPoint = inverse.apply(cx, cy)
-        val nx = (0.5 + sensorPoint.first / 2.0).coerceIn(0.05, 0.95).toFloat()
-        val ny = (0.5 - sensorPoint.second / 2.0).coerceIn(0.05, 0.95).toFloat()
-        val point = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(nx, ny)
-        val action = FocusMeteringAction.Builder(
-            point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
-        ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
-        cam.cameraControl.startFocusAndMetering(action)
-
-        val indicator = binding.focusIndicator
-        indicator.animate().cancel()
-        indicator.translationX = x - vw / 2f
-        indicator.translationY = y - vh / 2f
-        indicator.alpha = 1f
-        indicator.visibility = View.VISIBLE
-        indicator.postDelayed({
-            indicator.animate().alpha(0f).setDuration(250).withEndAction {
-                indicator.visibility = View.GONE
-            }.start()
-        }, 900)
-
-        val exposure = cam.cameraInfo.exposureState
-        val range = exposure.exposureCompensationRange
-        if (range.upper > range.lower && exposure.isExposureCompensationSupported) {
-            binding.exposureSlider.max = range.upper - range.lower
-            binding.exposureSlider.progress = exposure.exposureCompensationIndex - range.lower
-            binding.exposureSlider.visibility = View.VISIBLE
-        }
-        haptic()
-    }
-
-    private fun togglePause() {
-        val active = recording ?: return
-        if (paused) active.resume() else active.pause()
-        paused = !paused
-        binding.pauseButton.text = if (paused) "▶" else "Ⅱ"
-        binding.pauseButton.contentDescription =
-            if (paused) "Retomar gravação" else "Pausar gravação"
-        haptic()
-    }
-
-    private fun showLastVideo(uri: Uri) {
-        galleryExecutor.execute {
-            val bitmap = runCatching {
-                contentResolver.loadThumbnail(uri, Size(144, 144), null)
-            }.getOrNull()
-            if (bitmap != null) runOnUiThread {
-                if (!isDestroyed && !isFinishing) {
-                    binding.galleryThumbnail.setImageBitmap(bitmap)
+    private fun settings() {
+        PopupMenu(this, ui.quickControlsButton).apply {
+            menu.add(0, 1, 0, if (ui.gridView.isVisible) "Ocultar grade" else "Mostrar grade")
+            if (!photoMode) menu.add(0, 2, 1, if (audio) "Desligar microfone" else "Ligar microfone")
+            menu.add(0, 3, 2, "Escolher câmera traseira").isEnabled = ready && !busy
+            menu.add(0, 4, 3, "Diagnóstico da sessão")
+            if (failure != null) menu.add(0, 5, 4, "Tentar abrir a câmera")
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    1 -> { ui.gridView.isVisible = !ui.gridView.isVisible; prefs.edit().putBoolean("grid", ui.gridView.isVisible).apply() }
+                    2 -> { audio = !audio; prefs.edit().putBoolean("sound", audio).apply(); render() }
+                    3 -> lensMenu()
+                    4 -> showDiagnostics()
+                    5 -> retry()
                 }
+                true
             }
+            show()
         }
     }
 
-    private fun openLastVideo() {
-        val uri = lastVideoUri ?: run {
-            toast("Nenhum vídeo gravado ainda.")
-            return
-        }
-        runCatching {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "video/mp4")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    private fun lensMenu() {
+        val manager = lenses ?: return
+        PopupMenu(this, ui.quickControlsButton).apply {
+            manager.options.forEachIndexed { i, option ->
+                menu.add(0, i + 1, i, option.label).isEnabled = !manager.isRejected(option.key)
             }
-            startActivity(intent)
-        }.onFailure { toast("Não foi possível abrir o vídeo.") }
-    }
-
-    private fun verifySavedVideo(uri: Uri) {
-        if (uri == Uri.EMPTY) return
-        lastVideoUri = uri
-        prefs.edit().putString("lastVideo", uri.toString()).apply()
-        showLastVideo(uri)
-        galleryExecutor.execute {
-            val result = runCatching {
-                val retriever = MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(this, uri)
-                    val width = retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH
-                    )?.toIntOrNull() ?: 0
-                    val height = retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT
-                    )?.toIntOrNull() ?: 0
-                    val rotation = retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION
-                    )?.toIntOrNull() ?: 0
-                    Triple(width, height, rotation)
-                } finally {
-                    retriever.release()
-                }
-            }.getOrNull()
-            result?.let { (w,h,r) ->
-                val effectiveWidth = if (r % 180 == 0) w else h
-                val effectiveHeight = if (r % 180 == 0) h else w
-                android.util.Log.i(
-                    "HorizonCamMetadata",
-                    "encoded=${w}x${h} rotation=${r} display=${effectiveWidth}x${effectiveHeight}"
-                )
-                if (horizonState.isEnabled() && effectiveWidth < effectiveHeight) {
-                    runOnUiThread {
-                        toast("Aviso: MP4 saiu vertical. Diagnóstico registrado no Logcat.")
-                    }
-                }
+            setOnMenuItemClickListener {
+                val chosen = manager.options[it.itemId - 1]
+                zoomTo(chosen.relativeZoom * chosen.initialCameraZoom, chosen.key)
+                true
             }
+            show()
         }
     }
 
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
+    private fun showDiagnostics() {
+        val manager = lenses
+        val info = manager?.diagnostics()
+        val resolution = photo?.capture?.resolutionInfo ?: video?.capture?.resolutionInfo
+        val ids = capabilities?.availableLenses?.joinToString("\n") { entry ->
+            "ID ${entry.id}: ${entry.physicalIds.sorted().joinToString().ifBlank { "sem IDs físicos anunciados" }}"
+        }.orEmpty()
+        val report = listOf(
+            "Câmera da sessão: ${info?.selectedCameraId ?: "—"}",
+            "Saída física solicitada: ${info?.selectedPhysicalCameraId ?: "automática"}",
+            "Sensor ativo informado pelo HAL: ${info?.activePhysicalCameraId ?: "não informado"}",
+            "Zoom na câmera: ${formatZoom(displayZoom)}",
+            "Buffer: ${resolution?.resolution ?: "—"} · rotação ${resolution?.rotationDegrees ?: "—"}°",
+            if (photoMode) "JPEG · qualidade 95" else "FPS solicitado: $fps · EIS: ${video?.nativeEis == true}",
+            if (locked) "Horizon Lock: ${sensor.sourceName} · ${video?.effect?.processor?.diagnostics() ?: "aguardando"}" else "",
+            ids, info?.rejection?.let { "Configuração recusada: $it" }.orEmpty()
+        ).filter { it.isNotBlank() }.joinToString("\n")
+        AlertDialog.Builder(this).setTitle("Diagnóstico da câmera").setMessage(report)
+            .setPositiveButton("Fechar", null).show()
+    }
+
+    private fun formatZoom(value: Float) = String.format(Locale.getDefault(), "%.2f×", value)
+    private fun renderZoom() {
+        ui.zoomReadout.text = formatZoom(displayZoom)
+        presets.forEach { (value, button) ->
+            val candidate = route(value)
+            button.isEnabled = ready && !takingPhoto && !awaitingMic && !stopping && candidate != null &&
+                abs(candidate.displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value)
+            button.isSelected = abs(displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value)
+        }
+    }
+
+    private fun render() {
+        ui.root.setPhotoMode(photoMode)
+        ui.root.setLockedVideoMode(locked)
+        ui.photoPreview.isVisible = !locked
+        ui.previewView.isVisible = locked
+        ui.modePhoto.isSelected = photoMode
+        ui.modeVideo.isSelected = !photoMode
+        ui.modePhoto.isEnabled = !busy
+        ui.modeVideo.isEnabled = !busy
+        ui.qualityButton.isVisible = !photoMode
+        ui.fpsButton.isVisible = !photoMode
+        ui.lockButton.isVisible = !photoMode
+        ui.qualityButton.isEnabled = ready && !busy
+        ui.qualityButton.text = if (requestedQuality == Quality.UHD) "4K" else "FHD"
+        ui.fpsButton.isEnabled = ready && !busy && (fps == 60 || (capabilities?.fps60 == true &&
+            requestedQuality == Quality.FHD && horizon.mode() != StabilizationMode.STEADY))
+        ui.fpsButton.text = fps.toString()
+        ui.lockButton.isEnabled = !busy
+        ui.lockButton.text = when (horizon.mode()) {
+            StabilizationMode.HORIZONTAL_LOCK -> "360°"
+            StabilizationMode.STEADY -> "EIS"
+            StabilizationMode.OFF -> "Off"
+        }
+        ui.quickControlsButton.isEnabled = !busy
+        ui.flashButton.isEnabled = ready && camera?.cameraInfo?.hasFlashUnit() == true
+        val rec = recording != null
+        ui.galleryThumbnail.isEnabled = !busy
+        ui.pauseButton.isVisible = rec
+        ui.pauseButton.isEnabled = !stopping
+        ui.pauseButton.text = if (paused) "▶" else "Ⅱ"
+        ui.pauseButton.contentDescription = if (paused) "Retomar gravação" else "Pausar gravação"
+        ui.timerText.isVisible = rec
+        ui.recordButton.isEnabled = (rec && !stopping) || (ready && failure == null && !busy)
+        ui.recordButton.alpha = if (ui.recordButton.isEnabled) 1f else 0.5f
+        ui.recordButton.contentDescription = when { rec -> "Parar gravação"; photoMode -> "Tirar foto"; else -> "Iniciar gravação" }
+        val inner = ui.recordInner
+        inner.setBackgroundResource(when { rec -> R.drawable.record_inner_active; photoMode -> R.drawable.photo_shutter_idle; else -> R.drawable.record_inner_idle })
+        val scale = if (rec) 0.53f else 1f
+        inner.animate().scaleX(scale).scaleY(scale).setDuration(130).start()
+        renderStatus()
+        renderZoom()
+    }
+
+    private fun renderStatus() {
+        val text = when {
+            failure != null -> failure!!
+            !ready -> "Abrindo câmera…"
+            takingPhoto -> "Salvando JPEG…"
+            stopping -> "Finalizando MP4…"
+            paused -> "Pausado"
+            recording != null && locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos()) -> "REC · referência fraca"
+            recording != null -> if (audio) "● REC" else "● REC · sem áudio"
+            photoMode -> "Foto · JPEG"
+            locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos()) -> "Buscando horizonte…"
+            locked -> "Horizon Lock · 360°"
+            !audio -> "Vídeo · sem áudio"
+            horizon.mode() == StabilizationMode.STEADY -> "Vídeo · EIS"
+            else -> "Vídeo"
+        }
+        if (ui.statusText.text != text) ui.statusText.text = text
+    }
+
+    private val telemetry = object : Runnable {
+        override fun run() {
+            renderStatus()
+            val actual = lenses?.diagnostics()?.activePhysicalCameraId
+            if (actual != physicalLog) { Log.i(TAG, "session=$session activePhysicalId=${actual ?: "unknown"}"); physicalLog = actual }
+            ui.root.postDelayed(this, 400)
+        }
+    }
+
+    private fun syncSensor() {
+        if (locked && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) sensor.start()
+        else { sensor.stop(); horizon.clearOrientation() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        WindowInsetsControllerCompat(window, ui.root).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        syncSensor()
+        (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(this, null)
+        ui.root.post(telemetry)
+        if (hasCamera() && provider == null) openCamera()
+    }
+
+    override fun onPause() {
+        ui.root.removeCallbacks(telemetry)
+        (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(this)
+        if (recording == null) { sensor.stop(); horizon.clearOrientation() }
+        super.onPause()
+    }
+
+    override fun onStop() {
+        if (recording != null) stopVideo()
+        sensor.stop()
+        horizon.clearOrientation()
+        super.onStop()
+    }
+
+    override fun onDisplayAdded(displayId: Int) = Unit
+    override fun onDisplayRemoved(displayId: Int) = Unit
+    override fun onDisplayChanged(displayId: Int) {
+        if (!locked && !busy && camera != null && ui.root.display?.rotation != boundRotation) rebind()
+    }
+
+    override fun onDestroy() {
+        sensor.release()
+        recording?.stop()
+        releaseSession()
+        library.close()
+        super.onDestroy()
+    }
+
+    private fun fail(message: String, error: Throwable) {
+        Log.e(TAG, message, error)
+        failure = message
+        ready = false
+        render()
+    }
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    private fun haptic() { ui.root.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
+
+    companion object { private const val TAG = "HorizonCam" }
 }
