@@ -5,6 +5,7 @@ No app hooks, seeded media, fake success, or private user/device data. See READM
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import re
@@ -16,8 +17,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageOps, ImageStat
-from media_checks import require, validate_geometry, validate_probe
-from ui_checks import wait_for
+from media_checks import require, validate_geometry, validate_probe, validate_ai_output
+from ui_checks import wait_for, immersive_confirmation
 
 PACKAGE = "com.miokzz.horizoncam.gl"
 COMPONENT = f"{PACKAGE}/com.miokzz.horizoncam.MainActivity"
@@ -39,6 +40,8 @@ class Smoke:
         self.sensor_thread = None
         self.sequence = 0
         self.verified_emulator = False
+        self.last_jpeg = None
+        self.last_jpeg_remote = None
 
     def command(self, *args, timeout=30, check=True, binary=False):
         result = subprocess.run(args, capture_output=True, timeout=timeout)
@@ -68,6 +71,13 @@ class Smoke:
                 xml = self.adb("exec-out", "cat", "/sdcard/camera-smoke-ui.xml")
                 root = ET.fromstring(xml)
                 (self.output / "latest-ui.xml").write_text(xml, encoding="utf-8")
+                intro = immersive_confirmation(root)
+                if intro is not None:
+                    (self.output / "system-fullscreen-intro.xml").write_text(xml, encoding="utf-8")
+                    self.snapshot("system-fullscreen-intro")
+                    self.tap_node(intro)
+                    time.sleep(.5)
+                    continue
                 return root
             except (RuntimeError, ET.ParseError, subprocess.TimeoutExpired):
                 time.sleep(0.3)
@@ -106,6 +116,33 @@ class Smoke:
 
     def tap(self, resource):
         self.tap_node(self.wait_node(resource))
+
+    def scroll_to(self, resource, horizontal=False, reverse=False):
+        for _ in range(8):
+            root = self.hierarchy()
+            node = self.find(root, resource=resource)
+            png = self.adb("exec-out", "screencap", "-p", binary=True)
+            width, height = Image.open(io.BytesIO(png)).size
+            if node is not None:
+                try:
+                    left, top, right, bottom = self.bounds(node)
+                    if 0 <= left < right <= width and 0 <= top < bottom <= height:
+                        return node
+                except AssertionError:
+                    pass
+            if horizontal:
+                rail = self.find(root, resource="modeRail")
+                require(rail is not None, "Capture mode rail is missing")
+                left, top, right, bottom = self.bounds(rail)
+                x1, x2, y1, y2 = int(left + .85 * (right-left)), int(left + .15 * (right-left)), (top+bottom)//2, (top+bottom)//2
+            else:
+                x1 = x2 = width // 2
+                y1, y2 = int(height * .82), int(height * .30)
+            if reverse:
+                x1, x2, y1, y2 = x2, x1, y2, y1
+            self.shell("input", "swipe", str(x1), str(y1), str(x2), str(y2), "350")
+            time.sleep(.4)
+        raise AssertionError(f"Could not scroll public UI to {resource}")
 
     def set_stabilization(self, text):
         self.tap("lockButton")
@@ -184,6 +221,8 @@ class Smoke:
         remote = self.new_media(True, before)
         self.wait_node("recordButton", "Tirar foto")
         path = self.pull(remote, label)
+        self.last_jpeg = path
+        self.last_jpeg_remote = remote
         with Image.open(path) as image:
             require(image.format == "JPEG", "Photo isn't a real JPEG")
             encoded = image.size
@@ -194,6 +233,76 @@ class Smoke:
             self.report["captures"].append({"name": label, "kind": "JPEG", "encoded": encoded,
                 "displayed": displayed.size, "exif_orientation": orientation})
         self.snapshot(label + "-saved")
+
+    def capture_ai(self):
+        require(self.last_jpeg is not None, "AI requires an actual camera JPEG from this run")
+        self.tap_node(self.scroll_to("modeMore", horizontal=True))
+        menu = self.wait(lambda: self.find(self.hierarchy(), text="Horizon AI · super-resolução local"),
+                         "Public Horizon AI menu is absent")
+        self.tap_node(menu)
+        patch = self.scroll_to("patch")
+        self.tap_node(patch)
+        root = self.hierarchy()
+        patch = self.find(root, resource="patch")
+        require(patch is not None and patch.get("checked") == "true", "Native patch mode was not selected")
+        self.scroll_to("process")
+        before = self.media_paths(True)
+        # Start through the public action only after native source loading has completed.
+        process = self.wait_node("process")
+        started = time.monotonic()
+        self.tap_node(process)
+        saw_running = False
+        latest_root = None
+        def finished():
+            nonlocal saw_running, latest_root
+            latest_root = self.hierarchy()
+            description = self.find(latest_root, resource="description")
+            text = description.get("text", "") if description is not None else ""
+            require(not any(message in text.lower() for message in ("falha", "cancelado", "insuficiente", "inválido")),
+                    f"Actual Android AI inference failed: {text}")
+            progress = self.find(latest_root, resource="progress")
+            process = self.find(latest_root, resource="process")
+            if progress is not None or (process is not None and process.get("enabled") == "false"):
+                saw_running = True
+            after = self.find(latest_root, resource="showAfter")
+            return after is not None and process is not None and process.get("enabled") == "true" and progress is None
+        self.wait(finished, "Android AI inference did not complete with comparison controls", seconds=300)
+        fresh = self.media_paths(True) - before
+        outputs = [path for path in fresh if Path(path).name.startswith("HC_AI_")]
+        require(len(outputs) == 1, "Android AI did not save exactly one new HC_AI JPEG")
+        path = self.pull(outputs[0], "ai-output")
+        with Image.open(self.last_jpeg) as source:
+            upright = ImageOps.exif_transpose(source)
+            edge = min(256, *upright.size)
+            left, top = (upright.width-edge)//2, (upright.height-edge)//2
+            upright.crop((left, top, left+edge, top+edge)).save(self.output / "ai-native-before.png")
+        with Image.open(path) as output:
+            require(output.format == "JPEG", "AI output is not a real JPEG")
+            description = output.getexif().get(270)
+            validate_ai_output(*output.size, edge, description)
+            require(output.getexif().get(274, 1) == 1, "AI JPEG must contain upright pixels")
+            assert_visible_scene(output)
+            result = {"name": "ai-output", "kind": "AI JPEG", "input": [edge, edge],
+                      "output": list(output.size), "description": description,
+                      "observed_progress": saw_running,
+                      "elapsed_seconds": round(time.monotonic()-started, 2)}
+        self.tap_node(self.scroll_to("showBefore", reverse=True))
+        self.wait(lambda: self.find(self.hierarchy(), resource="showBefore").get("selected") == "true",
+                  "AI Original comparison did not load")
+        self.snapshot("ai-original-comparison")
+        self.tap("showAfter")
+        self.wait(lambda: self.find(self.hierarchy(), resource="showAfter").get("selected") == "true",
+                  "AI processed comparison did not load")
+        self.snapshot("ai-processed-comparison")
+        gallery = self.wait_node("gallery")
+        require(gallery.get("clickable") == "true", "AI JPEG gallery action is unavailable")
+        original_after = self.pull(self.last_jpeg_remote, "ai-original-unchanged")
+        require(hashlib.sha256(self.last_jpeg.read_bytes()).digest() == hashlib.sha256(original_after.read_bytes()).digest(),
+                "AI processing modified the original camera JPEG")
+        self.report["captures"].append(result)
+        self.tap_node(self.scroll_to("backToCamera", reverse=True))
+        self.wait_node("recordButton")
+        self.snapshot("ai-returned-camera")
 
     def capture_video(self, label, portrait, locked=False):
         self.wait_node("recordButton", "Iniciar gravação")
@@ -228,7 +337,7 @@ class Smoke:
         self.wait_node("modePhoto")
         self.snapshot(label + "-saved")
 
-    def run(self, apk):
+    def run(self, apk, ai=False):
         serial = self.adb("get-serialno").strip()
         require(serial.startswith("emulator-"), "Refusing camera smoke on a non-emulator device")
         require(self.shell("getprop", "ro.kernel.qemu").strip() == "1", "QEMU emulator identity required")
@@ -281,6 +390,8 @@ class Smoke:
         self.shell("am", "start", "-W", "-n", COMPONENT)
         self.wait_node("recordButton")
         self.check_thumbnail(placeholder, "gallery-restored")
+        if ai:
+            self.capture_ai()
         self.report["status"] = "passed"
 
     def finish(self, error=None):
@@ -317,16 +428,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apk", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=Path("work/camera-smoke"))
+    parser.add_argument("--ai", action="store_true", help="Also execute real Android native-patch ESRGAN inference")
     args = parser.parse_args()
     smoke = Smoke(args.output)
     try:
-        smoke.run(args.apk)
+        smoke.run(args.apk, ai=args.ai)
     except Exception as error:
         smoke.finish(error)
         raise
     else:
         smoke.finish()
-        print("PASS: two JPEGs and three MP4s captured and inspected from the Android emulator")
+        print("PASS: real emulator captures inspected" + ("; Android ESRGAN inference verified" if args.ai else ""))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Pure media assertions used by real virtual-device smoke and its regression tests."""
 import math
+import re
 
 def require(condition, message):
     if not condition:
@@ -42,5 +43,17 @@ def validate_probe(probe, portrait, locked=False):
                 "Horizon Lock must encode landscape pixels with landscape playback metadata")
     return {"encoded": [width, height], "displayed": list(effective),
             "rotation": rotation, "duration": duration, "codec": video.get("codec_name"), "sar": sar}
+
+
+def validate_ai_output(width, height, patch_edge, description):
+    require(0 < patch_edge <= 256, "AI smoke must use a bounded native patch")
+    require((width, height) == (patch_edge * 4, patch_edge * 4),
+            f"AI output {width}x{height} is not 4x native {patch_edge}x{patch_edge} patch")
+    require(isinstance(description, str) and "pretrained ESRGAN" in description and
+            "estimated details" in description, "AI JPEG is missing its model-generated-detail disclosure")
+    dimensions = re.search(r"input/output\s+(\d+)[×x](\d+)\s*→\s*(\d+)[×x](\d+)", description)
+    require(dimensions is not None, "AI JPEG must describe actual input/output dimensions")
+    require(tuple(map(int, dimensions.groups())) == (patch_edge, patch_edge, width, height),
+            "AI JPEG description disagrees with actual patch/output dimensions")
 
 

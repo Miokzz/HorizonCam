@@ -1,7 +1,7 @@
 """Regression tests for the CI oracle, not substitutes for emulator captures."""
 import unittest
 
-from media_checks import media_geometry, validate_geometry, validate_probe
+from media_checks import media_geometry, validate_geometry, validate_probe, validate_ai_output
 
 
 class MediaOracleTest(unittest.TestCase):
@@ -52,6 +52,26 @@ class MediaOracleTest(unittest.TestCase):
     def test_arbitrary_angle_does_not_silently_swap_dimensions(self):
         with self.assertRaises(AssertionError):
             media_geometry(1280, 720, 45)
+
+    def test_ai_requires_actual_4x_patch_dimensions_and_model_disclosure(self):
+        description = "Horizon AI; pretrained ESRGAN; estimated details; input/output 256×256 → 1024×1024; zoom=1.0"
+        validate_ai_output(1024, 1024, 256, description)
+        with self.assertRaises(AssertionError):
+            validate_ai_output(256, 256, 256, description)
+        with self.assertRaises(AssertionError):
+            validate_ai_output(1024, 1024, 256, "ordinary camera JPEG")
+
+    def test_ai_rejects_metadata_disagreeing_with_real_output(self):
+        with self.assertRaises(AssertionError):
+            validate_ai_output(1024, 1024, 256,
+                "pretrained ESRGAN; estimated details; input/output 128×128 → 512×512")
+
+    def test_ai_small_native_patch_uses_real_source_size(self):
+        validate_ai_output(800, 800, 200,
+            "pretrained ESRGAN; estimated details; input/output 200×200 → 800×800")
+        with self.assertRaises(AssertionError):
+            validate_ai_output(2560, 2560, 640,
+                "pretrained ESRGAN; estimated details; input/output 640×640 → 2560×2560")
 
 
 if __name__ == "__main__":

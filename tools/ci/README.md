@@ -31,10 +31,17 @@ Checks fail the job when the app cannot complete any required flow:
 - Gallery thumbnail: real capture replaces the empty placeholder, and the latest
   thumbnail is restored after force-stop/relaunch. Viewer availability is outside
   this test because system images don't consistently bundle a media viewer.
+- With `--ai` (enabled in CI): swipe to the public Horizon AI menu, select a native
+  center patch of at most 256 × 256, run the actual Android ESRGAN model, require
+  a new `HC_AI_` JPEG with 4× dimensions and matching model-generated-detail EXIF
+  disclosure, switch Original/AI comparison, and verify the camera JPEG is unchanged.
+  Progress state is recorded when observed; a fast completion may precede the
+  first XML dump. Missing output, inference errors and timeout still fail the run.
 
 `work/camera-smoke/report.json` records observed media metadata and pass/failure.
 Artifacts include the actual five captures, ffprobe JSON, decoded MP4 frames,
 emulator screenshots, last UI XML and camera/sensor/display/logcat diagnostics.
+AI runs also include the native before patch, restored JPEG and comparison screens.
 They are uploaded even on failure and retained for seven days. There is no
 automatic retry of a failed capture, skipped Horizon Lock path, or fabricated
 success when media is missing. UI readiness polling is bounded.
