@@ -1,7 +1,10 @@
 # Virtual-device camera smoke
 
 `camera-smoke.yml` runs one API 35 x86_64 emulator on pushes to `phase-1/**`.
-Manual dispatch can choose API 35 or 36. KVM accelerates the VM; SwiftShader
+Manual dispatch can choose API 35 or 36. The Ubuntu 24.04 x64 runner settles udev,
+repairs permissions on an existing `/dev/kvm` only, and verifies KVM with the
+emulator's `-accel-check`. If unavailable, the emulator action explicitly uses
+supported software CPU emulation; boot has a bounded 15-minute timeout. SwiftShader
 renders GLES; the rear camera uses the emulator's generated scene. No webcam,
 phone, app test hook, seeded output file, or personal media is used.
 
