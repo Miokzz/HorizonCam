@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Bundle
@@ -51,6 +52,7 @@ import com.miokzz.horizoncam.camera.CameraCapabilities
 import com.miokzz.horizoncam.camera.LensOption
 import com.miokzz.horizoncam.camera.PhotoZoomDetents
 import com.miokzz.horizoncam.camera.PhotoZoomScale
+import com.miokzz.horizoncam.camera.PhotoZoomTransition
 import com.miokzz.horizoncam.camera.RearLensManager
 import com.miokzz.horizoncam.camera.StillPreviewGeometry
 import com.miokzz.horizoncam.camera.StillFraming
@@ -116,8 +118,14 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var requestedQuality = Quality.FHD
     private var fps = 30
     private var displayZoom = 1f
-    private var targetZoom = 1f
+    private val photoZoom = PhotoZoomTransition()
+    private var targetZoom: Float
+        get() = photoZoom.intent.total
+        set(value) { photoZoom.request(value, preferred = null, continuous = false, now = 0L) }
     private val softwareStillZoom get() = autoJpeg && !hdrRequested
+
+    private fun usesS24LogicalMain(total: Float, preferred: String?) =
+        softwareStillZoom && android.os.Build.MODEL == "SM-S9210" && preferred == null && total >= 1f && total < 3f
     private var cameraOpen = false
     private var previewStreaming = false
     private var bindingStartedAt = 0L
@@ -126,14 +134,14 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var recoveryMessage: String? = null
     private var reopen: Runnable? = null
     private var lensSwitch: Runnable? = null
-    private var scheduledLensKey: String? = null
-    private var lensIntentStableAt = 0L
+    private var cancelPhotoClose: (() -> Unit)? = null
+    private var recoveredPhotoGeneration: Long? = null
     private var handoffStartedAt: Long? = null
     private var handoffExposure: Float? = null
-    private var pendingZoom: Pair<Float, String?>? = null
+    private var photoSurfaceRequested = false
     private var draggingZoom = false
     private val zoomDetents = PhotoZoomDetents()
-    private var sliderIntent = 1f
+    private var sliderGeneration: Long? = null
     private var dragPreviewCrop: Float? = null
     private var inFlightNativeRatio: Float? = null
     private var appliedNativeRatio: Float? = null
@@ -153,6 +161,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var extraCrop = 1f
     private var zoomCommand = 0
     private var zoomPending = false
+    private val zoomInProgress get() = if (softwareStillZoom) photoZoom.isPending else zoomPending
+    private val canZoom get() = (ready || handoffStartedAt != null) && failure == null
     private val autoJpeg get() = mode == ShootingMode.PHOTO && photoSettings.format == PhotoFormat.JPEG
     private var pinchZoom = 1f
     private var recording: Recording? = null
@@ -306,18 +316,19 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     val raw = PhotoZoomScale.zoom(value, minimumPhotoZoom())
                     val desired = if (draggingZoom) zoomDetents.update(raw, SystemClock.elapsedRealtime())
                         else PhotoZoomScale.tenths(raw)
-                    if (draggingZoom && desired == sliderIntent) return
-                    sliderIntent = desired
+                    if (draggingZoom && desired == targetZoom && sliderGeneration == photoZoom.intent.generation) return
                     zoomTo(desired, continuous = draggingZoom)
+                    if (draggingZoom) sliderGeneration = photoZoom.intent.generation
                 }
                 override fun onStartTrackingTouch(bar: SeekBar) {
                     draggingZoom = true
-                    sliderIntent = displayZoom
-                    zoomDetents.start(displayZoom)
+                    sliderGeneration = null
+                    zoomDetents.start(targetZoom)
                 }
                 override fun onStopTrackingTouch(bar: SeekBar) {
                     draggingZoom = false
-                    zoomTo(sliderIntent)
+                    finishPhotoZoomGesture(sliderGeneration)
+                    sliderGeneration = null
                     renderZoom()
                 }
             })
@@ -347,9 +358,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun retry() {
         recoveryAttempt = 0
         recoveryMessage = null
+        recoveredPhotoGeneration = null
         lenses?.clearRejections(lensProfile)
         if (locked && !lockLensExplicit) lockLensConfigured = false
-        else if (softwareStillZoom) route(targetZoom)?.let { lens = lenses?.option(it.targetKey) }
         if (hasCamera()) openCamera() else if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
             cameraPermission.launch(Manifest.permission.CAMERA)
         } else startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
@@ -397,12 +408,11 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     private fun releaseSession(retainPhotoBinding: Boolean = false) {
+        cancelPhotoClose?.invoke()
         reopen?.let(ui.root::removeCallbacks)
         openingTimeout?.let(ui.root::removeCallbacks)
         physicalVerification?.let(ui.root::removeCallbacks)
-        lensSwitch?.let(ui.root::removeCallbacks)
-        lensSwitch = null
-        scheduledLensKey = null
+        cancelLensSwitch()
         reopen = null
         openingTimeout = null
         physicalVerification = null
@@ -412,8 +422,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.previewView.watchFirstFrame(null)
         cameraOpen = false
         previewStreaming = false
+        photoSurfaceRequested = false
         firstFrameAt = 0L
         session++
+        photoZoom.beginSession(session)
         zoomPending = false
         zoomCommand++
         inFlightNativeRatio = null
@@ -441,7 +453,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun rebind(allowEis: Boolean = true, keepPhotoHandoff: Boolean = false) {
         if (busy || isDestroyed || isFinishing) return
-        if (!keepPhotoHandoff) finishPhotoHandoff(fade = false)
+        if (!keepPhotoHandoff) finishPhotoHandoff()
         val replacePhotoSession = keepPhotoHandoff && softwareStillZoom && photo != null && camera != null
         val bindStart = SystemClock.elapsedRealtime()
         releaseSession(retainPhotoBinding = replacePhotoSession)
@@ -460,9 +472,12 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 displayZoom = wide.displayZoom
                 lockLensConfigured = true
             }
-            val choice = lens ?: manager.defaultOption
+            val requestedLens = if (softwareStillZoom) {
+                route(targetZoom, photoZoom.intent.preferred)?.let { manager.option(it.targetKey) }
+            } else lens
+            val choice = requestedLens ?: manager.defaultOption
             lens = choice
-            zoomPending = true
+            zoomPending = !softwareStillZoom
             focusMessage = null
             val builder = Preview.Builder()
             val halEis = java.util.concurrent.atomic.AtomicReference<Boolean?>(null)
@@ -482,7 +497,14 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 selected.selector
             } else choice.selector
             val bound = if (photoMode) {
-                val engine = PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider,
+                val previewProvider = if (softwareStillZoom) Preview.SurfaceProvider { request ->
+                    if (session == token) {
+                        photoSurfaceRequested = true
+                        ui.photoPreview.surfaceProvider.onSurfaceRequested(request)
+                        updateCameraReady()
+                    } else request.willNotProvideSurface()
+                } else ui.photoPreview.surfaceProvider
+                val engine = PhotoEngine(boundRotation, portrait, builder, previewProvider,
                     photoSettings, photoCaps, hdrRequested, choice.physicalCameraId, choice.physicalPhotoOutputs)
                 photo = engine
                 if (softwareStillZoom) owner.bindToLifecycle(this, captureSelector, engine.sessionConfig)
@@ -519,7 +541,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             val resolution = photo?.capture?.resolutionInfo ?: video?.capture?.resolutionInfo
             Log.i(TAG, "session=$token mode=${if (photoMode) "foto" else "vídeo"} camera=${choice.cameraId} requestedPhysical=${choice.physicalCameraId} output=${resolution?.resolution} crop=${resolution?.cropRect} rotation=${resolution?.rotationDegrees} targetFps=$fps")
             if (keepPhotoHandoff) Log.i(TAG, "lensBind session=$token replace=$replacePhotoSession setupMs=${SystemClock.elapsedRealtime() - bindStart}")
-            var initialZoomPending = !choice.isPhysicalOnly
+            var initialZoomPending = !softwareStillZoom && !choice.isPhysicalOnly
             var initialExposurePending = handoffExposure
             bound.cameraInfo.torchState.observe(this) { if (session == token) ui.flashButton.isSelected = it == 1 }
             bound.cameraInfo.cameraState.observe(this) { state ->
@@ -530,7 +552,17 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 if (cameraOpen && !wasOpen && keepPhotoHandoff) {
                     Log.i(TAG, "lensOpen session=$token openMs=${SystemClock.elapsedRealtime() - bindStart}")
                 }
-                if (!cameraOpen && code != null) previewStreaming = false
+                if (!cameraOpen && (code != null || (softwareStillZoom && wasOpen))) {
+                    previewStreaming = false
+                    if (softwareStillZoom) {
+                        physicalConfirmed = false
+                        photoZoom.invalidate()
+                        firstFrameAt = 0L
+                        zoomCommand++
+                        inFlightNativeRatio = null
+                        appliedNativeRatio = null
+                    }
+                }
                 if (cameraOpen) initialExposurePending?.let { ev ->
                     initialExposurePending = null
                     val exposure = bound.cameraInfo.exposureState
@@ -549,31 +581,24 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     val initial = (targetZoom / choice.relativeZoom).coerceIn(limits?.minZoomRatio ?: choice.minCameraZoom,
                         limits?.maxZoomRatio ?: choice.maxCameraZoom)
                     applyCameraZoom(bound, initial)
-                    if (softwareStillZoom && distantFocus) applyDistantFocus(bound, true)
                 }
                 if (code != null) {
                     Log.w(TAG, "session=$token cameraError=$code type=${state.type}", state.error?.cause)
-                    when (code) {
-                        CameraState.ERROR_CAMERA_IN_USE, CameraState.ERROR_MAX_CAMERAS_IN_USE,
-                        CameraState.ERROR_OTHER_RECOVERABLE_ERROR -> {
-                            recoveryMessage = if (code == CameraState.ERROR_CAMERA_IN_USE)
-                                "Aguardando liberação da câmera…" else "Reconectando câmera…"
-                            scheduleRecovery(token, allowEis, code, 2200L)
-                        }
-                        CameraState.ERROR_STREAM_CONFIG -> {
-                            if (!busy) ui.root.post {
-                                if (session == token && !busy) fallback(allowEis, IllegalStateException("Configuração recusada ($code)"))
+                    when {
+                        softwareStillZoom && handoffStartedAt != null && code == CameraState.ERROR_CAMERA_FATAL_ERROR ->
+                            ui.root.post {
+                                if (session == token && !busy) recoverPhotoHandoff(allowEis, code)
                             }
-                        }
-                        else -> failure = "Câmera indisponível · $code"
+                        else -> handleCameraError(code, token, allowEis)
                     }
                 }
                 updateCameraReady()
                 render()
             }
             val deadline = Runnable {
-            if (session == token && !ready && !busy) {
-                    if (choice.isPhysicalOnly && recoveryMessage == null) fallback(allowEis, IllegalStateException("A lente não entregou a prévia em 5 s"))
+                if (session == token && !ready && !busy) {
+                    if ((choice.isPhysicalOnly || (softwareStillZoom && choice.isStandaloneSensor)) && recoveryMessage == null)
+                        fallback(allowEis, IllegalStateException("A lente não confirmou a prévia em 5 s"))
                     else scheduleRecovery(token, allowEis, -1, 0L)
                 }
             }
@@ -582,33 +607,40 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         } catch (error: Exception) { fallback(allowEis, error) }
     }
 
+    private fun handleCameraError(code: Int, token: Int, allowEis: Boolean) {
+        when (code) {
+            CameraState.ERROR_CAMERA_IN_USE, CameraState.ERROR_MAX_CAMERAS_IN_USE,
+            CameraState.ERROR_OTHER_RECOVERABLE_ERROR -> {
+                recoveryMessage = if (code == CameraState.ERROR_CAMERA_IN_USE)
+                    "Aguardando liberação da câmera…" else "Reconectando câmera…"
+                scheduleRecovery(token, allowEis, code, 2200L)
+            }
+            CameraState.ERROR_STREAM_CONFIG -> {
+                if (!busy) ui.root.post {
+                    if (session == token && !busy) fallback(allowEis, IllegalStateException("Configuração recusada ($code)"))
+                }
+            }
+            else -> failure = "Câmera indisponível · $code"
+        }
+    }
+
     private fun updateCameraReady() {
-        val previewReady = cameraOpen && previewStreaming
+        val previewReady = cameraOpen && previewStreaming && (!softwareStillZoom || photoSurfaceRequested)
         val choice = lens
         if (previewReady && firstFrameAt == 0L) {
             firstFrameAt = SystemClock.elapsedRealtime()
             logTransition("first-preview-frame")
         }
-        if (previewReady && choice?.isPhysicalOnly == true && !physicalConfirmed) {
+        if (softwareStillZoom) {
+            ready = previewReady && choice != null && confirmPhotoPreview(choice)
+        } else if (previewReady && choice?.isPhysicalOnly == true && !physicalConfirmed) {
             val evidence = lenses?.diagnostics(lensProfile)
             if (evidence != null && evidence.outputPhysicalCameraId == choice.physicalCameraId) {
                 physicalVerification?.let(ui.root::removeCallbacks)
                 physicalVerification = null
                 physicalConfirmed = true
                 physicalCropZoom = evidence.capture?.physicalCropZoom ?: 1f
-                val supplied = choice.relativeZoom * physicalCropZoom
-                if (softwareStillZoom && pendingZoom == null && supplied > targetZoom * 1.02f) {
-                    physicalConfirmed = false
-                    val token = session
-                    ui.root.post {
-                        if (session == token && !busy) {
-                            fallback(true, IllegalStateException("A saída física entregou ${formatZoom(supplied)} para ${formatZoom(targetZoom)}."))
-                        }
-                    }
-                    return
-                }
-                commitZoom(supplied)
-                if (softwareStillZoom && distantFocus) camera?.let { applyDistantFocus(it, true) }
+                commitZoom(choice.relativeZoom * physicalCropZoom)
             } else if (physicalVerification == null) {
                 val token = session
                 val check = Runnable {
@@ -623,7 +655,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 ui.root.postDelayed(check, 100L)
             }
         }
-        ready = previewReady && (choice?.isPhysicalOnly != true || physicalConfirmed)
+        if (!softwareStillZoom) ready = previewReady && (choice?.isPhysicalOnly != true || physicalConfirmed)
         if (ready) {
             failure = null
             recoveryMessage = null
@@ -633,8 +665,51 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             reopen = null
             openingTimeout = null
         }
+        if (ready && softwareStillZoom) applyLatestPhotoZoom()
         if (::ui.isInitialized) render()
-        continuePhotoHandoff()
+    }
+
+    private fun confirmPhotoPreview(choice: LensOption): Boolean {
+        if (physicalConfirmed) return true
+        val evidence = lenses?.diagnostics(lensProfile)
+        val capture = evidence?.capture
+        val confirmed = evidence?.selectedKey == choice.key && capture != null &&
+            when {
+                choice.isPhysicalOnly -> evidence.outputPhysicalCameraId == choice.physicalCameraId
+                choice.isStandaloneSensor -> evidence.outputPhysicalCameraId == choice.cameraId
+                else -> true
+            }
+        if (confirmed) {
+            physicalVerification?.let(ui.root::removeCallbacks)
+            physicalVerification = null
+            physicalCropZoom = capture?.physicalCropZoom ?: 1f
+            if (appliedNativeRatio == null) {
+                // Reuse the new session's measured native baseline when it already matches.
+                appliedNativeRatio = capture?.nativeZoom?.appliedFor(1f)
+            }
+            physicalConfirmed = true
+            if (distantFocus) camera?.let { applyDistantFocus(it, true) }
+            return true
+        }
+        if (physicalVerification == null) {
+            val token = session
+            val check = Runnable {
+                physicalVerification = null
+                if (session != token || !cameraOpen || !previewStreaming || busy) return@Runnable
+                val current = lenses?.diagnostics(lensProfile)
+                val hasPhysicalEvidence = when {
+                    choice.isPhysicalOnly -> current?.outputPhysicalCameraId == choice.physicalCameraId
+                    choice.isStandaloneSensor -> current?.outputPhysicalCameraId == choice.cameraId
+                    else -> current?.capture != null
+                }
+                if (SystemClock.elapsedRealtime() - firstFrameAt >= 1000L && !hasPhysicalEvidence) {
+                    fallback(true, IllegalStateException("A prévia não confirmou ${choice.key}"))
+                } else updateCameraReady()
+            }
+            physicalVerification = check
+            ui.root.postDelayed(check, 32L)
+        }
+        return false
     }
 
     private fun scheduleRecovery(token: Int, allowEis: Boolean, code: Int, delay: Long) {
@@ -703,10 +778,14 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     private fun route(requested: Float, preferred: String? = null): ZoomRoute? {
-        val choice = lens ?: return null
+        val manager = lenses ?: return null
+        val choice = lens ?: manager.defaultOption
         val state = if (choice.isPhysicalOnly) null else camera?.cameraInfo?.zoomState?.value
-        return lenses?.route(requested, choice.key, state?.minZoomRatio ?: choice.minCameraZoom,
-            state?.maxZoomRatio ?: choice.maxCameraZoom, recording != null, preferred,
+        // The S24 can drop device 0 when reconfiguring from 0/6 to pinned 0/5.
+        // Its logical output supplies the same main field of view at native 1x.
+        val destination = if (usesS24LogicalMain(requested, preferred)) manager.defaultOption.key else preferred
+        return manager.route(requested, choice.key, state?.minZoomRatio ?: choice.minCameraZoom,
+            state?.maxZoomRatio ?: choice.maxCameraZoom, recording != null, destination,
             stillPhoto = softwareStillZoom, profile = lensProfile)
     }
 
@@ -714,38 +793,19 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         (route(0.6f)?.displayZoom ?: 1f).coerceIn(0.6f, 1f)
 
     private fun zoomTo(requested: Float, preferred: String? = null, continuous: Boolean = false) {
-        if ((!ready && handoffStartedAt == null) || takingPhoto || awaitingMic || stopping) return
-        val desired = if (softwareStillZoom && preferred == null) requested.coerceIn(0.6f, StillFraming.MAX_ZOOM) else requested
-        if (!ready) {
-            pendingZoom = desired to preferred
+        if (!canZoom || takingPhoto || awaitingMic || stopping) return
+        if (softwareStillZoom) {
+            val desired = if (preferred == null) requested.coerceIn(0.6f, StillFraming.MAX_ZOOM) else requested
+            photoZoom.request(desired, preferred, continuous, SystemClock.elapsedRealtime())
+            applyLatestPhotoZoom()
             renderZoom()
+            renderStatus()
             return
         }
-        val route = route(desired, preferred) ?: return
+        val route = route(requested, preferred) ?: return
         if (route.requiresRebind && busy) return
-        if (softwareStillZoom && route.requiresRebind && previewStreaming && inFlightNativeRatio == null &&
-            (continuous || dragPreviewCrop != null)) {
-            // This is the live current sensor. A temporary crop follows the drag while
-            // waiting to bind the new sensor. It never becomes the still capture crop.
-            dragPreviewCrop = StillFraming.digitalRatio(desired, displayZoom / extraCrop)
-        } else dragPreviewCrop = null
-        if (softwareStillZoom && preferred == null && !zoomPending && abs(desired - displayZoom) <= 0.001f) {
-            val target = lenses?.option(route.targetKey)
-            val currentOutput = lenses?.diagnostics(lensProfile)?.outputPhysicalCameraId
-            if (!route.requiresRebind ||
-                (target?.physicalCameraId != null && target.physicalCameraId == currentOutput)) return
-        }
-        targetZoom = desired
-        // Optical switches wait for a quiet interval while the pointer moves. Presets
-        // and gesture release still bind immediately, using the most recent intent.
-        lensIntentStableAt = if (continuous && softwareStillZoom) SystemClock.elapsedRealtime() + 110L else 0L
-        if (continuous && route.requiresRebind && scheduledLensKey == route.targetKey) {
-            renderZoom()
-            return
-        }
-        lensSwitch?.let(ui.root::removeCallbacks)
-        lensSwitch = null
-        scheduledLensKey = null
+        targetZoom = requested
+        cancelLensSwitch()
         if (route.requiresRebind) {
             zoomCommand++
             inFlightNativeRatio = null
@@ -753,45 +813,199 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             zoomPending = true
             val token = session
             val next = lenses?.option(route.targetKey) ?: return
-            val changeLens = object : Runnable {
-                override fun run() {
-                    if (lensSwitch !== this) return
-                    val remaining = lensIntentStableAt - SystemClock.elapsedRealtime()
-                    if (remaining > 0) {
-                        ui.root.postDelayed(this, remaining)
-                        return
-                    }
-                    lensSwitch = null
-                    scheduledLensKey = null
-                    if (session == token && !busy && !isDestroyed) {
-                        if (softwareStillZoom) holdPhotoFrame()
-                        lens = next
-                        rebind(keepPhotoHandoff = handoffStartedAt != null)
-                    }
+            val changeLens = Runnable {
+                lensSwitch = null
+                if (session == token && !busy && !isDestroyed) {
+                    lens = next
+                    rebind()
                 }
             }
             lensSwitch = changeLens
-            scheduledLensKey = next.key
-            if (continuous) ui.root.postDelayed(changeLens, if (softwareStillZoom) 110L else 65L)
+            if (continuous) ui.root.postDelayed(changeLens, 65L)
             else ui.root.postOnAnimation(changeLens)
-            renderZoom()
-            renderStatus()
-        } else if (lens?.isPhysicalOnly != true) {
-            camera?.let { current ->
-                val ratio = route.cameraZoomRatio
-                val activeRatio = inFlightNativeRatio
-                val applied = appliedNativeRatio
-                if (activeRatio != null) {
-                    nextNativeRatio = ratio.takeIf { abs(it - activeRatio) > 0.001f }
-                } else if (applied != null && (abs(ratio - applied) <= 0.001f ||
-                        (softwareStillZoom && continuous && lens?.isStandaloneSensor == true && ratio >= applied))) {
+        } else if (lens?.isPhysicalOnly == true) {
+            commitZoom(route.displayZoom * physicalCropZoom)
+        } else camera?.let { current ->
+            val ratio = route.cameraZoomRatio
+            val active = inFlightNativeRatio
+            val applied = appliedNativeRatio
+            when {
+                active != null -> nextNativeRatio = ratio.takeIf { abs(it - active) > 0.001f }
+                applied != null && abs(ratio - applied) <= 0.001f ->
                     commitZoom(applied * (lens?.relativeZoom ?: 1f), log = !continuous)
-                } else {
-                    applyCameraZoom(current, ratio)
+                else -> applyCameraZoom(current, ratio)
+            }
+        }
+        renderZoom()
+        renderStatus()
+    }
+
+    private fun finishPhotoZoomGesture(generation: Long?) {
+        if (photoZoom.finishGesture(generation)) applyLatestPhotoZoom()
+    }
+
+    private fun cancelLensSwitch() {
+        lensSwitch?.let(ui.root::removeCallbacks)
+        lensSwitch = null
+    }
+
+    private fun applyLatestPhotoZoom(failedNativeRatio: Float? = null) {
+        if (!ready || busy || !photoZoom.isPending) return
+        val intent = photoZoom.intent
+        val choice = lens ?: return
+        val current = camera ?: return
+        val route = route(intent.total, intent.preferred) ?: return
+        val native = appliedNativeRatio
+        val supplied = if (choice.isPhysicalOnly) choice.relativeZoom * physicalCropZoom
+            else native?.let { choice.relativeZoom * it }
+
+        if (route.requiresRebind) {
+            if (supplied != null && inFlightNativeRatio == null && handoffStartedAt == null) {
+                dragPreviewCrop = StillFraming.digitalRatio(intent.total, supplied)
+            }
+            schedulePhotoLensSwitch(intent)
+            return
+        }
+        cancelLensSwitch()
+
+        if (choice.isPhysicalOnly && supplied != null) {
+            if (supplied > intent.total * 1.02f) {
+                val token = session
+                ui.root.post {
+                    if (session == token && photoZoom.intent.generation == intent.generation && !busy) {
+                        fallback(true, IllegalStateException("A saída física entregou ${formatZoom(supplied)} para ${formatZoom(intent.total)}."))
+                    }
+                }
+                return
+            }
+        } else {
+            // A standalone sensor supplies a fixed base for the shared preview/JPEG crop.
+            // The logical fallback can still use hardware zoom.
+            val anchorMain = usesS24LogicalMain(intent.total, intent.preferred)
+            val ratio = if (choice.isStandaloneSensor || anchorMain) current.cameraInfo.zoomState.value?.let {
+                1f.coerceIn(it.minZoomRatio, it.maxZoomRatio)
+            } ?: choice.minCameraZoom else route.cameraZoomRatio
+            if (inFlightNativeRatio != null) return
+            if (native == null || (abs(native - ratio) > 0.001f && failedNativeRatio != ratio)) {
+                applyCameraZoom(current, ratio)
+                return
+            }
+            if (anchorMain) {
+                val evidence = lenses?.diagnostics(lensProfile)
+                val physicalId = evidence?.outputPhysicalCameraId
+                val focal = evidence?.capture?.focalLength
+                val mainConfirmed = physicalId == "5" || (physicalId == null && focal != null && abs(focal - 5.4f) < 0.1f)
+                if (!mainConfirmed) {
+                    val token = session
+                    ui.root.post {
+                        if (session == token && photoZoom.intent.generation == intent.generation && !busy) {
+                            fallback(true, IllegalStateException("O fluxo lógico não confirmou a câmera principal."))
+                        }
+                    }
+                    return
                 }
             }
-            renderZoom()
-        } else commitZoom(route.displayZoom * physicalCropZoom, log = !continuous)
+        }
+        if (supplied != null && photoZoom.confirm(session, intent.generation)) {
+            commitZoom(supplied, log = !intent.continuous || handoffStartedAt != null)
+        }
+    }
+
+    private fun schedulePhotoLensSwitch(intent: PhotoZoomTransition.Intent) {
+        if (lensSwitch != null && intent.continuous) return
+        cancelLensSwitch()
+        val token = session
+        val change = object : Runnable {
+            override fun run() {
+                if (lensSwitch !== this) return
+                if (session != token || busy || isDestroyed || !ready ||
+                    !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                    cancelLensSwitch()
+                    return
+                }
+                val latest = photoZoom.intent
+                val remaining = latest.switchNotBefore - SystemClock.elapsedRealtime()
+                if (remaining > 0) {
+                    ui.root.postDelayed(this, remaining)
+                    return
+                }
+                lensSwitch = null
+                val destination = route(latest.total, latest.preferred)?.takeIf { it.requiresRebind } ?: return
+                val next = lenses?.option(destination.targetKey) ?: return
+                holdPhotoFrame()
+                Log.i(TAG, "lensIntent generation=${latest.generation} requested=${latest.total} route=${next.key}")
+                val source = lens
+                if (source?.isPhysicalOnly == true && next.cameraId == source.cameraId) {
+                    reopenPhotoAfterClose()
+                } else {
+                    rebind(keepPhotoHandoff = true)
+                }
+            }
+        }
+        lensSwitch = change
+        val delay = intent.switchNotBefore - SystemClock.elapsedRealtime()
+        if (delay > 0) ui.root.postDelayed(change, delay) else ui.root.postOnAnimation(change)
+    }
+
+    private fun recoverPhotoHandoff(allowEis: Boolean, code: Int) {
+        val generation = photoZoom.intent.generation
+        if (recoveredPhotoGeneration == generation) {
+            fallback(allowEis, IllegalStateException("Sessão de foto interrompida ($code)"))
+            return
+        }
+        recoveredPhotoGeneration = generation
+        reopenPhotoAfterClose()
+    }
+
+    private fun reopenPhotoAfterClose() {
+        val cameraId = lens?.cameraId ?: return
+        val manager = getSystemService(CameraManager::class.java)
+        releaseSession()
+        val token = session
+        val started = SystemClock.elapsedRealtime()
+        var cameraAvailable = false
+        val resume = object : Runnable {
+            override fun run() {
+                if (session != token || cancelPhotoClose == null) return
+                val intent = photoZoom.intent
+                val destination = route(intent.total, intent.preferred)?.let { lenses?.option(it.targetKey) }
+                val destinationId = destination?.cameraId ?: cameraId
+                val elapsed = SystemClock.elapsedRealtime() - started
+                val knownToCameraX = provider?.availableCameraInfos?.any {
+                    Camera2CameraInfo.from(it).cameraId == destinationId
+                } == true
+                // After a provider restart, the framework can report availability before
+                // CameraX has repopulated its selectable camera list.
+                if (knownToCameraX && (cameraAvailable || elapsed >= 3_000L)) {
+                    cancelPhotoClose?.invoke()
+                    Log.i(TAG, "lensClose session=$token available=$cameraAvailable closeMs=$elapsed")
+                    rebind(keepPhotoHandoff = true)
+                } else if (elapsed >= 4_500L) {
+                    cancelPhotoClose?.invoke()
+                    fail("Câmera indisponível · toque para tentar",
+                        IllegalStateException("CameraX não voltou a listar a câmera $destinationId"))
+                } else {
+                    ui.root.postDelayed(this, 80L)
+                }
+            }
+        }
+        // CameraX can report CLOSED while its Camera2 device is still retained.
+        val availability = object : CameraManager.AvailabilityCallback() {
+            override fun onCameraAvailable(id: String) {
+                if (id != cameraId) return
+                cameraAvailable = true
+                ui.root.removeCallbacks(resume)
+                ui.root.post(resume)
+            }
+        }
+        cancelPhotoClose = {
+            manager.unregisterAvailabilityCallback(availability)
+            ui.root.removeCallbacks(resume)
+            cancelPhotoClose = null
+        }
+        manager.registerAvailabilityCallback(main, availability)
+        ui.root.postDelayed(resume, 3_000L)
+        render()
     }
 
     private fun holdPhotoFrame() {
@@ -812,31 +1026,16 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         }
     }
 
-    private fun continuePhotoHandoff() {
-        if (handoffStartedAt == null || !ready || zoomPending) return
-        val next = pendingZoom
-        pendingZoom = null
-        if (next != null && (next.first != targetZoom || next.second != null)) {
-            finishPhotoHandoff(fade = true)
-            zoomTo(next.first, next.second)
-            return
-        }
-        finishPhotoHandoff(fade = true)
-    }
-
-    private fun finishPhotoHandoff(fade: Boolean) {
+    private fun finishPhotoHandoff(logLive: Boolean = false) {
         val started = handoffStartedAt
         handoffStartedAt = null
         handoffExposure = null
-        pendingZoom = null
-        if (started != null && fade) {
+        if (started != null && logLive) {
             Log.i(TAG, "lensHandoff session=$session zoom=$displayZoom liveMs=${SystemClock.elapsedRealtime() - started}")
         }
         ui.lensTransitionFrame.apply {
-            if (!isVisible) return
-            animate().cancel()
-            fun clear() { isVisible = false; setImageDrawable(null); alpha = 1f }
-            if (fade) animate().alpha(0f).setDuration(90).withEndAction { clear() }.start() else clear()
+            isVisible = false
+            setImageDrawable(null)
         }
     }
 
@@ -845,6 +1044,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         extraCrop = if (softwareStillZoom) StillFraming.digitalRatio(targetZoom, suppliedZoom) else 1f
         displayZoom = suppliedZoom * extraCrop
         zoomPending = false
+        if (softwareStillZoom && handoffStartedAt != null) finishPhotoHandoff(logLive = true)
         renderZoom()
         if (log) logTransition("zoom-confirmed")
         renderStatus()
@@ -862,15 +1062,15 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             "previewStreaming=$previewStreaming capture=${details?.capture}")
     }
 
-    private fun applyCameraZoom(cam: Camera, ratio: Float) {
+    private fun applyCameraZoom(cam: Camera, ratio: Float, unavailableRatio: Float? = null) {
         val ticket = ++zoomCommand
         val token = session
         val started = SystemClock.elapsedRealtime()
         val previousFrame = lenses?.diagnostics(lensProfile)?.capture?.frame ?: -1L
         inFlightNativeRatio = ratio
-        zoomPending = true
+        if (!softwareStillZoom) zoomPending = true
         val applied = runCatching { cam.cameraControl.setZoomRatio(ratio) }.getOrElse { error ->
-            zoomRejected(cam, error)
+            zoomRejected(cam, error, unavailableRatio ?: ratio)
             return
         }
         renderZoom()
@@ -886,51 +1086,55 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                         ui.root.postDelayed({ confirm() }, 60)
                         return
                     }
-                    if (observed == null && softwareStillZoom && ratio > 1.001f) {
-                        // A digital residual needs a known base. Return to the native field first.
-                        applyCameraZoom(cam, 1f)
+                    if (observed == null && softwareStillZoom && unavailableRatio == null && ratio > 1.001f) {
+                        // Do not treat ZoomState as HAL evidence for a requested crop.
+                        applyCameraZoom(cam, 1f, unavailableRatio = ratio)
                         return
                     }
                     val actual = observed ?: cam.cameraInfo.zoomState.value?.zoomRatio ?: ratio
                     inFlightNativeRatio = null
                     appliedNativeRatio = actual
-                    val next = nextNativeRatio
-                    nextNativeRatio = null
-                    if (next != null && abs(next - actual) > 0.001f) {
-                        applyCameraZoom(cam, next)
-                        return
+                    if (softwareStillZoom) {
+                        applyLatestPhotoZoom(unavailableRatio ?: ratio)
+                    } else {
+                        val next = nextNativeRatio
+                        nextNativeRatio = null
+                        if (next != null && abs(next - actual) > 0.001f) {
+                            applyCameraZoom(cam, next)
+                            return
+                        }
+                        commitZoom(actual * (lens?.relativeZoom ?: 1f))
                     }
-                    commitZoom(actual * (lens?.relativeZoom ?: 1f))
                     Log.i(TAG, "zoomCallback session=$token command=$ticket requestedNative=$ratio " +
                         "hal=$observed cameraX=${cam.cameraInfo.zoomState.value?.zoomRatio} total=$displayZoom " +
                         "elapsedMs=${SystemClock.elapsedRealtime()-started}")
                     render()
-                    continuePhotoHandoff()
                 }
                 confirm()
             }.onFailure {
-                zoomRejected(cam, it)
+                zoomRejected(cam, it, unavailableRatio ?: ratio)
                 Log.w(TAG, "Zoom recusado session=$token command=$ticket", it)
-                continuePhotoHandoff()
             }
             render()
         }, main)
     }
 
-    private fun zoomRejected(cam: Camera, error: Throwable) {
+    private fun zoomRejected(cam: Camera, error: Throwable, rejectedRatio: Float) {
         val limits = cam.cameraInfo.zoomState.value
         val scale = lens?.relativeZoom ?: 1f
         val applied = limits?.zoomRatio?.takeIf { it.isFinite() && it > 0f } ?: 1f
         inFlightNativeRatio = null
         appliedNativeRatio = applied
-        val next = nextNativeRatio
-        nextNativeRatio = null
-        if (next != null && abs(next - applied) > 0.001f) {
-            applyCameraZoom(cam, next)
-            return
+        if (softwareStillZoom) applyLatestPhotoZoom(rejectedRatio)
+        else {
+            val next = nextNativeRatio
+            nextNativeRatio = null
+            if (next != null && abs(next - applied) > 0.001f) {
+                applyCameraZoom(cam, next)
+                return
+            }
+            commitZoom(applied * scale)
         }
-        // A failed command cannot leave the old view's zoom/crop on a newly bound sensor.
-        commitZoom(applied * scale)
         if (error !is androidx.camera.core.CameraControl.OperationCanceledException) {
             toast("A câmera recusou a ampliação solicitada.")
         }
@@ -972,16 +1176,22 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         var touchedWithTwo = false
         var focusX = Float.NaN
         var focusY = Float.NaN
+        var pinchGeneration: Long? = null
         val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean { pinchZoom = displayZoom; return ready }
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                pinchGeneration = null
+                pinchZoom = if (softwareStillZoom) targetZoom else displayZoom
+                return canZoom
+            }
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 pinchZoom = (pinchZoom * detector.scaleFactor).coerceIn(0.05f, 1000f)
                 if (autoJpeg) pinchZoom = pinchZoom.coerceAtMost(StillFraming.MAX_ZOOM)
                 zoomTo(pinchZoom, continuous = true)
+                if (softwareStillZoom) pinchGeneration = photoZoom.intent.generation
                 return true
             }
             override fun onScaleEnd(detector: ScaleGestureDetector) {
-                zoomTo(pinchZoom)
+                if (softwareStillZoom) finishPhotoZoomGesture(pinchGeneration) else zoomTo(pinchZoom)
             }
         }).apply { isQuickScaleEnabled = false }
         val tap = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
@@ -1005,7 +1215,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     private fun focusAt(x: Float, y: Float) {
-        if (!ready || zoomPending || takingPhoto) return
+        if (!ready || zoomInProgress || takingPhoto) return
         val cam = camera ?: return
         if (distantFocus && autoJpeg) {
             applyDistantFocus(cam, false) { focusAt(x,y) }
@@ -1077,7 +1287,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun shutter() {
         if (recording != null) { stopVideo(); return }
-        if (!ready || busy || failure != null || zoomPending) return
+        if (!ready || busy || failure != null || zoomInProgress) return
         if (mode == ShootingMode.NIGHT || (mode == ShootingMode.PHOTO && burstDetail && extraCrop == 1f)) {
             startBurst()
             return
@@ -1096,7 +1306,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 val captureZoom = displayZoom
                 val captureCrop = extraCrop
                 fun currentCaptureSensor(): String? {
-                    if (session != captureEpoch || camera !== captureCamera || zoomPending ||
+                    if (session != captureEpoch || camera !== captureCamera || zoomInProgress ||
                         abs(displayZoom - captureZoom) > 0.0001f || abs(extraCrop - captureCrop) > 0.0001f) return null
                     val current = lenses?.diagnostics(lensProfile) ?: return null
                     if (current.selectedKey != captureKey || current.capture == null) return null
@@ -1496,28 +1706,29 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.photoPreview.scaleX = dragPreviewCrop ?: extraCrop
         ui.photoPreview.scaleY = ui.photoPreview.scaleX
         ui.zoomReadout.isClickable = softwareStillZoom && !busy
-        val requested = pendingZoom?.first ?: targetZoom
+        val requested = targetZoom
         fun label(value: Float): String {
             if (!softwareStillZoom) return formatZoom(value)
             val valueInTenths = (value * 10).roundToInt()
             return if (valueInTenths % 10 == 0) "${valueInTenths / 10}×"
                 else String.format(Locale.getDefault(), "%.1f×", valueInTenths / 10f)
         }
-        ui.zoomReadout.text = if (zoomPending || pendingZoom != null) "${label(displayZoom)} → ${label(requested)}" else label(displayZoom)
+        ui.zoomReadout.text = if (zoomInProgress && label(displayZoom) != label(requested))
+            "${label(displayZoom)} → ${label(requested)}" else label(displayZoom)
         ui.zoomSlider.isVisible = softwareStillZoom
-        ui.zoomSlider.isEnabled = (ready || handoffStartedAt != null) && !busy
+        ui.zoomSlider.isEnabled = canZoom && !busy
         ViewCompat.setStateDescription(ui.zoomSlider, ui.zoomReadout.text)
         if (softwareStillZoom && !draggingZoom) {
-            ui.zoomSlider.progress = PhotoZoomScale.progress(if (zoomPending) requested else displayZoom, minimumPhotoZoom())
+            ui.zoomSlider.progress = PhotoZoomScale.progress(if (zoomInProgress) requested else displayZoom, minimumPhotoZoom())
         }
-        ui.recordButton.isEnabled = (recording != null && !stopping) || (ready && failure == null && !busy && !zoomPending)
+        ui.recordButton.isEnabled = (recording != null && !stopping) || (ready && failure == null && !busy && !zoomInProgress)
         ui.recordButton.alpha = if (ui.recordButton.isEnabled) 1f else 0.5f
         presets.forEach { (value, button) ->
             val candidate = route(value)
-            button.isEnabled = (ready || handoffStartedAt != null) && !takingPhoto && !awaitingMic && !stopping && candidate != null &&
+            button.isEnabled = canZoom && !takingPhoto && !awaitingMic && !stopping && candidate != null &&
                 ((softwareStillZoom && value >= candidate.displayZoom) ||
                     abs(candidate.displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value))
-            button.isSelected = abs(displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value)
+            button.isSelected = ready && handoffStartedAt == null && abs(displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value)
         }
     }
 
@@ -1578,7 +1789,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun renderStatus() {
         val text = when {
             failure != null -> failure!!
-            handoffStartedAt != null && (!ready || zoomPending) -> recoveryMessage ?: "Trocando lente…"
+            handoffStartedAt != null -> recoveryMessage ?: if (ui.lensTransitionFrame.isVisible)
+                "Trocando lente · quadro anterior" else "Trocando lente…"
             !ready -> recoveryMessage ?: "Abrindo câmera…"
             burst != null -> burstProgress
             takingPhoto -> "Salvando foto…"
@@ -1588,7 +1800,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             recording != null -> if (audio) "● REC" else "● REC · sem áudio"
             BurstJobs.states.value?.running == true && photoMode -> BurstJobs.states.value!!.detail
             AutoPhotos.states.value?.running == true && photoMode -> AutoPhotos.states.value!!.message
-            zoomPending -> "Aplicando zoom…"
+            zoomInProgress -> "Aplicando zoom…"
             autoJpeg && distantFocus -> "Foto · foco distante"
             autoJpeg && focusMessage != null -> focusMessage!!
             mode == ShootingMode.NIGHT -> "Noturno · 5 quadros"
@@ -1660,11 +1872,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         burst?.cancel()
         if (recording != null) stopVideo() else horizon.clearOrientation()
         sensor.stop()
-        if (lensSwitch != null) { targetZoom = displayZoom; zoomPending = false }
-        lensSwitch?.let(ui.root::removeCallbacks)
-        lensSwitch = null
-        scheduledLensKey = null
-        finishPhotoHandoff(fade = false)
+        if (!softwareStillZoom && lensSwitch != null) { targetZoom = displayZoom; zoomPending = false }
+        cancelLensSwitch()
+        cancelPhotoClose?.invoke()
+        photoZoom.finishGesture(photoZoom.intent.generation)
+        draggingZoom = false
+        sliderGeneration = null
+        finishPhotoHandoff()
         reopen?.let(ui.root::removeCallbacks)
         openingTimeout?.let(ui.root::removeCallbacks)
         physicalVerification?.let(ui.root::removeCallbacks)
@@ -1694,7 +1908,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         Log.e(TAG, message, error)
         failure = message
         ready = false
-        finishPhotoHandoff(fade = false)
+        finishPhotoHandoff()
         render()
     }
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()

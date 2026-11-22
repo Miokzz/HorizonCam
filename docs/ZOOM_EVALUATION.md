@@ -32,6 +32,16 @@ A ampliação acumulada de 1× a 30×, multiplicando as razões adjacentes, foi 
 
 O log registrou sete publicações e a consulta direta ao MediaStore confirmou sete JPEGs distintos com `IS_PENDING=0`. Uma checagem agregada do script por listagem de arquivos retornou erro após a última captura. A conferência das sete entradas foi refeita no MediaStore e nos logs do worker. Os JPEGs do ensaio seguiram pelo fallback da câmera após a seleção do backend neural falhar. Em 30×, a resolução observada foi a do recorte efetivo, 264 × 353.
 
+## Troca de lentes e comandos concorrentes em 22/11/2026
+
+O modo Foto JPEG mantém uma única intenção de zoom e confirma o recorte na sessão vigente. Durante um arraste, a prévia pode recortar o fluxo atual e o disparo aguarda a confirmação da lente e do recorte solicitados. Na desmontagem da sessão, a interface identifica o último quadro retido. No SM-S9210, o modo automático usa a saída lógica 0 no intervalo de 1× a 2,9×, com o sensor principal 5 confirmado pelo HAL, a ultrawide direta 2 abaixo de 1× e a saída física 0/6 a partir de 3×.
+
+- **Build e testes.** APK de campo, APK de teste, lint e 107 testes JVM passaram. Três testes JVM exercitam confirmação obsoleta, substituição da sessão e cancelamento da espera do arraste.
+- **Galaxy S24 por ADB Wi-Fi.** No ensaio, sete trocas de preset confirmaram os sensores 2, 5 e 6. Uma solicitação de 8,2× durante a abertura da tele foi aplicada sem confirmar o 3× intermediário. A sequência 3× → 1× → 0,6×, iniciada durante a abertura da tele, confirmou o destino de 0,6×. Quatro arrastes rápidos de 180 ms entre os extremos chegaram a 0,6× ou 30×, cada um com uma única solicitação de troca de lente.
+- **Disparo e prévia.** O comando de disparo foi registrado 78 ms após a confirmação da tele. Houve um JPEG final de 2644 × 3526 com focal EXIF de 7,0 mm. Na cena estática, 241 correspondências geométricas entre prévia e JPEG deram erro mediano de reprojeção de 0,91 px. A gravação da prévia teve 1.485 quadros, com zero centros quase pretos no limiar testado.
+- **Pendente no HAL.** O provedor de câmera da Samsung reiniciou duas vezes no ensaio ao sair da tele física. A recuperação mantém a última intenção e espera a câmera reaparecer também no CameraX. Os presets levaram de 0,70 a 3,50 s, e os arrastes de 0,75 a 2,95 s, medidos do envio do comando ADB à confirmação. O maior atraso ainda é perceptível.
+- **Retomada.** Isolar o encerramento da sessão 0/6 em Camera2 direto e verificar se fechar o dispositivo antes de desmontar as saídas evita a reconfiguração que falha. Repetir no S24 as trocas 3× → 1× e 3× → 0,6× antes de avançar para desempenho, Horizon AI ou EIS.
+
 ## Protocolo de comparação física
 
 1. Use o S24 em um suporte e um motivo plano com linhas finas, letras aleatórias legíveis a curta distância, amostras de cor e textura de tecido. Inclua uma segunda cena com movimento. Repita em luz natural e pouca luz.
