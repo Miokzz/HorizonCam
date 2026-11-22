@@ -5,6 +5,7 @@ import android.os.HandlerThread
 import androidx.camera.core.CameraEffect
 import androidx.core.util.Consumer
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicBoolean
 
 class HorizonGlEffect private constructor(
     val processor: HorizonSurfaceProcessor,
@@ -19,7 +20,10 @@ class HorizonGlEffect private constructor(
     errorListener
 ), AutoCloseable {
 
+    private val closeRequested = AtomicBoolean(false)
+
     override fun close() {
+        if (!closeRequested.compareAndSet(false, true)) return
         processor.release {
             thread.quitSafely()
         }
@@ -28,12 +32,13 @@ class HorizonGlEffect private constructor(
     companion object {
         fun create(
             state: HorizonState,
+            nativeEisActive: () -> Boolean,
             onError: (Throwable) -> Unit
         ): HorizonGlEffect {
             val thread = HandlerThread("HorizonCam-GL").apply { start() }
             val handler = Handler(thread.looper)
             val executor = Executor { command -> handler.post(command) }
-            val processor = HorizonSurfaceProcessor(state, handler, executor, onError)
+            val processor = HorizonSurfaceProcessor(state, handler, executor, nativeEisActive, onError)
             return HorizonGlEffect(
                 processor,
                 thread,

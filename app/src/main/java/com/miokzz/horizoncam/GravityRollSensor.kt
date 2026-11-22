@@ -8,40 +8,56 @@ import android.hardware.SensorManager
 import android.os.Handler
 import android.os.HandlerThread
 import com.miokzz.horizoncam.sensors.RollFusion
+import com.miokzz.horizoncam.sensors.SensorCadence
+import kotlin.math.exp
 
-/**
- * Inertial sensor acquisition, separate from UI and GL threads.
- * Gyroscope predicts short-term motion; gravity fixes long-term drift.
- * A weak horizontal gravity projection keeps gyro prediction running.
- */
+/** Public fused attitude preferred; gravity/accelerometer use the identical world-up sign. */
 class GravityRollSensor(
     context: Context,
     private val onReading: (RollFusion.Reading) -> Unit
 ) : SensorEventListener {
-
     private val manager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    private val gyro = manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-    private val attitude = manager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+    private val source = manager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
         ?: manager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-    private val gravity = manager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+        ?: manager.getDefaultSensor(Sensor.TYPE_GRAVITY)
         ?: manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
     private val fusion = RollFusion()
+    private val cadence = SensorCadence()
     private val rotation = FloatArray(9)
     private val sensorThread = HandlerThread("HorizonCam-Inertial").apply { start() }
     private val sensorHandler = Handler(sensorThread.looper)
-    private var gx = 0f
-    private var gy = -9.81f
-    private var activated = false
+    private var filteredX = 0.0
+    private var filteredY = 0.0
+    private var previousAccelNs = 0L
+    @Volatile private var activated = false
+    private var startedAtNs = 0L
+    private var lastCadenceReportNs = 0L
+    val isAvailable: Boolean get() = source != null
+    val sourceName: String get() = source?.name ?: "Sensor de orientação indisponível"
 
-    fun start() {
+    @Synchronized fun start() {
         if (activated) return
-        activated = true
-        gyro?.let { manager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST, sensorHandler) }
-        val correction = attitude ?: gravity
-        correction?.let { manager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, sensorHandler) }
+        fusion.reset()
+        cadence.reset()
+        lastCadenceReportNs = 0L
+        previousAccelNs = 0L
+        startedAtNs = android.os.SystemClock.elapsedRealtimeNanos()
+        // SensorManager registration is synchronous. Samples are dispatched on
+        // our sensor Handler, while this monitor serializes start/stop/events.
+        activated = source?.let {
+            // GAME asks for ~50 Hz, undersampling a 60 fps camera. A bounded
+            // 200 Hz request improves frame-time interpolation without delaying
+            // the attitude or changing the approved world-up/360 degree math.
+            // Zero batching latency keeps samples available to the GL consumer.
+            val periodUs = SensorCadence.requestedPeriodUs(it.minDelay)
+            manager.registerListener(this, it, periodUs, 0, sensorHandler).also { enabled ->
+                android.util.Log.i("HorizonCamSensor",
+                    "source=${it.name} type=${it.type} requestedPeriodUs=$periodUs registered=$enabled")
+            }
+        } ?: false
     }
 
-    fun stop() {
+    @Synchronized fun stop() {
         activated = false
         manager.unregisterListener(this)
     }
@@ -51,27 +67,43 @@ class GravityRollSensor(
         sensorThread.quitSafely()
     }
 
-    override fun onSensorChanged(event: SensorEvent) {
-        val result = when (event.sensor.type) {
-            Sensor.TYPE_GYROSCOPE ->
-                fusion.onGyroscope(event.values[2].toDouble(), event.timestamp)
+    @Synchronized override fun onSensorChanged(event: SensorEvent) {
+        if (!activated || event.timestamp < startedAtNs) return
+        cadence.append(event.timestamp)
+        if (lastCadenceReportNs == 0L) lastCadenceReportNs = event.timestamp
+        if (event.timestamp - lastCadenceReportNs >= 5_000_000_000L) {
+            android.util.Log.i("HorizonCamSensor",
+                "measuredHz=${cadence.measuredHz()} longestGapMs=${cadence.longestIntervalNs / 1e6}")
+            lastCadenceReportNs = event.timestamp
+        }
+        val down = when (event.sensor.type) {
             Sensor.TYPE_GAME_ROTATION_VECTOR, Sensor.TYPE_ROTATION_VECTOR -> {
                 SensorManager.getRotationMatrixFromVector(rotation, event.values)
-                fusion.onGravity(
-                    -rotation[6].toDouble() * 9.81,
-                    -rotation[7].toDouble() * 9.81,
-                    event.timestamp
-                )
+                // R maps device vectors to earth. R^T * (0,0,+g) is
+                // earth UP in device axes: +Y in natural portrait, +X
+                // when the natural-portrait phone is turned CCW landscape.
+                Pair(-rotation[6].toDouble() * 9.81, -rotation[7].toDouble() * 9.81)
             }
-            Sensor.TYPE_GRAVITY, Sensor.TYPE_ACCELEROMETER -> {
-                val gain = if (event.sensor.type == Sensor.TYPE_GRAVITY) 0.5f else 0.085f
-                gx += gain * (event.values[0] - gx)
-                gy += gain * (event.values[1] - gy)
-                fusion.onGravity(gx.toDouble(), gy.toDouble(), event.timestamp)
+            Sensor.TYPE_GRAVITY -> Pair(-event.values[0].toDouble(), -event.values[1].toDouble())
+            Sensor.TYPE_ACCELEROMETER -> {
+                val x = event.values[0].toDouble()
+                val y = event.values[1].toDouble()
+                val previous = previousAccelNs
+                if (previous == 0L || event.timestamp - previous > 500_000_000L) {
+                    filteredX = x
+                    filteredY = y
+                } else {
+                    // Fallback only: low-pass acceleration, using actual sample interval.
+                    val gain = 1.0 - exp(-(event.timestamp - previous).coerceAtLeast(0L) / 1e9 / 0.10)
+                    filteredX += gain * (x - filteredX)
+                    filteredY += gain * (y - filteredY)
+                }
+                previousAccelNs = event.timestamp
+                Pair(-filteredX, -filteredY)
             }
-            else -> null
+            else -> return
         }
-        result?.let(onReading)
+        fusion.onGravity(down.first, down.second, event.timestamp)?.let(onReading)
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit

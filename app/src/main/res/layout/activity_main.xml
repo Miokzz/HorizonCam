@@ -1,297 +1,92 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<com.miokzz.horizoncam.ui.CameraChromeLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
+    android:layout_width="match_parent" android:layout_height="match_parent"
     android:background="@color/camera_black">
-
-    <com.miokzz.horizoncam.HorizonPreviewTextureView
-        android:id="@+id/previewView"
-        android:contentDescription="Prévia da câmera. Toque para focar e ajustar exposição."
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-
-    <com.miokzz.horizoncam.ui.CameraGridView
-        android:id="@+id/gridView"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:visibility="gone" />
-
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="130dp"
-        android:layout_gravity="top"
-        android:background="@drawable/top_scrim"
-        android:clickable="false" />
-
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="172dp"
-        android:layout_gravity="bottom"
-        android:background="@drawable/bottom_scrim"
-        android:clickable="false" />
-
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="wrap_content"
-        android:layout_height="36dp"
-        android:layout_gravity="top|start"
-        android:layout_marginStart="18dp"
-        android:layout_marginTop="68dp"
-        android:background="@drawable/camera_pill"
-        android:gravity="center"
-        android:minWidth="74dp"
-        android:paddingHorizontal="12dp"
-        android:text="H LOCK"
-        android:textColor="@color/horizon_yellow"
-        android:textSize="12sp"
-        android:textStyle="bold" />
-
-    <TextView
-        android:id="@+id/timerText"
-        android:layout_width="wrap_content"
-        android:layout_height="34dp"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="71dp"
-        android:background="@drawable/camera_pill"
-        android:gravity="center"
-        android:minWidth="74dp"
-        android:paddingHorizontal="12dp"
-        android:text="00:00"
-        android:textColor="@color/record_red"
-        android:textSize="14sp"
-        android:textStyle="bold"
-        android:visibility="gone" />
-
-    <LinearLayout
-        android:id="@+id/topControls"
-        android:layout_width="match_parent"
-        android:layout_height="54dp"
-        android:layout_gravity="top|center_horizontal"
-        android:gravity="center"
-        android:orientation="horizontal"
-        android:paddingHorizontal="10dp">
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/flashButton"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="46dp"
-            android:layout_height="42dp"
-            android:contentDescription="Flash"
-            android:text=""
-            android:minWidth="0dp"
-            android:padding="10dp"
-            app:icon="@drawable/ic_torch"
-            app:iconGravity="textStart"
-            app:iconTint="@color/white"
-            app:iconPadding="0dp"
-            app:iconSize="22dp"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="23dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/qualityButton"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="61dp"
-            android:layout_height="42dp"
-            android:layout_marginStart="6dp"
-            android:minWidth="0dp"
-            android:text="FHD"
-            android:textAllCaps="false"
-            android:textColor="@color/white"
-            android:textSize="13sp"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="22dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/fpsButton"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="51dp"
-            android:layout_height="42dp"
-            android:layout_marginStart="6dp"
-            android:minWidth="0dp"
-            android:text="30"
-            android:textAllCaps="false"
-            android:textColor="@color/white"
-            android:textSize="13sp"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="22dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/lockButton"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="73dp"
-            android:layout_height="42dp"
-            android:layout_marginStart="6dp"
-            android:minWidth="0dp"
-            android:text="360°"
-            android:textAllCaps="false"
-            android:textColor="@color/horizon_yellow"
-            android:textSize="13sp"
-            android:textStyle="bold"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="22dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/quickControlsButton"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="46dp"
-            android:layout_height="42dp"
-            android:layout_marginStart="6dp"
-            android:contentDescription="Controles rápidos"
-            android:minWidth="0dp"
-            android:padding="10dp"
-            android:text=""
-            app:icon="@drawable/ic_more"
-            app:iconGravity="textStart"
-            app:iconTint="@color/white"
-            app:iconPadding="0dp"
-            app:iconSize="22dp"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="23dp" />
-    </LinearLayout>
-
-    <View
-        android:id="@+id/focusIndicator"
-        android:layout_width="72dp"
-        android:layout_height="72dp"
-        android:layout_gravity="center"
-        android:background="@drawable/focus_ring"
-        android:visibility="gone" />
-
-    <SeekBar
-        android:id="@+id/exposureSlider"
-        android:layout_width="200dp"
-        android:layout_height="40dp"
-        android:layout_gravity="center"
-        android:layout_marginTop="130dp"
-        android:progressTint="@color/horizon_yellow"
-        android:thumbTint="@color/horizon_yellow"
-        android:visibility="gone" />
-
-    <LinearLayout
-        android:id="@+id/zoomControls"
-        android:layout_width="wrap_content"
-        android:layout_height="48dp"
-        android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="25dp"
-        android:gravity="center"
-        android:orientation="horizontal">
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/zoom06Button"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="54dp"
-            android:layout_height="42dp"
-            android:layout_marginHorizontal="3dp"
-            android:minWidth="0dp"
-            android:padding="0dp"
-            android:text="0.6×"
-            android:textAllCaps="false"
-            android:textColor="@color/white"
-            android:textSize="12sp"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="22dp" />
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/zoom1Button"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="54dp"
-            android:layout_height="42dp"
-            android:layout_marginHorizontal="3dp"
-            android:minWidth="0dp"
-            android:padding="0dp"
-            android:text="1×"
-            android:textAllCaps="false"
-            android:textColor="@color/white"
-            android:textSize="12sp"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="22dp" />
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/zoom2Button"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="54dp"
-            android:layout_height="42dp"
-            android:layout_marginHorizontal="3dp"
-            android:minWidth="0dp"
-            android:padding="0dp"
-            android:text="2×"
-            android:textAllCaps="false"
-            android:textColor="@color/white"
-            android:textSize="12sp"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="22dp" />
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/zoom3Button"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="54dp"
-            android:layout_height="42dp"
-            android:layout_marginHorizontal="3dp"
-            android:minWidth="0dp"
-            android:padding="0dp"
-            android:text="3×"
-            android:textAllCaps="false"
-            android:textColor="@color/white"
-            android:textSize="12sp"
-            app:backgroundTint="@color/hud_black"
-            app:cornerRadius="22dp" />
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/modeLabel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center_vertical|end"
-        android:layout_marginEnd="130dp"
-        android:text="VÍDEO"
-        android:textColor="@color/white"
-        android:textSize="12sp"
-        android:textStyle="bold" />
-
-    <ImageView
-        android:id="@+id/galleryThumbnail"
-        android:layout_width="58dp"
-        android:layout_height="58dp"
-        android:layout_gravity="center_vertical|start"
-        android:layout_marginStart="22dp"
-        android:background="@drawable/camera_pill"
-        android:contentDescription="Abrir último vídeo"
-        android:padding="3dp"
-        android:scaleType="centerCrop"
-        android:src="@drawable/ic_gallery"
-        app:tint="@null" />
-
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/pauseButton"
-        style="@style/Widget.Material3.Button.TextButton"
-        android:layout_width="55dp"
-        android:layout_height="55dp"
-        android:layout_gravity="center_vertical|end"
-        android:layout_marginEnd="128dp"
-        android:contentDescription="Pausar gravação"
-        android:minWidth="0dp"
-        android:padding="12dp"
-        android:text="Ⅱ"
-        android:textColor="@color/white"
-        android:textSize="20sp"
-        android:visibility="gone"
-        app:backgroundTint="@color/hud_black"
-        app:cornerRadius="28dp" />
-
-    <FrameLayout
-        android:id="@+id/recordButton"
-        android:layout_width="82dp"
-        android:layout_height="82dp"
-        android:layout_gravity="center_vertical|end"
-        android:layout_marginEnd="26dp"
-        android:background="@drawable/record_outer"
-        android:clickable="true"
-        android:contentDescription="Iniciar gravação"
-        android:focusable="true">
-        <View
-            android:id="@+id/recordInner"
-            android:layout_width="54dp"
-            android:layout_height="54dp"
-            android:layout_gravity="center"
-            android:background="@drawable/record_inner_idle" />
+    <HorizontalScrollView android:id="@+id/topControls" android:layout_width="match_parent" android:layout_height="60dp"
+        android:fillViewport="true" android:scrollbars="none" android:overScrollMode="never">
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="match_parent" android:orientation="horizontal"
+            android:gravity="center" android:paddingHorizontal="8dp" android:divider="@drawable/control_spacing" android:showDividers="middle">
+            <com.google.android.material.button.MaterialButton android:id="@+id/flashButton" style="@style/CameraControl" android:layout_width="48dp" android:layout_height="48dp" android:text="" android:contentDescription="Lanterna" app:icon="@drawable/ic_torch" />
+<com.google.android.material.button.MaterialButton android:id="@+id/qualityButton" style="@style/CameraControl" android:layout_width="64dp" android:layout_height="48dp" android:text="FHD" android:contentDescription="Resolução de vídeo" />
+<com.google.android.material.button.MaterialButton android:id="@+id/fpsButton" style="@style/CameraControl" android:layout_width="48dp" android:layout_height="48dp" android:text="30" android:contentDescription="Quadros por segundo" />
+<com.google.android.material.button.MaterialButton android:id="@+id/lockButton" style="@style/CameraControl" android:layout_width="76dp" android:layout_height="48dp" android:text="360°" android:contentDescription="Estabilização do vídeo" android:textColor="@color/horizon_yellow" />
+<com.google.android.material.button.MaterialButton android:id="@+id/quickControlsButton" style="@style/CameraControl" android:layout_width="48dp" android:layout_height="48dp" android:text="" android:contentDescription="Ajustes da câmera" app:icon="@drawable/ic_more" />
+        </LinearLayout>
+    </HorizontalScrollView>
+    <FrameLayout android:id="@+id/previewContainer" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:clipChildren="true" android:background="@color/black">
+        <com.miokzz.horizoncam.HorizonPreviewTextureView android:id="@+id/previewView"
+            android:layout_width="match_parent" android:layout_height="match_parent"
+            android:contentDescription="Prévia do vídeo. Toque para focar; afaste dois dedos para ampliar." />
+        <androidx.camera.view.PreviewView android:id="@+id/photoPreview"
+            android:layout_width="match_parent" android:layout_height="match_parent" android:visibility="gone"
+            app:implementationMode="compatible" app:scaleType="fitCenter"
+            android:contentDescription="Prévia da foto. Toque para focar; afaste dois dedos para ampliar." />
+        <com.miokzz.horizoncam.ui.CameraGridView android:id="@+id/gridView"
+            android:layout_width="match_parent" android:layout_height="match_parent"
+            android:importantForAccessibility="no" android:visibility="gone" />
+        <View android:layout_width="match_parent" android:layout_height="92dp" android:layout_gravity="top"
+            android:importantForAccessibility="no" android:background="@drawable/top_scrim" />
+        <View android:layout_width="match_parent" android:layout_height="128dp" android:layout_gravity="bottom"
+            android:importantForAccessibility="no" android:background="@drawable/bottom_scrim" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical"
+            android:orientation="horizontal" android:padding="12dp">
+            <TextView android:id="@+id/statusText" android:layout_width="0dp" android:layout_weight="1" android:layout_height="36dp"
+                android:gravity="center_vertical" android:maxLines="2" android:ellipsize="end" android:text="Pronto"
+                android:textColor="@color/horizon_yellow" android:textSize="11sp" android:fontFamily="sans-serif-medium"
+                android:contentDescription="Estado da câmera" />
+            <TextView android:id="@+id/timerText" android:layout_width="wrap_content" android:layout_height="36dp"
+                android:layout_marginStart="8dp" android:background="@drawable/camera_pill" android:gravity="center"
+                android:minWidth="76dp" android:paddingHorizontal="12dp" android:text="00:00" android:textColor="@color/white"
+                android:fontFamily="sans-serif-medium" android:fontFeatureSettings="tnum" android:textSize="14sp" android:visibility="gone" />
+        </LinearLayout>
+        <View android:id="@+id/focusIndicator" android:layout_width="68dp" android:layout_height="68dp"
+            android:layout_gravity="center" android:importantForAccessibility="no" android:background="@drawable/focus_ring" android:visibility="gone" />
+        <SeekBar android:id="@+id/exposureSlider" android:layout_width="200dp" android:layout_height="48dp"
+            android:layout_gravity="center" android:layout_marginTop="90dp" android:contentDescription="Compensação de exposição"
+            android:progressTint="@color/horizon_yellow" android:thumbTint="@color/horizon_yellow" android:visibility="gone" />
+        <LinearLayout android:id="@+id/zoomControls" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:orientation="vertical" android:gravity="center" android:layout_gravity="bottom|center_horizontal" android:layout_marginBottom="12dp">
+            <TextView android:id="@+id/zoomReadout" android:layout_width="wrap_content" android:layout_height="24dp" android:gravity="center"
+                android:text="1,0×" android:textColor="@color/white" android:fontFamily="sans-serif-medium" android:textSize="12sp"
+                android:contentDescription="Ampliação atual" />
+            <LinearLayout android:layout_width="wrap_content" android:layout_height="48dp" android:orientation="horizontal"
+                android:background="@drawable/camera_pill" android:divider="@drawable/control_spacing" android:showDividers="middle">
+                <com.google.android.material.button.MaterialButton android:id="@+id/zoom06Button" style="@style/CameraControl" android:layout_width="48dp" android:layout_height="48dp" android:text="0,6×" android:contentDescription="Zoom 0,6×" />
+<com.google.android.material.button.MaterialButton android:id="@+id/zoom1Button" style="@style/CameraControl" android:layout_width="48dp" android:layout_height="48dp" android:text="1×" android:contentDescription="Zoom 1×" />
+<com.google.android.material.button.MaterialButton android:id="@+id/zoom2Button" style="@style/CameraControl" android:layout_width="48dp" android:layout_height="48dp" android:text="2×" android:contentDescription="Zoom 2×" />
+<com.google.android.material.button.MaterialButton android:id="@+id/zoom3Button" style="@style/CameraControl" android:layout_width="48dp" android:layout_height="48dp" android:text="3×" android:contentDescription="Zoom 3×" />
+            </LinearLayout>
+        </LinearLayout>
     </FrameLayout>
-</FrameLayout>
+    <com.miokzz.horizoncam.ui.CaptureControlsLayout android:id="@+id/captureControls"
+        android:layout_width="match_parent" android:layout_height="108dp">
+        <ImageView android:id="@+id/galleryThumbnail" android:layout_width="52dp" android:layout_height="52dp"
+            android:layout_gravity="center" android:background="@drawable/gallery_frame" android:padding="5dp"
+            android:clickable="true" android:focusable="true" android:foreground="?attr/selectableItemBackground"
+            android:contentDescription="Abrir última captura" android:scaleType="centerCrop" android:src="@drawable/ic_gallery" />
+        <FrameLayout android:id="@+id/recordButton" android:layout_width="82dp" android:layout_height="82dp"
+            android:layout_gravity="center" android:background="@drawable/record_outer" android:clickable="true" android:focusable="true"
+            android:foreground="?attr/selectableItemBackgroundBorderless" android:contentDescription="Tirar foto">
+            <View android:id="@+id/recordInner" android:layout_width="62dp" android:layout_height="62dp"
+                android:layout_gravity="center" android:importantForAccessibility="no" android:background="@drawable/photo_shutter_idle" />
+        </FrameLayout>
+        <com.google.android.material.button.MaterialButton android:id="@+id/pauseButton" style="@style/CameraControl"
+            android:layout_width="52dp" android:layout_height="52dp" android:layout_gravity="center"
+            android:contentDescription="Pausar gravação" android:text="Ⅱ" android:textSize="22sp" android:visibility="gone" />
+    </com.miokzz.horizoncam.ui.CaptureControlsLayout>
+    <HorizontalScrollView android:id="@+id/modeRail" android:layout_width="match_parent" android:layout_height="60dp"
+        android:scrollbars="none" android:fillViewport="false" android:overScrollMode="never"
+        android:contentDescription="Modos de captura. Deslize para explorar.">
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="match_parent" android:gravity="center_vertical"
+            android:orientation="horizontal" android:paddingHorizontal="14dp">
+            <com.google.android.material.button.MaterialButton android:id="@+id/modePhoto" style="@style/CameraMode" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Foto" android:contentDescription="Modo Foto" />
+<com.google.android.material.button.MaterialButton android:id="@+id/modeVideo" style="@style/CameraMode" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Vídeo" android:contentDescription="Modo Vídeo" />
+<com.google.android.material.button.MaterialButton android:id="@+id/modePortrait" style="@style/CameraMode" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Retrato · em breve" android:enabled="false" android:contentDescription="Retrato, em breve, indisponível" />
+<com.google.android.material.button.MaterialButton android:id="@+id/modeNight" style="@style/CameraMode" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Noturno" android:contentDescription="Noturno multiframe" />
+<com.google.android.material.button.MaterialButton android:id="@+id/modePro" style="@style/CameraMode" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Pro" android:enabled="false" android:contentDescription="Modo Pro" />
+<com.google.android.material.button.MaterialButton android:id="@+id/modeMore" style="@style/CameraMode" android:layout_width="wrap_content" android:layout_height="48dp" android:text="Mais" android:contentDescription="Mais opções de fotografia" />
+        </LinearLayout>
+    </HorizontalScrollView>
+</com.miokzz.horizoncam.ui.CameraChromeLayout>

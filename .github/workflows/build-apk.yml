@@ -2,7 +2,7 @@ name: Build HorizonCam APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "phase-1/**" ]
   workflow_dispatch:
 
 permissions:
@@ -43,28 +43,31 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
-      - name: Restore persistent debug signing key
-        id: debug-key-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: horizoncam-debug-keystore-v1
+      - name: Prepare repository test signing key
+        shell: bash
+        env:
+          TEST_STORE: ${{ secrets.HORIZONCAM_TEST_KEYSTORE_V1 }}
+        run: |
+          set -eu
+          test -n "$TEST_STORE"
+          umask 077
+          printf %s "$TEST_STORE" | base64 --decode > "$RUNNER_TEMP/horizon-camera-debug.p12"
+          echo "HORIZONCAM_CI_KEYSTORE=$RUNNER_TEMP/horizon-camera-debug.p12" >> "$GITHUB_ENV"
 
       - name: Build debug APK
-        run: gradle --stacktrace :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
-
-      - name: Save persistent debug signing key
-        if: success() && steps.debug-key-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: horizoncam-debug-keystore-v1
+        run: gradle --stacktrace :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
 
       - name: Verify debug APK signature
         shell: bash
         run: |
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs \
             app/build/outputs/apk/debug/app-debug.apk
+          expected=4b90c2ec8c6090ee53014eeedd9938fa337465b767677c496804487d5487a7af
+          for apk in app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk; do
+            actual=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk" | awk '/Signer #1 certificate SHA-256 digest:/ { print $NF; exit }')
+            test "$actual" = "$expected"
+          done
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 app/build/outputs/apk/debug/app-debug.apk
           sha256sum app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload APK
@@ -72,6 +75,14 @@ jobs:
         with:
           name: HorizonCam-S24-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload physical-device quality test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorizonCam-device-tests
+          path: app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           if-no-files-found: error
           retention-days: 30
 

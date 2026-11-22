@@ -1,0 +1,164 @@
+{
+  "weights_sha256": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+  "tflite_sha256": "23c281028af47e692dc84fda1fdbc681c3c1038f6d0329c1a849b08c6ec6f11b",
+  "baseline_model_sha256": "1a380d3744103e11ef343534aaff54815cae40769dcd00c023652a7e5bc47f4b",
+  "parity": [
+    {
+      "name": "rgb_direction_ramps",
+      "max_abs_0_255": 0.00402069091796875,
+      "mean_abs_0_255": 6.6720625909511e-05
+    },
+    {
+      "name": "separate_rgb_impulses",
+      "max_abs_0_255": 0.00054168701171875,
+      "mean_abs_0_255": 1.838092430261895e-05
+    },
+    {
+      "name": "seeded_nonconstant_noise",
+      "max_abs_0_255": 0.00115203857421875,
+      "mean_abs_0_255": 0.00012986328511033207
+    }
+  ],
+  "odd_tile_checks": [
+    {
+      "input": [
+        1,
+        1
+      ],
+      "output": [
+        4,
+        4
+      ],
+      "max_abs_tile_parity": 0.0001068115234375
+    },
+    {
+      "input": [
+        29,
+        17
+      ],
+      "output": [
+        116,
+        68
+      ],
+      "max_abs_tile_parity": 0.0008087158203125
+    },
+    {
+      "input": [
+        37,
+        51
+      ],
+      "output": [
+        148,
+        204
+      ],
+      "max_abs_tile_parity": 0.0009613037109375
+    },
+    {
+      "input": [
+        65,
+        63
+      ],
+      "output": [
+        260,
+        252
+      ],
+      "max_abs_tile_parity": 0.001190185546875
+    }
+  ],
+  "benchmarks": [
+    {
+      "name": "astronaut_face",
+      "dimensions": [
+        65,
+        65
+      ],
+      "jpeg_quality": 25,
+      "noise_sigma_0_255": 12.0,
+      "raw_model_4x_seconds_cpu": 0.40108580000014626,
+      "degraded_1x": {
+        "psnr_db": 26.762982731738045,
+        "ssim": 0.8848603367805481,
+        "mae": 8.76646942800789
+      },
+      "bicubic_up_down_1x": {
+        "psnr_db": 27.179251830732145,
+        "ssim": 0.8942003846168518,
+        "mae": 8.360394477317554
+      },
+      "gaussian_baseline_1x": {
+        "psnr_db": 26.88409478944095,
+        "ssim": 0.8960831165313721,
+        "mae": 8.396055226824458
+      },
+      "raw_realesrgan_lanczos_downsampled_1x": {
+        "psnr_db": 26.157577091773998,
+        "ssim": 0.9183177947998047,
+        "mae": 8.715897435897435
+      },
+      "raw_realesrgan_area_downsampled_1x": {
+        "psnr_db": 26.709279599658945,
+        "ssim": 0.922907829284668,
+        "mae": 8.295666252256828
+      },
+      "fixed_tile_vs_official_full_4x_mae": 1.258767008781433,
+      "previous_esrgan_area_downsampled_1x": {
+        "psnr_db": 26.402846666519928,
+        "ssim": 0.8784841895103455,
+        "mae": 9.084551783509726
+      }
+    },
+    {
+      "name": "astronaut_detail",
+      "dimensions": [
+        65,
+        65
+      ],
+      "jpeg_quality": 40,
+      "noise_sigma_0_255": 7.0,
+      "raw_model_4x_seconds_cpu": 0.395638299998609,
+      "degraded_1x": {
+        "psnr_db": 28.47292708890137,
+        "ssim": 0.8546296954154968,
+        "mae": 6.922130177514793
+      },
+      "bicubic_up_down_1x": {
+        "psnr_db": 28.79818362440411,
+        "ssim": 0.865056037902832,
+        "mae": 6.6459171597633135
+      },
+      "gaussian_baseline_1x": {
+        "psnr_db": 28.801089346217786,
+        "ssim": 0.8657520413398743,
+        "mae": 6.554477317554241
+      },
+      "raw_realesrgan_lanczos_downsampled_1x": {
+        "psnr_db": 28.21860578583873,
+        "ssim": 0.8870253562927246,
+        "mae": 6.362603550295858
+      },
+      "raw_realesrgan_area_downsampled_1x": {
+        "psnr_db": 28.65989581367211,
+        "ssim": 0.8882136940956116,
+        "mae": 6.160122083512335
+      },
+      "fixed_tile_vs_official_full_4x_mae": 1.3004435300827026,
+      "previous_esrgan_area_downsampled_1x": {
+        "psnr_db": 28.127860048960713,
+        "ssim": 0.8467605710029602,
+        "mae": 7.217631385857037
+      }
+    }
+  ],
+  "tile_policy": {
+    "input": 50,
+    "core": 32,
+    "halo": 9,
+    "overlap": 8,
+    "stride": 24
+  },
+  "limitations": [
+    "Synthetic degradations, two public-domain crops, not a representative quality study.",
+    "PSNR/SSIM measure fidelity, not authenticity of generated details.",
+    "Fixed50 tiles lack the full receptive context of the34-convolution reference; tile seams/context differences remain possible."
+  ]
+}

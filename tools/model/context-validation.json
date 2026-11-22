@@ -1,0 +1,17 @@
+{
+  "upstream_sha256": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+  "sha256": "1d8860d0608528a669562b431c654ac1616ab943ae4048b27b6211381b3fd869",
+  "bytes": 2470028,
+  "tile": 128,
+  "storage": "FP16 weights, FP32 I/O",
+  "parity_input": "seed72 uniform RGB 0..255",
+  "mae_against_official": 0.06705360859632492,
+  "p999_abs": 0.3003692626953125,
+  "max_abs": 0.5035324096679688,
+  "desktop_cpu4_tile_ms": [
+    171.63830000026792,
+    169.27560000021913,
+    165.48950000014884,
+    175.2174000002924
+  ]
+}

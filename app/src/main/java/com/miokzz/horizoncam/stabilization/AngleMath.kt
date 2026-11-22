@@ -40,8 +40,27 @@ object AngleMath {
         }
     }
 
+    /** Android Y-down sensor pixels to buffer pixels, converted to GL Y-up. */
+    fun sensorToBufferGlRotation(matrix: FloatArray): Float {
+        require(matrix.size == 9)
+        require(matrix[0].isFinite() && matrix[3].isFinite())
+        return Math.toDegrees(atan2(-matrix[3].toDouble(), matrix[0].toDouble())).toFloat()
+    }
+
+    /** Column-major GLES matrix; the same pure pixel-metric math is regression tested. */
+    fun correctionGlMatrix(degrees: Double, zoom: Double, aspect: Double): FloatArray {
+        val m = correctionMatrix(degrees, zoom, aspect)
+        return floatArrayOf(
+            m.m00.toFloat(), m.m10.toFloat(), 0f, 0f,
+            m.m01.toFloat(), m.m11.toFloat(), 0f, 0f,
+            0f, 0f, 1f, 0f,
+            0f, 0f, 0f, 1f
+        )
+    }
+
     /** GL vertex matrix for a rotation in a rectangular, pixel-correct frame. */
     fun correctionMatrix(degrees: Double, zoom: Double, aspect: Double): Matrix2 {
+        require(aspect.isFinite() && aspect > 0.0 && zoom.isFinite() && zoom > 0.0)
         val r = Math.toRadians(degrees)
         val c = cos(r)
         val s = sin(r)
