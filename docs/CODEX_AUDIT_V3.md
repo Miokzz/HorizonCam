@@ -27,3 +27,5 @@ O histórico deste chat vinculou comandos de leitura e respostas com o conteúdo
 ## Preservação
 
 O backup remoto `backup/horizoncam-v3-20261122` continuava em `eb8814e`. O checkpoint `69c1bd2` estava disponível em `codex/horizoncam-v3-lens-state`. O índice principal da branch `phase-1/camera` continuava sem alterações staged. Os oito índices temporários inspecionados correspondiam exatamente a checkpoints já registrados. A única diferença do workspace em relação a `69c1bd2` no início da auditoria era o teste Camera2 iniciado para verificar a ordem de fechamento. A cópia completa fora do repositório e os resultados privados do S24 foram preservados.
+
+Na retomada técnica, `hc_optics_video_sol` implementou a sessão Camera2 da tele, `hc_neural_qa_sol` adaptou a fila de JPEG e `hc_qa_ci_sol` revisou a integração independentemente. A revisão levou a correções no retorno do app durante captura, na aplicação da exposição após receber as capacidades e na liberação do obturador quando um quadro extra ainda está em voo.

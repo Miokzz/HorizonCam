@@ -71,6 +71,7 @@ import com.miokzz.horizoncam.photo.HdrPhotoExtension
 import com.miokzz.horizoncam.ui.PhotoControlsDialog
 import com.miokzz.horizoncam.photo.PhotoFormat
 import com.miokzz.horizoncam.photo.PhotoEngine
+import com.miokzz.horizoncam.photo.PhysicalTelePhotoSession
 import com.miokzz.horizoncam.video.VideoEngine
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -135,6 +136,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var reopen: Runnable? = null
     private var lensSwitch: Runnable? = null
     private var cancelPhotoClose: (() -> Unit)? = null
+    private var telePhoto: PhysicalTelePhotoSession? = null
+    private var closingTele: PhysicalTelePhotoSession? = null
+    private var afterTeleClosed: (() -> Unit)? = null
+    private var nativeTeleRejected = false
     private var recoveredPhotoGeneration: Long? = null
     private var handoffStartedAt: Long? = null
     private var handoffExposure: Float? = null
@@ -297,8 +302,14 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             }
         }
         ui.flashButton.setOnClickListener {
-            val cam = camera ?: return@setOnClickListener
-            observeControl(cam.cameraControl.enableTorch(cam.cameraInfo.torchState.value != 1), "Lanterna")
+            val tele = telePhoto
+            if (tele != null) {
+                tele.setTorch(!tele.torchEnabled)
+                ui.flashButton.isSelected = tele.torchEnabled
+            } else {
+                val cam = camera ?: return@setOnClickListener
+                observeControl(cam.cameraControl.enableTorch(cam.cameraInfo.torchState.value != 1), "Lanterna")
+            }
             haptic()
         }
         ui.statusText.setOnClickListener {
@@ -334,10 +345,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             })
         }
         installGestures(ui.photoPreview)
+        installGestures(ui.telePhotoPreview)
         ui.exposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val cam = camera ?: return
                 if (!fromUser) return
+                val tele = telePhoto
+                if (tele != null) {
+                    tele.setExposureCompensation(tele.exposureRange.lower + progress)
+                    ui.exposureSlider.contentDescription = String.format(Locale.getDefault(), "Exposição %+.1f EV",
+                        tele.exposureIndex * tele.exposureStep.toFloat())
+                    return
+                }
+                val cam = camera ?: return
                 val exposure = cam.cameraInfo.exposureState
                 val index = exposure.exposureCompensationRange.lower + progress
                 observeControl(cam.cameraControl.setExposureCompensationIndex(index), "Exposição")
@@ -347,6 +366,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             override fun onStopTrackingTouch(bar: SeekBar?) { ui.exposureSlider.postDelayed(hideExposure, 3000) }
         })
         ui.photoPreview.previewStreamState.observe(this) { state ->
+            if (telePhoto != null || closingTele != null) return@observe
             previewStreaming = state == androidx.camera.view.PreviewView.StreamState.STREAMING
             updateCameraReady()
         }
@@ -359,6 +379,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         recoveryAttempt = 0
         recoveryMessage = null
         recoveredPhotoGeneration = null
+        nativeTeleRejected = false
         lenses?.clearRejections(lensProfile)
         if (locked && !lockLensExplicit) lockLensConfigured = false
         if (hasCamera()) openCamera() else if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
@@ -449,11 +470,45 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.exposureSlider.isVisible = false
         ui.focusIndicator.isVisible = false
         physicalLog = null
+        telePhoto?.let { tele ->
+            telePhoto = null
+            closingTele = tele
+            val closingStarted = SystemClock.elapsedRealtime()
+            tele.close {
+                if (closingTele !== tele) return@close
+                closingTele = null
+                Log.i(TAG, "lensClose session=$session backend=Camera2 closeMs=${SystemClock.elapsedRealtime() - closingStarted}")
+                val next = afterTeleClosed
+                afterTeleClosed = null
+                next?.invoke()
+            }
+        }
     }
+
+    private fun useNativeTele(choice: LensOption): Boolean =
+        !nativeTeleRejected && softwareStillZoom && android.os.Build.MODEL == "SM-S9210" &&
+            choice.cameraId == "0" && choice.physicalCameraId == "6" &&
+            photoZoom.intent.preferred == null && photoSettings == AdvancedPhotoSettings() && !burstDetail
 
     private fun rebind(allowEis: Boolean = true, keepPhotoHandoff: Boolean = false) {
         if (busy || isDestroyed || isFinishing) return
         if (!keepPhotoHandoff) finishPhotoHandoff()
+        if (telePhoto != null || closingTele != null) {
+            afterTeleClosed = {
+                if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                    rebind(allowEis, keepPhotoHandoff)
+                }
+            }
+            if (telePhoto != null) releaseSession()
+            render()
+            return
+        }
+        val nextPhotoCase = if (softwareStillZoom && camera != null)
+            route(targetZoom, photoZoom.intent.preferred)?.let { lenses?.option(it.targetKey) } else null
+        if (nextPhotoCase?.let(::useNativeTele) == true) {
+            reopenPhotoAfterClose(keepPhotoHandoff, enteringNative = true)
+            return
+        }
         val replacePhotoSession = keepPhotoHandoff && softwareStillZoom && photo != null && camera != null
         val bindStart = SystemClock.elapsedRealtime()
         releaseSession(retainPhotoBinding = replacePhotoSession)
@@ -491,6 +546,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             }.getOrNull()
             photoCaps = runCatching { photoCapsCache.getOrPut(choice.key) { AdvancedPhotoCapabilities.inspect(this, info, choice.physicalCameraId) } }.getOrNull()
             eisSupported = capabilities?.nativeEisDeclared == true
+            if (useNativeTele(choice)) {
+                openNativeTele(token)
+                return
+            }
             val captureSelector = if (hdrRequested && photoMode) {
                 val selected = hdr?.selection(choice, true)
                 check(selected?.hdrEnabled == true) { selected?.reason ?: "HDR indisponível" }
@@ -605,6 +664,50 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             openingTimeout = deadline
             if (!ready) ui.root.postDelayed(deadline, 5000)
         } catch (error: Exception) { fallback(allowEis, error) }
+    }
+
+    private fun openNativeTele(token: Int) {
+        fun rejected(error: Throwable) {
+            if (session != token || isDestroyed) return
+            Log.w(TAG, "Camera2 tele indisponível; retomando a saída física CameraX", error)
+            nativeTeleRejected = true
+            ready = false
+            if (busy) render() else rebind(keepPhotoHandoff = handoffStartedAt != null)
+        }
+
+        val tele = PhysicalTelePhotoSession(this, ui.telePhotoPreview, boundRotation, onReady = { evidence ->
+            if (session == token && !isDestroyed) {
+                cameraOpen = true
+                previewStreaming = true
+                photoSurfaceRequested = true
+                physicalConfirmed = true
+                physicalCropZoom = evidence.cropZoom
+                telePhoto?.let { current ->
+                    val step = current.exposureStep.toFloat()
+                    handoffExposure?.takeIf { step > 0f }?.let {
+                        current.setExposureCompensation((it / step).roundToInt())
+                    }
+                    if (distantFocus) distantFocus = current.setDistantFocus(true)
+                }
+                updateCameraReady()
+            }
+        }, onError = ::rejected, onCaptureIdle = {
+            if (session == token && !isDestroyed) {
+                renderZoom()
+                renderStatus()
+            }
+        })
+        telePhoto = tele
+        render()
+        try {
+            Log.i(TAG, "session=$token mode=foto camera=0 requestedPhysical=6 backend=Camera2 tele nativeEdge=${tele.nativeEdge}")
+            tele.start()
+            val timeout = Runnable {
+                if (session == token && !ready) rejected(IllegalStateException("A tele Camera2 não confirmou a prévia em 5 s"))
+            }
+            openingTimeout = timeout
+            if (!ready) ui.root.postDelayed(timeout, 5_000L)
+        } catch (error: Exception) { rejected(error) }
     }
 
     private fun handleCameraError(code: Int, token: Int, allowEis: Boolean) {
@@ -853,7 +956,6 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         if (!ready || busy || !photoZoom.isPending) return
         val intent = photoZoom.intent
         val choice = lens ?: return
-        val current = camera ?: return
         val route = route(intent.total, intent.preferred) ?: return
         val native = appliedNativeRatio
         val supplied = if (choice.isPhysicalOnly) choice.relativeZoom * physicalCropZoom
@@ -879,6 +981,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 return
             }
         } else {
+            val current = camera ?: return
             // A standalone sensor supplies a fixed base for the shared preview/JPEG crop.
             // The logical fallback can still use hardware zoom.
             val anchorMain = usesS24LogicalMain(intent.total, intent.preferred)
@@ -935,7 +1038,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 holdPhotoFrame()
                 Log.i(TAG, "lensIntent generation=${latest.generation} requested=${latest.total} route=${next.key}")
                 val source = lens
-                if (source?.isPhysicalOnly == true && next.cameraId == source.cameraId) {
+                if (telePhoto == null && source?.isPhysicalOnly == true && next.cameraId == source.cameraId) {
                     reopenPhotoAfterClose()
                 } else {
                     rebind(keepPhotoHandoff = true)
@@ -957,7 +1060,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         reopenPhotoAfterClose()
     }
 
-    private fun reopenPhotoAfterClose() {
+    private fun reopenPhotoAfterClose(
+        keepPhotoHandoff: Boolean = handoffStartedAt != null,
+        enteringNative: Boolean = false
+    ) {
         val cameraId = lens?.cameraId ?: return
         val manager = getSystemService(CameraManager::class.java)
         releaseSession()
@@ -970,20 +1076,27 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 val intent = photoZoom.intent
                 val destination = route(intent.total, intent.preferred)?.let { lenses?.option(it.targetKey) }
                 val destinationId = destination?.cameraId ?: cameraId
+                val mustReleaseDevice = enteringNative && destination?.let(::useNativeTele) == true
                 val elapsed = SystemClock.elapsedRealtime() - started
                 val knownToCameraX = provider?.availableCameraInfos?.any {
                     Camera2CameraInfo.from(it).cameraId == destinationId
                 } == true
                 // After a provider restart, the framework can report availability before
                 // CameraX has repopulated its selectable camera list.
-                if (knownToCameraX && (cameraAvailable || elapsed >= 3_000L)) {
+                if (knownToCameraX && (cameraAvailable || (!mustReleaseDevice && elapsed >= 3_000L))) {
                     cancelPhotoClose?.invoke()
                     Log.i(TAG, "lensClose session=$token available=$cameraAvailable closeMs=$elapsed")
-                    rebind(keepPhotoHandoff = true)
+                    rebind(keepPhotoHandoff = keepPhotoHandoff)
                 } else if (elapsed >= 4_500L) {
                     cancelPhotoClose?.invoke()
-                    fail("Câmera indisponível · toque para tentar",
-                        IllegalStateException("CameraX não voltou a listar a câmera $destinationId"))
+                    if (mustReleaseDevice && knownToCameraX) {
+                        Log.w(TAG, "CameraX não confirmou a liberação de $cameraId; mantendo o backend CameraX")
+                        nativeTeleRejected = true
+                        rebind(keepPhotoHandoff = keepPhotoHandoff)
+                    } else {
+                        fail("Câmera indisponível · toque para tentar",
+                            IllegalStateException("CameraX não voltou a listar a câmera $destinationId"))
+                    }
                 } else {
                     ui.root.postDelayed(this, 80L)
                 }
@@ -1011,9 +1124,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun holdPhotoFrame() {
         if (handoffStartedAt != null) return
         handoffStartedAt = SystemClock.elapsedRealtime()
-        handoffExposure = camera?.cameraInfo?.exposureState?.takeIf { it.isExposureCompensationSupported }
-            ?.let { it.exposureCompensationIndex * it.exposureCompensationStep.toFloat() }
-        val frame = if (previewStreaming) runCatching { ui.photoPreview.bitmap }.getOrNull() else null
+        val tele = telePhoto
+        handoffExposure = tele?.let { it.exposureIndex * it.exposureStep.toFloat() }
+            ?: camera?.cameraInfo?.exposureState?.takeIf { it.isExposureCompensationSupported }
+                ?.let { it.exposureCompensationIndex * it.exposureCompensationStep.toFloat() }
+        val frame = if (previewStreaming) runCatching {
+            if (tele != null) ui.telePhotoPreview.bitmap else ui.photoPreview.bitmap
+        }.getOrNull() else null
         Log.i(TAG, "lensHandoffFrame held=${frame != null} copyMs=${SystemClock.elapsedRealtime() - checkNotNull(handoffStartedAt)}")
         if (frame == null) return
         ui.lensTransitionFrame.apply {
@@ -1053,13 +1170,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun logTransition(event: String) {
         val details = lenses?.diagnostics(lensProfile)
         val resolution = photo?.capture?.resolutionInfo ?: video?.capture?.resolutionInfo
+        val tele = telePhoto
+        val evidence = tele?.evidence
+        val cameraId = if (tele != null) lens?.cameraId else details?.selectedCameraId
+        val requestedPhysical = if (tele != null) lens?.physicalCameraId else details?.selectedPhysicalCameraId
+        val outputPhysical = evidence?.physicalCameraId ?: details?.outputPhysicalCameraId
         Log.i(TAG, "transition=$event t=${SystemClock.elapsedRealtime()} session=$session mode=$mode " +
-            "camera=${details?.selectedCameraId} physicalRequested=${details?.selectedPhysicalCameraId} " +
-            "physicalActive=${details?.activePhysicalCameraId} physicalOutput=${details?.outputPhysicalCameraId} " +
+            "camera=$cameraId physicalRequested=$requestedPhysical " +
+            "physicalActive=${details?.activePhysicalCameraId} physicalOutput=$outputPhysical " +
             "requested=$targetZoom applied=$displayZoom " +
             "extraCrop=$extraCrop previewScale=${ui.photoPreview.scaleX} buffer=${resolution?.resolution} " +
             "viewportCrop=${resolution?.cropRect} readyMs=${if(firstFrameAt>0) firstFrameAt-bindingStartedAt else null} " +
-            "previewStreaming=$previewStreaming capture=${details?.capture}")
+            "previewStreaming=$previewStreaming capture=${evidence ?: details?.capture}")
     }
 
     private fun applyCameraZoom(cam: Camera, ratio: Float, unavailableRatio: Float? = null) {
@@ -1216,6 +1338,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun focusAt(x: Float, y: Float) {
         if (!ready || zoomInProgress || takingPhoto) return
+        telePhoto?.let { tele ->
+            if (distantFocus) {
+                distantFocus = false
+                tele.setDistantFocus(false)
+            }
+            if (tele.focusAt(x, y, extraCrop)) showFocusIndicator(x, y)
+            val exposure = tele.exposureRange
+            if (exposure.upper > exposure.lower) showExposureSlider(exposure.lower, exposure.upper, tele.exposureIndex)
+            haptic()
+            renderStatus()
+            return
+        }
         val cam = camera ?: return
         if (distantFocus && autoJpeg) {
             applyDistantFocus(cam, false) { focusAt(x,y) }
@@ -1265,6 +1399,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 }, 2200)
             }, main)
         }
+        showFocusIndicator(x, y)
+        val ev = cam.cameraInfo.exposureState
+        if (!manualExposure && ev.isExposureCompensationSupported) {
+            showExposureSlider(ev.exposureCompensationRange.lower, ev.exposureCompensationRange.upper,
+                ev.exposureCompensationIndex)
+        }
+        haptic()
+    }
+
+    private fun showFocusIndicator(x: Float, y: Float) {
+        val w = ui.previewContainer.width.coerceAtLeast(1).toFloat()
+        val h = ui.previewContainer.height.coerceAtLeast(1).toFloat()
         ui.focusIndicator.apply {
             translationX = (if (locked) x else StillPreviewGeometry.localToVisible(x,w,extraCrop)) - w / 2
             translationY = (if (locked) y else StillPreviewGeometry.localToVisible(y,h,extraCrop)) - h / 2
@@ -1272,54 +1418,69 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             removeCallbacks(hideFocus)
             postDelayed(hideFocus, 900)
         }
-        val ev = cam.cameraInfo.exposureState
-        if (!manualExposure && ev.isExposureCompensationSupported) ui.exposureSlider.apply {
-            max = ev.exposureCompensationRange.upper - ev.exposureCompensationRange.lower
-            progress = ev.exposureCompensationIndex - ev.exposureCompensationRange.lower
+    }
+
+    private fun showExposureSlider(lower: Int, upper: Int, index: Int) {
+        ui.exposureSlider.apply {
+            max = upper - lower
+            progress = index - lower
             isVisible = true
             removeCallbacks(hideExposure)
             postDelayed(hideExposure, 3500)
         }
-        haptic()
     }
+
     private val hideFocus = Runnable { ui.focusIndicator.isVisible = false }
     private val hideExposure = Runnable { ui.exposureSlider.isVisible = false }
 
     private fun shutter() {
         if (recording != null) { stopVideo(); return }
-        if (!ready || busy || failure != null || zoomInProgress) return
+        if (!ready || busy || failure != null || zoomInProgress || telePhoto?.captureInFlight == true) return
         if (mode == ShootingMode.NIGHT || (mode == ShootingMode.PHOTO && burstDetail && extraCrop == 1f)) {
             startBurst()
             return
         }
         haptic()
         if (photoMode) {
-            val engine = photo ?: return
+            val engine = photo
+            val tele = telePhoto
+            if (engine == null && tele == null) return
             takingPhoto = true
             render()
-            if (mode == ShootingMode.PHOTO && photoSettings.format == PhotoFormat.JPEG) {
+            if (autoJpeg) {
                 val trace = lenses?.diagnostics(lensProfile)
-                Log.i(TAG, "Disparo zoom=$displayZoom recorte=$extraCrop camera=${trace?.selectedCameraId} fisicaSolicitada=${trace?.selectedPhysicalCameraId} ativaHAL=${trace?.activePhysicalCameraId}")
+                val cameraId = if (tele != null) lens?.cameraId else trace?.selectedCameraId
+                val physicalId = if (tele != null) lens?.physicalCameraId else trace?.selectedPhysicalCameraId
+                Log.i(TAG, "Disparo zoom=$displayZoom recorte=$extraCrop camera=$cameraId " +
+                    "fisicaSolicitada=$physicalId ativaHAL=${trace?.activePhysicalCameraId} " +
+                    "sensor=${tele?.evidence?.physicalCameraId ?: trace?.outputPhysicalCameraId}")
                 val captureEpoch = session
                 val captureCamera = camera
                 val captureKey = lens?.key
                 val captureZoom = displayZoom
                 val captureCrop = extraCrop
                 fun currentCaptureSensor(): String? {
-                    if (session != captureEpoch || camera !== captureCamera || zoomInProgress ||
+                    if (session != captureEpoch || camera !== captureCamera || telePhoto !== tele || zoomInProgress ||
                         abs(displayZoom - captureZoom) > 0.0001f || abs(extraCrop - captureCrop) > 0.0001f) return null
+                    if (tele != null) return tele.evidence?.physicalCameraId
                     val current = lenses?.diagnostics(lensProfile) ?: return null
                     if (current.selectedKey != captureKey || current.capture == null) return null
                     return current.outputPhysicalCameraId
                 }
                 val physical = currentCaptureSensor()
-                AutoPhotos.capture(applicationContext, engine.capture, captureZoom, captureCrop, main,
-                    physicalId = ::currentCaptureSensor, boundSensor = physical) { error ->
+                val finished: (Throwable?) -> Unit = { error ->
                     takingPhoto = false
                     if (!isDestroyed) {
                         if (error != null) toast("Falha ao guardar a captura: ${error.localizedMessage}")
                         afterCapture()
                     }
+                }
+                if (tele != null) {
+                    AutoPhotos.capture(applicationContext, captureZoom, captureCrop, tele.nativeEdge,
+                        tele::captureTo, ::currentCaptureSensor, physical, finished)
+                } else {
+                    AutoPhotos.capture(applicationContext, checkNotNull(engine).capture, captureZoom, captureCrop, main,
+                        ::currentCaptureSensor, physical, finished)
                 }
                 return
             }
@@ -1329,7 +1490,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     .onFailure { Log.e(TAG, "Falha ao salvar JPEG", it); if (!isDestroyed) toast("Falha ao salvar foto.") }
                 if (!isDestroyed) afterCapture()
             }
-            try { engine.shoot(contentResolver, main, done) } catch (e: Exception) { done(Result.failure(e)) }
+            try { checkNotNull(engine).shoot(contentResolver, main, done) } catch (e: Exception) { done(Result.failure(e)) }
         } else if (audio && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             awaitingMic = true
             render()
@@ -1455,9 +1616,12 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     private fun afterCapture() {
-        if (!locked && ui.root.display?.rotation != boundRotation && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
-            rebind()
-        } else render()
+        val started = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        when {
+            started && camera == null && telePhoto == null && hasCamera() -> openCamera()
+            started && ((nativeTeleRejected && telePhoto != null) || (!locked && ui.root.display?.rotation != boundRotation)) -> rebind()
+            else -> render()
+        }
     }
 
     private fun videoQualityMenu() {
@@ -1534,7 +1698,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 if (burstDetail) "Desligar fusão de detalhe" else "Ativar fusão de detalhe · 5 quadros").isEnabled = ready && !busy
             if (autoJpeg && !hdrRequested) menu.add(0, 11, 9,
                 if (distantFocus) "Voltar ao foco automático" else "Foco distante").isEnabled = ready && !busy &&
-                    photoCaps?.manual?.supportsManualFocus == true
+                    (telePhoto?.supportsDistantFocus ?: photoCaps?.manual?.supportsManualFocus) == true
             if (BurstJobs.states.value?.running == true) menu.add(0, 10, 8, "Cancelar processamento da sequência")
             if (failure != null) menu.add(0, 5, 4, "Tentar abrir a câmera")
             setOnMenuItemClickListener { item ->
@@ -1554,7 +1718,14 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                         rebind()
                     }
                     10 -> BurstJobs.cancel()
-                    11 -> camera?.let { applyDistantFocus(it, !distantFocus) }
+                    11 -> {
+                        val tele = telePhoto
+                        if (tele != null) {
+                            val enabled = !distantFocus
+                            if (tele.setDistantFocus(enabled)) distantFocus = enabled
+                            renderStatus()
+                        } else camera?.let { applyDistantFocus(it, !distantFocus) }
+                    }
                 }
                 true
             }
@@ -1683,11 +1854,15 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val ids = capabilities?.availableLenses?.joinToString("\n") { entry ->
             "ID ${entry.id}: ${entry.physicalIds.sorted().joinToString().ifBlank { "sem IDs físicos anunciados" }}"
         } ?: manager?.options.orEmpty().joinToString("\n") { it.label }
+        val tele = telePhoto
+        val cameraId = if (tele != null) lens?.cameraId else info?.selectedCameraId
+        val physicalId = if (tele != null) lens?.physicalCameraId else info?.selectedPhysicalCameraId
         val report = listOf(
-            "Câmera da sessão: ${info?.selectedCameraId ?: "—"}",
-            "Saída física solicitada: ${info?.selectedPhysicalCameraId ?: "automática"}",
+            "Câmera da sessão: ${cameraId ?: "—"}",
+            "Saída física solicitada: ${physicalId ?: "automática"}",
             "Sensor ativo informado pelo HAL: ${info?.activePhysicalCameraId ?: "não informado"}",
-            "Sensor da saída confirmado: ${info?.outputPhysicalCameraId ?: "não informado"}",
+            "Sensor da saída confirmado: ${tele?.evidence?.physicalCameraId ?: info?.outputPhysicalCameraId ?: "não informado"}",
+            tele?.evidence?.let { "Camera2 direto · focal ${it.focalLengthMm} mm" }.orEmpty(),
             "Zoom confirmado: ${formatZoom(displayZoom)} · solicitado: ${formatZoom(targetZoom)}",
             "Recorte adicional: $extraCrop · escala do visor: ${ui.photoPreview.scaleX}",
             "Resultado AF/AE: ${info?.capture ?: "aguardando"}",
@@ -1705,6 +1880,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun renderZoom() {
         ui.photoPreview.scaleX = dragPreviewCrop ?: extraCrop
         ui.photoPreview.scaleY = ui.photoPreview.scaleX
+        ui.telePhotoPreview.scaleX = ui.photoPreview.scaleX
+        ui.telePhotoPreview.scaleY = ui.photoPreview.scaleY
         ui.zoomReadout.isClickable = softwareStillZoom && !busy
         val requested = targetZoom
         fun label(value: Float): String {
@@ -1721,7 +1898,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         if (softwareStillZoom && !draggingZoom) {
             ui.zoomSlider.progress = PhotoZoomScale.progress(if (zoomInProgress) requested else displayZoom, minimumPhotoZoom())
         }
-        ui.recordButton.isEnabled = (recording != null && !stopping) || (ready && failure == null && !busy && !zoomInProgress)
+        ui.recordButton.isEnabled = (recording != null && !stopping) ||
+            (ready && failure == null && !busy && !zoomInProgress && telePhoto?.captureInFlight != true)
         ui.recordButton.alpha = if (ui.recordButton.isEnabled) 1f else 0.5f
         presets.forEach { (value, button) ->
             val candidate = route(value)
@@ -1735,7 +1913,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun render() {
         ui.root.setPhotoMode(photoMode)
         ui.root.setLockedVideoMode(locked)
-        ui.photoPreview.isVisible = !locked
+        val teleVisible = telePhoto != null || closingTele != null
+        ui.photoPreview.isVisible = !locked && !teleVisible
+        ui.telePhotoPreview.isVisible = teleVisible
         ui.previewView.isVisible = locked
         ui.modeNight.isSelected = mode == ShootingMode.NIGHT
         ui.modeNight.isEnabled = !busy
@@ -1768,7 +1948,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             StabilizationMode.OFF -> "Off"
         }
         ui.quickControlsButton.isEnabled = !busy
-        ui.flashButton.isEnabled = ready && !takingPhoto && camera?.cameraInfo?.hasFlashUnit() == true
+        val tele = telePhoto
+        if (tele != null) ui.flashButton.isSelected = tele.torchEnabled
+        ui.flashButton.isEnabled = ready && !takingPhoto && (tele?.hasTorch ?: camera?.cameraInfo?.hasFlashUnit()) == true
         val rec = recording != null
         ui.exposureSlider.isEnabled = !takingPhoto
         ui.galleryThumbnail.isEnabled = !busy
@@ -1794,6 +1976,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             !ready -> recoveryMessage ?: "Abrindo câmera…"
             burst != null -> burstProgress
             takingPhoto -> "Salvando foto…"
+            telePhoto?.captureInFlight == true -> "Finalizando captura…"
             stopping -> "Finalizando MP4…"
             paused -> "Pausado"
             recording != null && locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos()) -> "REC · referência fraca"
@@ -1833,7 +2016,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 Log.i(TAG, "captureState session=$session zoom=$displayZoom $focus")
                 lastFocusEvidence = focus
             }
-            val actual = info?.outputPhysicalCameraId
+            val actual = telePhoto?.evidence?.physicalCameraId ?: info?.outputPhysicalCameraId
             if (actual != physicalLog) { Log.i(TAG, "session=$session activePhysicalId=${actual ?: "unknown"}"); physicalLog = actual }
             ui.root.postDelayed(this, 400)
         }
@@ -1854,7 +2037,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         syncSensor()
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(this, null)
         ui.root.post(telemetry)
-        if (hasCamera() && (provider == null || camera == null || failure != null)) {
+        if (hasCamera() && (provider == null || (camera == null && telePhoto == null) || failure != null)) {
             recoveryAttempt = 0
             openCamera()
         } else if (hasCamera() && !ready) scheduleRecovery(session, true, -1, 3500L)
@@ -1875,6 +2058,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         if (!softwareStillZoom && lensSwitch != null) { targetZoom = displayZoom; zoomPending = false }
         cancelLensSwitch()
         cancelPhotoClose?.invoke()
+        afterTeleClosed = null
+        if (telePhoto != null) releaseSession()
         photoZoom.finishGesture(photoZoom.intent.generation)
         draggingZoom = false
         sliderGeneration = null
@@ -1891,7 +2076,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     override fun onDisplayAdded(displayId: Int) = Unit
     override fun onDisplayRemoved(displayId: Int) = Unit
     override fun onDisplayChanged(displayId: Int) {
-        if (!locked && !busy && camera != null && ui.root.display?.rotation != boundRotation) rebind()
+        if (!locked && !busy && (camera != null || telePhoto != null) && ui.root.display?.rotation != boundRotation) rebind()
     }
 
     override fun onDestroy() {
@@ -1899,6 +2084,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         hdr?.close()
         sensor.release()
         recording?.stop()
+        afterTeleClosed = null
         releaseSession()
         library.close()
         super.onDestroy()

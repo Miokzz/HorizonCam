@@ -7,6 +7,8 @@ import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.media.ExifInterface
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.MediaStore
@@ -37,39 +39,101 @@ object AutoPhotos {
     internal fun directory(context: Context) = File(context.noBackupFilesDir, "pending-photos")
 
     fun capture(context: Context, capture: ImageCapture, zoom: Float, crop: Float, executor: Executor, physicalId: () -> String?, boundSensor: String?, finished: (Throwable?) -> Unit) {
-        val dir = directory(context)
-        val name = "${System.currentTimeMillis()}_${zoom.toRawBits()}_${crop.toRawBits()}_${UUID.randomUUID()}"
-        val part = File(dir, "$name.part")
+        captureWithSource(context, zoom, crop,
+            nativeEdge = { capture.resolutionInfo?.cropRect?.let { maxOf(it.width(), it.height()) } },
+            takePicture = { file, complete ->
+                val options = ImageCapture.OutputFileOptions.Builder(file).build()
+                capture.takePicture(options, executor, object : ImageCapture.OnImageSavedCallback {
+                    override fun onImageSaved(result: ImageCapture.OutputFileResults) = complete(Result.success(Unit))
+                    override fun onError(exception: ImageCaptureException) = complete(Result.failure(exception))
+                })
+            },
+            physicalId = physicalId, boundSensor = boundSensor, finished = finished)
+    }
+
+    /**
+     * The source receives requests on main and owns the private JPEG until it calls back.
+     * [nativeEdge] is the largest viewport dimension before applying the digital crop.
+     */
+    fun capture(
+        context: Context,
+        zoom: Float,
+        crop: Float,
+        nativeEdge: Int,
+        takePicture: (File, (Result<Unit>) -> Unit) -> Unit,
+        physicalId: () -> String?,
+        boundSensor: String?,
+        finished: (Throwable?) -> Unit
+    ) = captureWithSource(context, zoom, crop, { nativeEdge }, takePicture, physicalId, boundSensor, finished)
+
+    private fun captureWithSource(
+        context: Context,
+        zoom: Float,
+        crop: Float,
+        nativeEdge: () -> Int?,
+        takePicture: (File, (Result<Unit>) -> Unit) -> Unit,
+        physicalId: () -> String?,
+        boundSensor: String?,
+        finished: (Throwable?) -> Unit
+    ) {
+        val handler = Handler(Looper.getMainLooper())
+        val start = Runnable {
+            val dir = directory(context)
+            val name = "${System.currentTimeMillis()}_${zoom.toRawBits()}_${crop.toRawBits()}_${UUID.randomUUID()}"
+            val part = File(dir, "$name.part")
+            val pending = File(dir, "$name.jpg")
+            try {
+                check(dir.isDirectory || dir.mkdirs())
+                require(dir.usableSpace > 100L * 1024 * 1024) { "Espaço livre insuficiente." }
+            } catch (error: Exception) {
+                finished(error)
+                return@Runnable
+            }
+            requestJpeg(takePicture, part, handler) { result ->
+                val reference = result.mapCatching {
+                    check(part.renameTo(pending)) { "Falha ao concluir o arquivo privado." }
+                    val edge = nativeEdge()?.div(crop) ?: Float.MAX_VALUE
+                    val power = context.getSystemService(PowerManager::class.java)
+                    val cool = (power?.currentThermalStatus ?: 0) < PowerManager.THERMAL_STATUS_MODERATE
+                    boundSensor?.takeIf { zoom >= 8f && edge <= 1280f && cool && physicalId() == it }
+                }
+                reference.fold(
+                    onSuccess = { sensor ->
+                        val publish = { finished(runCatching { enqueue(context, pending) }.exceptionOrNull()) }
+                        if (sensor != null) extraFrames(takePicture, pending, handler, sensor, physicalId, publish)
+                        else publish()
+                    },
+                    onFailure = { error ->
+                        part.delete()
+                        finished(error)
+                    }
+                )
+            }
+        }
+        if (Looper.myLooper() == handler.looper) start.run() else handler.post(start)
+    }
+
+    private fun requestJpeg(
+        takePicture: (File, (Result<Unit>) -> Unit) -> Unit,
+        destination: File,
+        handler: Handler,
+        complete: (Result<Unit>) -> Unit
+    ) {
+        var delivered = false
+        fun report(result: Result<Unit>) {
+            handler.post {
+                if (delivered) return@post
+                delivered = true
+                complete(result.mapCatching {
+                    check(destination.isFile && destination.length() > 0) { "JPEG privado ausente ou vazio." }
+                })
+            }
+        }
         try {
-            check(dir.isDirectory || dir.mkdirs())
-            require(dir.usableSpace > 100L * 1024 * 1024) { "Espaço livre insuficiente." }
-            val options = ImageCapture.OutputFileOptions.Builder(part).build()
-            capture.takePicture(options, executor, object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                    val pending = File(dir, "$name.jpg")
-                    val error = runCatching {
-                        check(part.renameTo(pending)) { "Falha ao concluir o arquivo privado." }
-                        val window = capture.resolutionInfo?.cropRect
-                        val nativeEdge = window?.let { maxOf(it.width(), it.height()) / crop } ?: Float.MAX_VALUE
-                        val power = context.getSystemService(PowerManager::class.java)
-                        val cool = (power?.currentThermalStatus ?: 0) < PowerManager.THERMAL_STATUS_MODERATE
-                        if (zoom >= 8f && nativeEdge <= 1280f && cool && boundSensor != null && physicalId() == boundSensor) {
-                            extraFrames(capture, pending, executor, boundSensor, physicalId) {
-                                enqueue(context, pending)
-                                finished(null)
-                            }
-                            return
-                        }
-                        enqueue(context, pending)
-                    }.exceptionOrNull()
-                    finished(error)
-                }
-                override fun onError(exception: ImageCaptureException) {
-                    part.delete()
-                    finished(exception)
-                }
-            })
-        } catch (e: Exception) { part.delete(); finished(e) }
+            takePicture(destination, ::report)
+        } catch (error: Exception) {
+            report(Result.failure(error))
+        }
     }
 
     // The reference is committed first. Extras may be dropped when time, sensor or lifecycle changes.
@@ -93,32 +157,37 @@ object AutoPhotos {
     }
 
     internal fun capturedFlag(source: File) = File(source.parentFile, "${source.nameWithoutExtension}.captured")
-    private fun extraFrames(capture: ImageCapture, reference: File, executor: Executor, sensor: String,
-                            activeSensor: () -> String?, ready: () -> Unit) {
+    private fun extraFrames(
+        takePicture: (File, (Result<Unit>) -> Unit) -> Unit,
+        reference: File,
+        handler: Handler,
+        sensor: String,
+        activeSensor: () -> String?,
+        ready: () -> Unit
+    ) {
         acquiring.add(reference.name)
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
         var complete = false
         val finish = Runnable {
             if (!complete) { complete = true; acquiring.remove(reference.name); ready() }
         }
         handler.postDelayed(finish, 1250)
+        fun stillBound() = runCatching(activeSensor).getOrNull() == sensor
         fun next(index: Int) {
             if (complete) return
-            if (index > 2 || activeSensor() != sensor) { handler.removeCallbacks(finish); finish.run(); return }
+            if (index > 2 || !stillBound()) {
+                handler.removeCallbacks(finish)
+                finish.run()
+                return
+            }
             val file = File(reference.parentFile, "${reference.nameWithoutExtension}.extra$index")
             val partial = File(file.parentFile, "${file.name}.part")
-            try {
-                capture.takePicture(ImageCapture.OutputFileOptions.Builder(partial).build(), executor, object : ImageCapture.OnImageSavedCallback {
-                    override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                        if (complete || activeSensor() != sensor || !partial.renameTo(file)) {
-                            partial.delete(); handler.removeCallbacks(finish); finish.run()
-                        } else next(index + 1)
-                    }
-                    override fun onError(exception: ImageCaptureException) {
-                        partial.delete(); handler.removeCallbacks(finish); finish.run()
-                    }
-                })
-            } catch (e: Exception) { partial.delete(); handler.removeCallbacks(finish); finish.run() }
+            requestJpeg(takePicture, partial, handler) { result ->
+                if (result.isFailure || complete || !stillBound() || !partial.renameTo(file)) {
+                    partial.delete()
+                    handler.removeCallbacks(finish)
+                    finish.run()
+                } else next(index + 1)
+            }
         }
         next(1)
     }

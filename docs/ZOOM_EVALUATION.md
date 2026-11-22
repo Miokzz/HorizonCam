@@ -43,6 +43,12 @@ O modo Foto JPEG mantém uma única intenção de zoom e confirma o recorte na s
 - **Isolamento em Camera2.** Quatro ciclos de prévia `0/6` → `0` fecharam o `CameraDevice` antes de soltar as superfícies e aguardaram `onClosed`. Os metadados confirmaram 7,0 mm na tele e 5,4 mm na principal. O fechamento da tele levou 157–167 ms e o da principal, 274–339 ms. O teste de instrumentação passou em 7,913 s. Não houve reinício do HAL no intervalo do teste. O ensaio usou prévia e superfície JPEG configurada, sem disparar fotos.
 - **Retomada.** Integrar o fechamento direto em uma sessão separada para Foto JPEG na tele `0/6` e conservar CameraX nas demais rotas. Repetir no S24 as trocas 3× → 1× e 3× → 0,6× com captura pelo fluxo normal antes de avançar para EIS ou multicâmera simultânea.
 
+### Implementação candidata para a tele
+
+A rota automática Foto JPEG 0/6 do SM-S9210 usa uma sessão Camera2 com prévia 4:3. As demais rotas continuam no CameraX. O handoff espera a disponibilidade do dispositivo ao sair do CameraX e `onClosed` ao sair do Camera2. O JPEG privado usa a mesma fila existente de recorte, restauração e publicação. A câmera só libera captura após quadro real e focal física confirmados. Se o caminho nativo falhar, a saída física anterior continua disponível pelo CameraX.
+
+Build de campo, lint, 107 testes JVM e três testes instrumentados passaram. A instrumentação repetiu quatro ciclos de fechamento Camera2 e validou publicação única, EXIF e limpeza do arquivo parcial por falha. A tela bloqueada do S24 interrompeu o ensaio de interface. Restam alternância, arrastes, reversão, disparos consecutivos, retomada e geometria prévia/JPEG na integração. O ensaio isolado permanece distinto da validação do app.
+
 ## Protocolo de comparação física
 
 1. Use o S24 em um suporte e um motivo plano com linhas finas, letras aleatórias legíveis a curta distância, amostras de cor e textura de tecido. Inclua uma segunda cena com movimento. Repita em luz natural e pouca luz.

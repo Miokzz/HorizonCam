@@ -23,6 +23,9 @@
             android:layout_width="match_parent" android:layout_height="match_parent" android:visibility="gone"
             app:implementationMode="compatible" app:scaleType="fitCenter"
             android:contentDescription="Prévia da foto. Toque para focar; afaste dois dedos para ampliar." />
+        <TextureView android:id="@+id/telePhotoPreview"
+            android:layout_width="match_parent" android:layout_height="match_parent" android:visibility="gone"
+            android:contentDescription="Prévia da foto. Toque para focar; afaste dois dedos para ampliar." />
         <ImageView android:id="@+id/lensTransitionFrame"
             android:layout_width="match_parent" android:layout_height="match_parent"
             android:scaleType="fitXY" android:importantForAccessibility="no" android:visibility="gone" />
