@@ -23,6 +23,9 @@
             android:layout_width="match_parent" android:layout_height="match_parent" android:visibility="gone"
             app:implementationMode="compatible" app:scaleType="fitCenter"
             android:contentDescription="Prévia da foto. Toque para focar; afaste dois dedos para ampliar." />
+        <ImageView android:id="@+id/lensTransitionFrame"
+            android:layout_width="match_parent" android:layout_height="match_parent"
+            android:scaleType="fitXY" android:importantForAccessibility="no" android:visibility="gone" />
         <com.miokzz.horizoncam.ui.CameraGridView android:id="@+id/gridView"
             android:layout_width="match_parent" android:layout_height="match_parent"
             android:importantForAccessibility="no" android:visibility="gone" />
@@ -51,6 +54,10 @@
             <TextView android:id="@+id/zoomReadout" android:layout_width="wrap_content" android:layout_height="24dp" android:gravity="center"
                 android:text="1,0×" android:textColor="@color/white" android:fontFamily="sans-serif-medium" android:textSize="12sp"
                 android:contentDescription="Ampliação atual" />
+            <SeekBar android:id="@+id/zoomSlider" android:layout_width="224dp" android:layout_height="48dp"
+                android:contentDescription="Controle contínuo de zoom"
+                android:progressTint="@color/horizon_yellow" android:thumbTint="@color/horizon_yellow"
+                android:visibility="gone" />
             <LinearLayout android:layout_width="wrap_content" android:layout_height="48dp" android:orientation="horizontal"
                 android:background="@drawable/camera_pill" android:divider="@drawable/control_spacing" android:showDividers="middle">
                 <com.google.android.material.button.MaterialButton android:id="@+id/zoom06Button" style="@style/CameraControl" android:layout_width="48dp" android:layout_height="48dp" android:text="0,6×" android:contentDescription="Zoom 0,6×" />
