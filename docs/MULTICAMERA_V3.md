@@ -34,6 +34,23 @@ A consulta aceitou todas as combinações abaixo em YUV 1440 × 1080. O teste ex
 
 A combinação 2+5 repetiu o recorte físico de 1,397× na ultrawide. Assim, o par pode cobrir uma região de sobreposição, mas o recorte observado não alcança sozinho o campo de 0,6×. O valor de skew 0 no par indica timestamps iguais, sem provar fase de exposição. Nos três cenários restantes, buffers recebidos e consultas positivas deixaram a simultaneidade física completa sem evidência suficiente.
 
+### Foto e vídeo com as superfícies de cada modo
+
+As duas provas instrumentadas passaram por ADB Wi-Fi em 27,727 s. As imagens e a saída AVC foram descartadas em memória.
+
+Em Foto, uma abertura de `0` e uma sessão com YUV 1440 × 1080 e JPEG 4080 × 3060 confirmaram 2,2 mm, 5,4 mm e 7,0 mm no EXIF de 0,6×, 1× e 3×. O crop reportado coincidiu nos pares prévia/JPEG do mesmo timestamp. A correlação normalizada de luminância foi 0,983, 0,979 e 0,983. A melhor solução da busca em escala e deslocamento foi a identidade na grade usada. Cada JPEG saiu em 192–198 ms após o pedido de teste. As dimensões do JPEG lógico representam a saída do HAL. O ensaio não comparou resolução óptica, nitidez ou alcance total contra a rota física, e o zoom nativo publicado terminou em 10×.
+
+Em Vídeo, uma superfície de prévia PRIV 1280 × 720 e uma entrada real do MediaCodec AVC `c2.qti.avc.encoder` funcionaram nas quatro configurações. Cada configuração manteve uma única sessão durante 0,6×/1×/3×, confirmou os sensores 2/5/6 e manteve PTS monotônicos. O primeiro resultado com zoom aplicado nas duas trocas ocorreu em 112–233 ms. Esse tempo mede metadados do sensor, sem incluir toda a latência até a tela.
+
+| Configuração solicitada | Cadência AVC da sessão | Evidência e limite |
+| --- | --- | --- |
+| FHD/30 | 29,94 fps | Três sensores, sem parada acima de 750 ms. |
+| FHD/60 | 59,42 fps | Três sensores. Houve intervalos de até 41,71 ms na prévia em 3×. |
+| 4K/30 | 30,03 fps | Três sensores, sem parada acima de 750 ms. |
+| 4K/60 | 58,66 fps | Três sensores. Em 3×, o AVC mediu 57,45 fps e teve intervalos de até 33,32 ms. |
+
+A prova de vídeo usou AVC SDR, sem áudio, EIS, Horizon Lock ou arquivo final. Ela demonstra viabilidade do caminho lógico em períodos curtos. A produção ainda precisa validar sincronismo de áudio, qualidade visual, estabilização, cadência sustentada, consumo e temperatura.
+
 ## Prova de alinhamento fora do aplicativo
 
 `tools/calibration/compare_lens_transition.py` comparou os JPEGs originais da calibração existente, na mesma cena estática, com largura normalizada em 960 px. O ajuste da homografia e o teste geométrico usaram pontos diferentes. O ajuste simples de cor por canal e a avaliação usaram blocos alternados. Nenhum pixel da cena foi incluído no Git.
@@ -57,7 +74,15 @@ Para reproduzir com um alvo plano consentido, use `python tools/calibration/comp
 
 Foto pode usar um segundo fluxo de baixa resolução para alinhar a prévia, mantendo o JPEG de resolução completa na lente confirmada. Uma futura fusão requer amostras sincronizadas, coerência de cor e confiança contra oclusão. Vídeo requer superfície persistente do encoder, PTS monotônicos, áudio contínuo e recorte no mesmo espaço usado pelo EIS e Horizon Lock.
 
-A primeira composição experimental deve aproveitar OpenGL e as superfícies existentes. Aplicar correções com as texturas na GPU evita copiar cada par para a CPU. Duas entradas YUV 4:2:0 em 1080p60 representam aproximadamente 373 MB/s de payload sem padding nem conversão. Vulkan merece comparação se o perfil medir gargalo de GPU ou cópias que o pipeline OpenGL não possa evitar.
+A primeira composição experimental deve aproveitar OpenGL e as superfícies existentes. Aplicar correções com as texturas na GPU evita copiar cada par para a CPU. Duas entradas YUV 4:2:0 em 1080p60 representam aproximadamente 373 MB/s de payload sem padding nem conversão. Vulkan merece comparação se o perfil medir gargalo de GPU ou cópias que o pipeline OpenGL não possa evitar. O caminho Vulkan requer importação e suporte efetivo do formato de buffer. [SurfaceTexture no OpenGL ES](https://developer.android.com/reference/android/graphics/SurfaceTexture) · [Importação de AHardwareBuffer no Vulkan](https://docs.vulkan.org/refpages/latest/refpages/source/VK_ANDROID_external_memory_android_hardware_buffer.html)
+
+Na rota lógica, `CONTROL_SETTINGS_OVERRIDE` com `ZOOM` é uma opção de latência a medir somente se o dispositivo anunciar o valor e devolver evidência por frame. O pedido mais recente continua prevalecendo, e o disparo depende de confirmação do campo aplicado. [Camera2 settings override](https://developer.android.com/reference/android/hardware/camera2/CaptureRequest#CONTROL_SETTINGS_OVERRIDE)
+
+## Arquitetura escolhida para prototipagem
+
+Começar por uma sessão lógica persistente separada por modo. Em Foto, usar prévia e JPEG confirmados e manter o processamento privado e a publicação atuais. Em Vídeo, manter o encoder na sessão durante a troca e medir áudio e EIS separadamente. Validar primeiro o campo de 0,6× contra a câmera direta e o recorte total até 30×. Se qualquer patamar perder focal, campo ou cadência, usar a rota já validada daquele modo.
+
+Experimentar a sobreposição de 2+5 apenas perto da fronteira de 1×, caso a prova de movimento demonstre ganho qualificado. Experimentos com 5+6 exigem confirmar os dois fluxos e a fase óptica. A medição atual favorece a sessão lógica para a primeira implementação experimental e mantém a troca física validada como fallback do aplicativo.
 
 ## Critérios para a próxima prova
 

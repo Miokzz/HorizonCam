@@ -16,7 +16,7 @@ O runtime ofereceu 13 perfis personalizados. Os cinco Android foram lidos em `.c
 
 Os oito perfis web continuam disponíveis. `web-art-director` atende direção de arte, `web-frontend` implementa interfaces, `web-motion-3d` cobre animação e 3D, `web-seo-growth` cobre SEO, `web-backend-security` cobre APIs e segurança, `web-performance` cobre desempenho, `web-qa` revisa e `web-release` valida entregas. A auditoria usou os especialistas Android.
 
-Os TOMLs global e de projeto registram GPT-6.2 Astra `xhigh` para o principal. O histórico registra Astra `xhigh` em três turnos anteriores e Sol `xhigh` a partir de 09h23. A seleção ativa da sessão prevaleceu. Os dois subagentes desta auditoria receberam as instruções e os modelos dos respectivos perfis no runtime. A telemetria independente do backend dos filhos ficou indisponível.
+Os TOMLs global e de projeto registram GPT-6.2 Astra `xhigh` para o principal. O histórico registra Astra `xhigh` em três turnos anteriores e Sol `xhigh` a partir de 09h23. A seleção ativa da sessão prevaleceu. Os registros de `turn_context` dos turnos próprios dos agentes confirmaram Sol `xhigh` para óptica e neural, e Sol `medium` para QA. O registro inicial herdado do principal aparece nos arquivos e foi excluído da confirmação de modelo do filho. Os registros confirmam o modelo e esforço selecionados pelo runtime.
 
 ## Skills
 
