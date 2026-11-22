@@ -46,9 +46,23 @@ data class ReconstructionPlan(val prior: PhotoPrior, val guideW: Int, val guideH
  * structure. Color/chroma is constrained using local signal, not a single global blend.
  */
 object DetailTransfer {
+    enum class LocalStructure { UNKNOWN, FLAT, COHERENT_EDGE }
+
+    /** Uses the captured neighborhood before interpolation or neural prediction. */
+    fun structure(topLeft: Int, topRight: Int, bottomLeft: Int, bottomRight: Int,
+                  range: Int, noiseFloor: Int): LocalStructure {
+        if (range <= noiseFloor) return LocalStructure.FLAT
+        fun agrees(a: Int, b: Int): Boolean =
+            (a >= noiseFloor && b >= noiseFloor) || (a <= -noiseFloor && b <= -noiseFloor)
+        return if (agrees(topRight - topLeft, bottomRight - bottomLeft) ||
+            agrees(bottomLeft - topLeft, bottomRight - topRight)) LocalStructure.COHERENT_EDGE
+        else LocalStructure.UNKNOWN
+    }
+
     fun pixel(base: Int, low: Int, prediction: Int, leftY: Int, rightY: Int, upY: Int, downY: Int,
               zoom: Float, scene: SceneEvidence, blind: Boolean, nativeSampling: Boolean,
-              measuredMinY: Int = 0, measuredMaxY: Int = 255, priorMeanY: Int = -1): Int {
+              measuredMinY: Int = 0, measuredMaxY: Int = 255, priorMeanY: Int = -1,
+              structure: LocalStructure = LocalStructure.UNKNOWN): Int {
         val y = y(base)
         val lx = abs(leftY-rightY)
         val ly = abs(upY-downY)
@@ -85,7 +99,12 @@ object DetailTransfer {
         }
         // The native-size validation sweep favoured half the neural correction and
         // at most 5% attenuation of the spatial detail measured in the capture.
-        val injection = if (nativeSampling) strength * 0.5f else strength
+        val structureWeight = when (structure) {
+            LocalStructure.FLAT -> 0.35f
+            LocalStructure.COHERENT_EDGE -> 0.60f
+            LocalStructure.UNKNOWN -> 1f
+        }
+        val injection = if (nativeSampling) strength * 0.5f else strength * structureWeight
         val loss = if (nativeSampling) min(remove, 0.05f) else remove
         // Anchor the learned subpixel detail in the local measured tone. The prior mean is
         // measured after reducing the neural output to the native grid once.
@@ -100,11 +119,12 @@ object DetailTransfer {
         // The envelope is measured on the original 3x3 neighborhood.
         val weak = !nativeSampling && (measuredRange <= 12 ||
             neutral && (measuredRange <= 48 || !reliable && y >= 128 && measuredRange <= 72))
-        val tolerance = max(3f, min(8f, measuredRange * 0.10f))
-        val correction = if (weak) proposed.coerceIn(
+        val tolerance = if (structure == LocalStructure.UNKNOWN) max(3f, min(8f, measuredRange * 0.10f)) else 3f
+        val correction = if (weak || structure != LocalStructure.UNKNOWN) proposed.coerceIn(
             measuredMinY - tolerance - y, measuredMaxY + tolerance - y) else proposed
         val chromaWeight = when {
-            weak -> 0f
+            weak || structure == LocalStructure.FLAT -> 0f
+            structure == LocalStructure.COHERENT_EDGE -> injection * 0.18f
             !nativeSampling && skin && measuredRange <= 24 -> injection * 0.18f
             else -> injection * 0.46f
         }

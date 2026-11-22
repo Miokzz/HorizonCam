@@ -68,4 +68,26 @@ Samsung divulga ProVisual, AI ISP e Nightography. O material sobre sensores e zo
 - Medir primeiro unidades com referência independente em 3×, 10×, 20× e 30×, incluindo chart de texto e bordas, superfícies complexas, pelo, inseto e folhagem. Incluir 0,6× e 1× para desempenho, pele e preservação de detalhe nativo.
 - Tratar PSNR, SSIM e LPIPS como métricas com referência alinhada. Medir erro de caracteres e deslocamento de bordas, overshoot e undershoot, cor e ruído em patches, e detalhamento de textura. Compare A/B cego em tamanho equivalente para identificar alucinações e ghosting. A câmera Samsung serve de comparador de campo com exposição, distância e FOV registrados.
 - Exigir ganho por categoria sem regressão em texto e rostos antes de uma mudança padrão. Medir tempo frio e quente, mediana e P95, pico de memória quando mensurável e status térmico em série. Conferir backend efetivo e um JPEG público por disparo.
-- O replay Android atual usa ampliação 1× e ISO 400 por padrão. O passo experimental é admitir 2×/4× medidos e repetir o caminho real no mesmo JPEG. `benchmark_adaptive_transfer.py` fornece triagem de textura e PSNR/SSIM/LPIPS no host, com reimplementação aproximada da composição Android. Seus outros recortes das mesmas fotos servem de controle por recorte. Use cenas novas para avaliação independente.
+- O replay Android admite ampliações de 2×/4× no mesmo JPEG. `benchmark_adaptive_transfer.py` fornece triagem de textura e PSNR/SSIM/LPIPS no host, com reimplementação aproximada da composição Android. Seus outros recortes das mesmas fotos servem de controle por recorte. Use cenas novas para avaliação independente.
+
+## Experimento de proteção local
+
+O protótipo de composição calcula um mapa a partir do recorte original. Regiões quase planas recebem menos luminância residual e conservam o croma medido. Bordas com gradientes concordantes em um eixo recebem um envelope mais restrito e menor contribuição do croma estimado. As demais regiões seguem a regra atual. Pesos, tiles, GPU e enquadramento são iguais entre as variantes. O mapa usa pixel e ruído estimado, com reconhecimento de objetos ainda fora deste experimento.
+
+`RestorationDeviceTest#compareLocalStructureOnMatchedInputs` foi executado no S24 com `horizonStructure=yes`. Rodou as seis políticas de zoom com JPEGs de teste, saídas de 192 × 256 e referência conhecida. A variante atua em saídas ampliadas: 2× em 10× e 4× em 20× e 30×. Os níveis 0,6×, 1× e 3× serviram de baseline na escala nativa. A prova de 30× usou compressão JPEG adicional na amostra. Os níveis são parâmetros da restauração, separados da validação óptica feita em campo.
+
+| Cena | Zoom | Bilinear | Produção | Proteção local |
+| --- | --- | ---: | ---: | ---: |
+| Carta de texto e linhas | 10× | 22,90 | 25,66 | 25,03 |
+| Carta de texto e linhas | 20× | 19,51 | 17,92 | 18,35 |
+| Carta de texto e linhas | 30× | 19,46 | 17,96 | 18,41 |
+| Rosto NASA | 10× | 37,63 | 36,72 | 38,00 |
+| Rosto NASA | 20× | 32,10 | 31,93 | 32,85 |
+| Rosto NASA | 30× | 31,26 | 31,63 | 32,10 |
+| Detalhe NASA | 10× | 36,56 | 34,96 | 35,95 |
+| Detalhe NASA | 20× | 31,57 | 30,33 | 31,20 |
+| Detalhe NASA | 30× | 30,32 | 29,66 | 30,23 |
+
+Os valores são PSNR em dB. O candidato melhorou oito das nove comparações com a produção e perdeu 0,63 dB na carta em 10×. Em carta e detalhe de 20×/30×, o bilinear ainda teve maior PSNR. A variante permanece disponível apenas para replay e ensaio instrumentado. O próximo A/B deve comparar a proteção contra uma atenuação uniforme, medir erro de caracteres e halos e usar cenas de vegetação, insetos e arquitetura com referência independente. O reaproveitamento dos mesmos JPEGs em `FieldReplayTest` agora permite especificar `upscale`, `iso` e `structure`.
+
+Build de campo, lint, 110 testes JVM e três testes instrumentados passaram. Os dois ensaios de publicação cobriram callback duplicado com recuperação e falha de captura. O A/B usou QuickSRNet na GPU com precisão estrita solicitada em 0,6×/1×, e Real-ESRGAN com FP16 permitido nos recortes ampliados. A calibração fria e a ordem fixa das variantes afetam o tempo. As leituras pontuais de PSS não medem pico. O SHA-256 do APK foi `89ed012bc514eafae8d333cab0ba599c3da8cab5dd2659e81fcc83cdbfda7555`.

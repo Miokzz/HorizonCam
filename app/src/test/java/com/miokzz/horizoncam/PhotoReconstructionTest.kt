@@ -67,6 +67,18 @@ class PhotoReconstructionTest {
         assertTrue(darker < restored(101, -1))
     }
 
+    @Test fun localStructureProtectionConstrainsUnsupportedResidualInEitherPolarity() {
+        assertEquals(DetailTransfer.LocalStructure.FLAT, DetailTransfer.structure(97, 101, 102, 103, 6, 8))
+        assertEquals(DetailTransfer.LocalStructure.UNKNOWN, DetailTransfer.structure(140, 70, 70, 140, 70, 8))
+        val edge = DetailTransfer.structure(100, 144, 101, 143, 46, 8)
+        assertEquals(DetailTransfer.LocalStructure.COHERENT_EDGE, edge)
+        for ((tone, prediction) in listOf(100 to 45, 144 to 199)) {
+            val guarded = DetailTransfer.pixel(gray(tone), gray(tone), gray(prediction), tone, tone, tone, tone,
+                30f, daylight, true, false, 100, 144, tone, edge)
+            assertTrue(DetailTransfer.y(guarded) in 97..147)
+        }
+    }
+
     @Test fun provenanceDescribesOnlyProcessingThatOccurred() {
         fun description(model: String?, frames: Int, scale: Int) =
             PhotoProvenance.describe(model, frames, 30f, 296, 394, 296 * scale, 394 * scale)

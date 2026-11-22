@@ -12,7 +12,9 @@ import com.miokzz.horizoncam.ai.InferenceRuntime
 import com.miokzz.horizoncam.ai.NativeRestorer
 import com.miokzz.horizoncam.ai.PhotoPrior
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
 import kotlin.math.log10
 
 /** Matched public-domain crops with fixed blur, noise and JPEG degradation.
@@ -119,6 +121,82 @@ class RestorationDeviceTest {
                 }
             }
         } finally { truth.recycle() }
+    }
+
+    @Test fun compareLocalStructureOnMatchedInputs() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("horizonStructure") == "yes")
+        val runner = InstrumentationRegistry.getInstrumentation()
+        val levels = listOf(0.6f to 1, 1f to 1, 3f to 1, 10f to 2, 20f to 4, 30f to 4)
+        val fixtures = listOf("chart", "face", "detail")
+        for (fixture in fixtures) {
+            val dimensions = 192 to 256
+            val truth = if (fixture == "chart") mixedContrastChart(dimensions.first, dimensions.second) else {
+                val asset = runner.context.assets.open("quality/astronaut_$fixture-truth.png").use(BitmapFactory::decodeStream)
+                val resized = Bitmap.createScaledBitmap(asset, dimensions.first, dimensions.second, true)
+                if (asset !== resized) asset.recycle()
+                resized
+            }
+            try {
+                for ((zoom, scale) in levels) {
+                    val source = degradedInput(truth, scale, if (zoom == 30f) 74 else 86)
+                    val bilinear = Bitmap.createScaledBitmap(source, truth.width, truth.height, true)
+                    try {
+                        val modes = if (scale == 1) listOf(false) else listOf(false, true)
+                        for (guard in modes) NativeRestorer.restore(runner.targetContext, source, zoom, 800, scale,
+                            {}, { false }, protectLocalStructure = guard).use { result ->
+                            assertEquals(truth.width, result.bitmap.width)
+                            assertEquals(truth.height, result.bitmap.height)
+                            assertTrue(result.usedNeuralModel)
+                            val score = psnr(result.bitmap, truth)
+                            assertTrue(score.isFinite())
+                            val line = "HC_CONTEXT fixture=$fixture zoom=$zoom scale=$scale guard=$guard " +
+                                "source=${source.width}x${source.height} psnr=$score bilinear=${psnr(bilinear, truth)} " +
+                                "backend=${result.backend} tiles=${result.tiles} wallMs=${result.elapsedMs} " +
+                                "inferMs=${result.inferenceMs} pssKiB=${android.os.Debug.getPss()}"
+                            runner.sendStatus(0, Bundle().apply { putString("stream", "\n$line\n") })
+                        }
+                    } finally {
+                        if (bilinear !== source) bilinear.recycle()
+                        source.recycle()
+                    }
+                }
+            } finally { truth.recycle() }
+        }
+    }
+
+    private fun mixedContrastChart(width: Int, height: Int): Bitmap {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.MONOSPACE }
+        canvas.drawColor(Color.rgb(215, 221, 229))
+        paint.color = Color.rgb(53, 62, 77)
+        canvas.drawRect(0f, 0f, width.toFloat(), height / 2f, paint)
+        val labels = listOf("HC 2958", "3B 6071", "Sz 1805", "qe 3284")
+        for (index in labels.indices) {
+            paint.color = listOf(Color.WHITE, Color.rgb(92, 105, 115), Color.BLACK, Color.rgb(176, 183, 193))[index]
+            paint.textSize = listOf(23f, 15f, 18f, 12f)[index]
+            canvas.drawText(labels[index], 12f, listOf(35f, 88f, 165f, 220f)[index], paint)
+        }
+        paint.color = Color.rgb(110, 36, 28)
+        paint.strokeWidth = 1.5f
+        for (i in 0..8) canvas.drawLine(115f + 6f * i, 144f, 102f + 6f * i, 243f, paint)
+        return bitmap
+    }
+
+    private fun degradedInput(truth: Bitmap, scale: Int, jpegQuality: Int): Bitmap {
+        val divisor = maxOf(2, scale)
+        val sampled = Bitmap.createScaledBitmap(truth, truth.width / divisor, truth.height / divisor, true)
+        val framed = if (scale == 1) Bitmap.createScaledBitmap(sampled, truth.width, truth.height, true) else sampled
+        return try {
+            val bytes = ByteArrayOutputStream().use { output ->
+                check(framed.compress(Bitmap.CompressFormat.JPEG, jpegQuality, output))
+                output.toByteArray()
+            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } finally {
+            if (framed !== sampled) framed.recycle()
+            sampled.recycle()
+        }
     }
 
     private fun psnr(a: Bitmap, b: Bitmap): Double {
