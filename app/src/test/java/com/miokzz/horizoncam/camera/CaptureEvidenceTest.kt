@@ -49,19 +49,29 @@ class CaptureEvidenceTest {
         assertNull(evidence.activePhysicalId())
     }
 
-    @Test fun automaticSessionRecoveryAcceptsResetFrameNumbersAndIgnoresOldClose() {
+    @Test fun firstRealCaptureSessionBindsWithoutConfigurationCallback() {
+        val token = evidence.reset()
+        val session = Any()
+        assertTrue(evidence.beginSession(token, session, 500L))
+        assertTrue(evidence.record(token, 1, "tele", session, 500L))
+        assertEquals("tele", evidence.activePhysicalId())
+    }
+
+    @Test fun aNewerRealSessionAcceptsResetFrameNumbersAndIgnoresOldCallbacks() {
         val token = evidence.reset()
         val firstSession = Any()
         val secondSession = Any()
-        evidence.beginSession(token, firstSession)
-        evidence.record(token, 1000, "main", firstSession)
-        evidence.beginSession(token, secondSession)
+        evidence.beginSession(token, firstSession, 500L)
+        evidence.record(token, 1000, "main", firstSession, 600L)
+        assertFalse(evidence.beginSession(token, secondSession, 510L))
+        assertTrue(evidence.beginSession(token, secondSession, 700L))
         assertNull(evidence.activePhysicalId())
-        evidence.record(token, 1, "ultra", secondSession)
-        evidence.endSession(token, firstSession)
+        evidence.record(token, 1, "ultra", secondSession, 700L)
+        assertFalse(evidence.clear(token, firstSession))
+        assertFalse(evidence.beginSession(token, firstSession, 800L))
         evidence.record(token, 1001, "main", firstSession)
         assertEquals("ultra", evidence.activePhysicalId())
-        evidence.endSession(token, secondSession)
+        evidence.reset()
         evidence.record(token, 2, "ultra", secondSession)
         assertNull(evidence.activePhysicalId())
     }

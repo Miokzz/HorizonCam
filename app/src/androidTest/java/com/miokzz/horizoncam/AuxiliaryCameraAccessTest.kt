@@ -17,6 +17,7 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.util.concurrent.CompletableFuture
@@ -25,6 +26,12 @@ import java.util.concurrent.TimeUnit
 /** Explicit field run. Open under the target package and capture a private in-memory JPEG. */
 @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 class AuxiliaryCameraAccessTest {
+    private data class JpegResult(val cameraId: String, val size: android.util.Size, val focal: Float?,
+        val physicalFocal: Float?, val exifFocal: Double, val active: String?) {
+        override fun toString() = "opened=$cameraId jpeg=$size focalResult=$focal " +
+            "physicalFocal=$physicalFocal focalExif=$exifFocal active=$active"
+    }
+
     @Test fun captureWithPublicCamera2() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("auxProbe") == "yes")
         val runner = InstrumentationRegistry.getInstrumentation()
@@ -45,12 +52,22 @@ class AuxiliaryCameraAccessTest {
                 // Querying metadata, enumeration and opening are independent observations.
                 val result = runCatching { probe(manager, id, characteristics.getOrNull(), handler) }
                 report("id=$id listed=${id in ids} meta=${characteristics.isSuccess} " +
-                    (result.getOrNull() ?: "failed=${result.exceptionOrNull()}"))
+                    (result.getOrNull()?.toString() ?: "failed=${result.exceptionOrNull()}"))
                 if (id == "0") assertTrue("Control camera 0: $result", result.isSuccess)
             }
-            if ("6" in manager.getCameraCharacteristics("0").physicalCameraIds) {
+            val expectS24Tele = InstrumentationRegistry.getArguments().getString("requireS24Tele") == "yes"
+            val hasTeleMember = "6" in manager.getCameraCharacteristics("0").physicalCameraIds
+            if (expectS24Tele) assertTrue("The S24 firmware did not advertise the physical tele member", hasTeleMember)
+            if (hasTeleMember) {
                 val direct = runCatching { probe(manager, "0", manager.getCameraCharacteristics("6"), handler, "6") }
-                report("physical=0/6 " + (direct.getOrNull() ?: "failed=${direct.exceptionOrNull()}"))
+                report("physical=0/6 " + (direct.getOrNull()?.toString() ?: "failed=${direct.exceptionOrNull()}"))
+                if (expectS24Tele) {
+                    val jpeg = direct.getOrThrow()
+                    assertEquals("0", jpeg.cameraId)
+                    assertEquals("6", jpeg.active)
+                    assertEquals(7.0, jpeg.physicalFocal?.toDouble() ?: 0.0, 0.05)
+                    assertEquals(7.0, jpeg.exifFocal, 0.05)
+                }
             }
         } finally { thread.quitSafely(); thread.join(2000) }
     }
@@ -58,7 +75,7 @@ class AuxiliaryCameraAccessTest {
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
     private fun probe(manager: CameraManager, id: String, chars: CameraCharacteristics?, handler: Handler,
-                      physicalId: String? = null): String {
+                      physicalId: String? = null): JpegResult {
         val opened = CompletableFuture<CameraDevice>()
         val closed = CompletableFuture<Unit>()
         manager.openCamera(id, object : CameraDevice.StateCallback() {
@@ -121,9 +138,10 @@ class AuxiliaryCameraAccessTest {
                             }
                         }, handler)
                         val result = frame.get(6, TimeUnit.SECONDS)
-                        return "opened=${device.id} jpeg=$size focalResult=${result.get(CaptureResult.LENS_FOCAL_LENGTH)} " +
-                            "physicalFocal=${result.physicalCameraResults[physicalId]?.get(CaptureResult.LENS_FOCAL_LENGTH)} " +
-                            "focalExif=${imageFocal.get(6, TimeUnit.SECONDS)} active=${result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)}"
+                        return JpegResult(device.id, size, result.get(CaptureResult.LENS_FOCAL_LENGTH),
+                            physicalId?.let { result.physicalCameraResults[it]?.get(CaptureResult.LENS_FOCAL_LENGTH) },
+                            imageFocal.get(6, TimeUnit.SECONDS),
+                            result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID))
                     }
                 } finally { preview?.release(); texture?.release() }
             }

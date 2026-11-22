@@ -173,7 +173,10 @@ class RearLensManager private constructor(
                     if (session.device.id != option.cameraId) return
                     synchronized(this@RearLensManager) {
                         val reported = result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)
-                        if (selected?.key != option.key || !evidence.record(token, result.frameNumber, reported, session)) return
+                        if (selected?.key != option.key) return
+                        val timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP)
+                        if (evidence.beginSession(token, session, timestamp)) clearTelemetry()
+                        if (!evidence.record(token, result.frameNumber, reported, session, timestamp)) return
                         val data = measure(option, request, result, reported)
                         if (data.stillCapture) lastStillCapture = data else telemetry = data
                         if (!data.stillCapture) onNativeVideoStabilization(nativeStabilization(
@@ -182,25 +185,20 @@ class RearLensManager private constructor(
                 }
 
                 override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest,
-                    failure: CaptureFailure) = clearSession(token, session, close = false)
+                    failure: CaptureFailure) = clearFrame(session)
 
                 override fun onCaptureSequenceAborted(session: CameraCaptureSession,
-                    sequenceId: Int) = clearSession(token, session, close = false)
-            })
-            .setSessionStateCallback(object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(session: CameraCaptureSession) {
+                    sequenceId: Int) = clearFrame(session)
+
+                private fun clearFrame(session: CameraCaptureSession) {
                     synchronized(this@RearLensManager) {
-                        if (evidence.beginSession(token, session)) clearTelemetry()
+                        if (evidence.clear(token, session)) {
+                            clearTelemetry()
+                            onNativeVideoStabilization(null)
+                        }
                     }
                 }
-                override fun onConfigureFailed(session: CameraCaptureSession) = clearSession(token, session, close = true)
-                override fun onClosed(session: CameraCaptureSession) = clearSession(token, session, close = true)
             })
-    }
-
-    @Synchronized private fun clearSession(token: Long, session: CameraCaptureSession, close: Boolean) {
-        val accepted = if (close) evidence.endSession(token, session) else evidence.clear(token, session)
-        if (accepted) clearTelemetry()
     }
 
     @Suppress("DEPRECATION")

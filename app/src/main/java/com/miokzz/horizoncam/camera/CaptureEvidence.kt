@@ -7,6 +7,8 @@ class CaptureEvidence(private val nowMillis: () -> Long, private val maxAgeMilli
     private var physicalId: String? = null
     private var receivedAt: Long? = null
     private var sessionIdentity: Any? = null
+    private var newestSensorTimestamp: Long? = null
+    private val previousSessions = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
 
     @Synchronized fun reset(): Long {
         generation++
@@ -14,11 +16,20 @@ class CaptureEvidence(private val nowMillis: () -> Long, private val maxAgeMilli
         physicalId = null
         receivedAt = null
         sessionIdentity = null
+        newestSensorTimestamp = null
+        previousSessions.clear()
         return generation
     }
 
-    @Synchronized fun beginSession(token: Long, session: Any): Boolean {
-        if (token != generation || sessionIdentity === session) return false
+    /** CameraX can pass a placeholder to onConfigured. Learn the session from its frames. */
+    @Synchronized fun beginSession(token: Long, session: Any, sensorTimestamp: Long?): Boolean {
+        if (token != generation || sessionIdentity === session || session in previousSessions) return false
+        val previous = sessionIdentity
+        if (previous != null) {
+            val previousTime = newestSensorTimestamp ?: return false
+            if (sensorTimestamp == null || sensorTimestamp <= previousTime) return false
+            previousSessions.add(previous)
+        }
         sessionIdentity = session
         lastFrame = -1L
         physicalId = null
@@ -26,9 +37,13 @@ class CaptureEvidence(private val nowMillis: () -> Long, private val maxAgeMilli
         return true
     }
 
-    @Synchronized fun record(token: Long, frame: Long, reportedPhysicalId: String?, session: Any? = null): Boolean {
+    @Synchronized fun record(token: Long, frame: Long, reportedPhysicalId: String?, session: Any? = null,
+        sensorTimestamp: Long? = null): Boolean {
         if (token != generation || sessionIdentity !== session || frame <= lastFrame) return false
         lastFrame = frame
+        if (sensorTimestamp != null && sensorTimestamp > (newestSensorTimestamp ?: 0L)) {
+            newestSensorTimestamp = sensorTimestamp
+        }
         // Null on a new result MUST clear the previous ID.
         physicalId = reportedPhysicalId?.takeIf { it.isNotBlank() }
         receivedAt = nowMillis()
@@ -39,15 +54,6 @@ class CaptureEvidence(private val nowMillis: () -> Long, private val maxAgeMilli
         if (token != generation || sessionIdentity !== session) return false
         physicalId = null
         receivedAt = null
-        return true
-    }
-
-    @Synchronized fun endSession(token: Long, session: Any): Boolean {
-        if (token != generation || sessionIdentity !== session) return false
-        sessionIdentity = null
-        physicalId = null
-        receivedAt = null
-        lastFrame = -1L
         return true
     }
 
