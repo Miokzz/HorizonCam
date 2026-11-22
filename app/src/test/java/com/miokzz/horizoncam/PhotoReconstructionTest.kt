@@ -80,5 +80,10 @@ class PhotoReconstructionTest {
         assertEquals(PhotoProvenance.Kind.NEURAL, PhotoProvenance.classify(neural))
         assertTrue("frames=2 | input/output 296x394 -> 1184x1576" in neural)
         assertEquals(PhotoProvenance.Kind.CAMERA, PhotoProvenance.classify(""))
+        val resized = PhotoProvenance.describe(null, 1, 30f, 264, 353, 1056, 1412,
+            conventionalResize = true)
+        assertEquals(PhotoProvenance.Kind.RESIZED, PhotoProvenance.classify(resized))
+        assertTrue("input/output 264x353 -> 1056x1412" in resized)
+        assertFalse("textura estimada" in resized)
     }
 }

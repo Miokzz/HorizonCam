@@ -1,5 +1,18 @@
 # HorizonCam V3 — checkpoint de desenvolvimento
 
+## Retomada em 22/11/2026
+
+Base `ea2ec3e524e574405f09bf0b27ab285f44a3d50a`, branch remota `backup/horizoncam-v3-20261122`.
+
+- O Horizon AI voltou a executar QuickSRNet e Real-ESRGAN em GPU após a correção da posição do buffer de referência. O fallback pode ampliar por interpolação bilinear e identifica esse processamento no EXIF. As quatro capturas de campo em 3×, 10×, 20× e 30× registraram restauração neural. Em 30× a saída foi 1056 × 1412, a partir de 264 × 353 pixels do recorte. [Medições](HORIZON_AI.md)
+- Foto usa substituição de sessão do CameraX e agrupa pedidos do slider em movimento. No ensaio rápido, o retorno à prévia confirmada durante a troca no arraste passou de 1,90 s para 0,83 s. O slider trabalha em décimos, com retenção temporária nos inteiros. A gravação confirmou alteração da escala enquanto o dedo ainda se movia. O JPEG de regressão confirmou a lente física 6, com focal de 7,0 mm. [Medições](ZOOM_EVALUATION.md)
+- O perfil novo de 30× mediu 16,78 s até a galeria. A aquisição, incluindo quadros adicionais, levou 858 ms. A espera na fila foi 60 ms, a decodificação da referência 108 ms, a etapa multiframe 11,90 s, a restauração 3,49 s, a codificação 26 ms e a publicação 73 ms. A etapa multiframe inclui leitura, alinhamento e fusão dos quadros adicionais.
+- Build de campo, APK instrumentado, lint e 104 testes JVM passaram. No S24 passaram seis testes de backend, restauração e publicação na primeira rodada e cinco de texto e publicação na rodada seguinte. O teste de arraste e a foto de regressão de 3× também passaram.
+
+**Próxima tarefa.** Medir separadamente leitura, alinhamento e composição da etapa multiframe. Testar um caminho rápido para deslocamentos inteiros na correlação, preservando a busca subpixel e os critérios de fusão. Comparar latência e qualidade com os mesmos quadros. A ultrawide independente ainda chegou a 1,34 s. A fidelidade do texto sintético a 20× e 30× ficou ligeiramente abaixo da bilinear. EIS e Horizon Lock ficam para a etapa separada.
+
+## Histórico · 21/11/2026
+
 21 de novembro de 2026 · branch `phase-1/camera` · base publicada antes deste checkpoint `650059833c81ae1c0e530ae266e0b565c4fa1f97`.
 
 Este ponto de retomada reúne o trabalho local da Horizon AI 2.0, as alterações de câmera e publicação, os testes e o Pack V6. As medições físicas abaixo identificam a versão ensaiada. As imagens do S24 e os logs brutos ficam fora do Git.

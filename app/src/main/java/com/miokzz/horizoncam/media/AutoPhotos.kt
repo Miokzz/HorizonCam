@@ -8,6 +8,7 @@ import android.graphics.ImageDecoder
 import android.media.ExifInterface
 import android.net.Uri
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import androidx.camera.core.ImageCapture
@@ -137,7 +138,8 @@ object AutoPhotos {
 
     private fun enqueue(context: Context, file: File) {
         val request = OneTimeWorkRequestBuilder<AutoPhotoWorker>()
-            .setInputData(Data.Builder().putString("source", file.name).build()).build()
+            .setInputData(Data.Builder().putString("source", file.name)
+                .putLong("enqueuedAtMs", System.currentTimeMillis()).build()).build()
         // Workers drain in capture order. Recovery may append an already-completed source;
         // its private file is removed only after durable publication, making that entry a no-op.
         WorkManager.getInstance(context).enqueueUniqueWork("horizon-photo-queue", ExistingWorkPolicy.APPEND_OR_REPLACE, request)
@@ -158,9 +160,14 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         val parts = name.split('_')
         val crop = if (parts.size == 4) Float.fromBits(parts[2].toInt()) else 1f
         val marker = File(file.parentFile, "${file.nameWithoutExtension}.uri")
+        val shutterAt = name.substringBefore('_').toLong()
+        val queuedAt = inputData.getLong("enqueuedAtMs", 0L)
+        val workerAt = System.currentTimeMillis()
+        val referenceWrittenAt = file.lastModified()
         return try {
             val encoded = AutoPhotos.encodedFor(file)
             val previous = findReservation(file, marker)
+            var publishAt = SystemClock.elapsedRealtime()
             val saved = if (previous != null && published(previous)) previous else {
                 if (!encoded.isFile) {
                     val useCaptured = AutoPhotos.capturedFlag(file).isFile
@@ -182,6 +189,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                     } finally { temp.delete() }
                 }
                 if (isStopped) throw CancellationException()
+                publishAt = SystemClock.elapsedRealtime()
                 val target = previous ?: reserve(file, marker)
                 // Only open the public row after the final JPEG (including EXIF) is durable.
                 // A transient MediaStore failure retries publication, never discards the inference.
@@ -195,6 +203,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             val provenance = PhotoProvenance.classify(description)
             val message = when (provenance) {
                 PhotoProvenance.Kind.NEURAL -> "Foto restaurada"
+                PhotoProvenance.Kind.RESIZED -> "Foto salva · ampliação convencional"
                 PhotoProvenance.Kind.FUSION -> "Fusão salva · sem restauração neural"
                 PhotoProvenance.Kind.NATIVE -> "Foto salva · detalhe nativo preservado"
                 PhotoProvenance.Kind.CAMERA -> "JPEG da câmera salvo · sem restauração neural"
@@ -209,7 +218,11 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                 extras(file).forEach { it.delete() }
             }
             Log.i("HorizonAuto", "published zoom=$zoom neural=${provenance == PhotoProvenance.Kind.NEURAL} " +
-                "provenance=$provenance shutterToGalleryMs=${System.currentTimeMillis()-name.substringBefore('_').toLong()}")
+                "provenance=$provenance shutterToGalleryMs=${System.currentTimeMillis() - shutterAt} " +
+                "referenceMs=${(referenceWrittenAt - shutterAt).takeIf { it >= 0 }} " +
+                "acquireAndEnqueueMs=${(queuedAt - shutterAt).takeIf { it >= 0 }} " +
+                "queueMs=${(workerAt - queuedAt).takeIf { queuedAt > 0 && it >= 0 }} " +
+                "publishMs=${SystemClock.elapsedRealtime() - publishAt}")
             AutoPhotos.post(AutoPhotos.State(false, message, saved, zoom))
             Result.success()
         } catch (e: CancellationException) { Result.retry() }
@@ -224,9 +237,24 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         Log.w("HorizonAuto", "Restauro indisponível para ${file.name}", error)
         if (isStopped) throw CancellationException()
         if (crop <= 1f) { file.copyTo(target, overwrite = true); return }
-        val framed = decodeFramed(file, crop).bitmap
-        try { AiPhotoFiles.encode(app, Uri.fromFile(file), framed, target, "Zoom ${zoom}x · JPEG com recorte digital") }
-        finally { framed.recycle() }
+        val source = decodeFramed(file, crop).bitmap
+        try {
+            val scale = com.miokzz.horizoncam.camera.StillFraming.reconstructionScale(
+                source.width, source.height, crop, NativeRestorer.MAX_PIXELS)
+            val resized = if (scale > 1) {
+                try { Bitmap.createScaledBitmap(source, source.width * scale, source.height * scale, true) }
+                catch (e: OutOfMemoryError) {
+                    Log.w("HorizonAuto", "Memória insuficiente para ampliação convencional", e)
+                    source
+                }
+            } else source
+            try {
+                if (isStopped) throw CancellationException()
+                val description = PhotoProvenance.describe(null, 1, zoom,
+                    source.width, source.height, resized.width, resized.height, conventionalResize = resized !== source)
+                AiPhotoFiles.encode(app, Uri.fromFile(file), resized, target, description)
+            } finally { if (resized !== source) resized.recycle() }
+        } finally { source.recycle() }
     }
 
     private fun extras(file: File) = (1..2).map { File(file.parentFile, "${file.nameWithoutExtension}.extra$it") }
@@ -258,15 +286,18 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
     }
 
     private fun restore(file: File, target: File, zoom: Float, crop: Float) {
+        val started = SystemClock.elapsedRealtime()
         val exif = ExifInterface(file)
         val iso = exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 0)
         val framed = decodeFramed(file, crop)
+        val decodedAt = SystemClock.elapsedRealtime()
         val base = framed.bitmap
         val pair = try { fuseIfAvailable(file,base,crop) }
         catch (e: CancellationException) { base.recycle(); throw e }
         catch (e: Exception) { Log.w("HorizonAuto","Fusão opcional dispensada",e); base to 1 }
         catch (e: OutOfMemoryError) { Log.w("HorizonAuto","Memória insuficiente para fusão opcional",e); base to 1 }
         val (source, usedFrames) = pair
+        val fusedAt = SystemClock.elapsedRealtime()
         if (source !== base) base.recycle()
         try {
             var lastPercent = -1
@@ -304,6 +335,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                     "grid=${result.modelWidth}x${result.modelHeight} model=${result.model} backend=${result.backend} " +
                     "tiles=${result.tiles} frames=$usedFrames originalScan=$copyOriginal " +
                     "invokeMs=${result.nativeInferenceMs} neuralMs=${result.inferenceMs} restoreMs=${result.elapsedMs} " +
+                    "decodeMs=${decodedAt - started} fusionMs=${fusedAt - decodedAt} " +
                     "encodeMs=$encodeMs pssKiB=${android.os.Debug.getPss()} scene=${result.scene}")
             }
         } finally { source.recycle() }

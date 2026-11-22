@@ -1,6 +1,23 @@
 # Horizon AI · fotografia automática e laboratório local
 
-O disparador Foto usa o modelo general-x4v3 do Real-ESRGAN. O processamento acontece no aparelho em uma fila persistente. Entrada privada, enquadramento e publicação final estão descritos no [README](../README.md). Os pesos, a equivalência com o modelo original, os ensaios com imagens naturais e suas limitações estão no [relatório do modelo](../tools/model/README.md).
+O disparador Foto seleciona QuickSRNet-small ou Real-ESRGAN general-x4v3, de acordo com a cena e o zoom. O processamento acontece no aparelho em uma fila persistente. Entrada privada, enquadramento e publicação final estão descritos no [README](../README.md). Os pesos, a equivalência com o modelo original, os ensaios com imagens naturais e suas limitações estão no [relatório do modelo](../tools/model/README.md).
+
+## Validação no Galaxy S24 TGY · 22/11/2026
+
+O LiteRT 1.4.2 avançava o cursor do buffer de saída copiado. A calibração criava uma visão de zero elementos e descartava o backend CPU, interrompendo a seleção da GPU. O cursor é reposicionado antes da leitura, e a calibração continua comparando o tensor direto com uma cópia independente.
+
+Na instrumentação, o QuickSRNet em precisão estrita passou com MAE de 0,000023 em níveis de 0–255 e mediana de 3,34 ms por bloco, ante 25,89 ms na CPU. O Real-ESRGAN FP16 passou com MAE de 0,274 e mediana de 24,66 ms, ante 948,92 ms na CPU. O QuickSRNet FP16 excedeu o limite de paridade.
+
+| Zoom | Recorte de entrada | JPEG neural | Restauração | Disparo à galeria | PSS ao codificar |
+| --- | --- | --- | --- | --- | --- |
+| 3× | 2644 × 3526 | 2644 × 3526 | 6,12 s | 6,93 s | 332 MiB |
+| 10× | 793 × 1058 | 1586 × 2116 | 6,00 s | 16,06 s | 291 MiB |
+| 20× | 397 × 529 | 1588 × 2116 | 3,47 s | 12,19 s | 298 MiB |
+| 30× | 264 × 353 | 1056 × 1412 | 1,83 s | 12,80 s | 285 MiB |
+
+As quatro capturas usaram a tele de 7,0 mm e tiveram publicação final única. As dimensões de saída descrevem pixels entregues. A informação óptica vem do recorte de entrada. Quando a restauração falha, a fila preserva o enquadramento e pode ampliar convencionalmente pelo mesmo fator limitado pelo orçamento de pixels. O EXIF identifica a interpolação bilinear.
+
+Na carta sintética de texto, o PSNR neural e o bilinear foram 26,57 e 26,58 dB em 3×, 29,05 e 26,58 dB em 10× e 22,19 e 22,50 dB em 20× e 30×. Nos dois níveis mais altos, as amostras de 48 × 64 já perdiam traços finos, e a estimativa neural ficou ligeiramente abaixo da bilinear. O teste de rosto e detalhe com referência conhecida passou. Essas medições avaliam a fidelidade na amostra e não garantem leitura de caracteres em cenas reais.
 
 ## Laboratório opcional de super-resolução
 

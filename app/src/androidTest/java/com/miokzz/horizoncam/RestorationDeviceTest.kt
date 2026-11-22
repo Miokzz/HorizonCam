@@ -2,6 +2,10 @@ package com.miokzz.horizoncam
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.os.Bundle
 import androidx.test.platform.app.InstrumentationRegistry
 import com.miokzz.horizoncam.ai.InferenceRuntime
@@ -79,6 +83,42 @@ class RestorationDeviceTest {
                 }
             } finally { input.recycle(); truth.recycle() }
         }
+    }
+
+    @Test fun zoomedTextAndEdgesComparedWithBilinear() {
+        val runner = InstrumentationRegistry.getInstrumentation()
+        val truth = Bitmap.createBitmap(192, 256, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(truth)
+            canvas.drawColor(Color.rgb(220, 220, 220))
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.MONOSPACE }
+            for ((index, size) in listOf(32f, 23f, 16f, 11f).withIndex()) {
+                paint.color = if (index % 2 == 0) Color.rgb(25, 25, 25) else Color.rgb(125, 125, 125)
+                paint.textSize = size
+                canvas.drawText("HC 0285", 16f, 48f + 53f * index, paint)
+            }
+            for ((zoom, scale) in listOf(3f to 1, 10f to 2, 20f to 4, 30f to 4)) {
+                val sample = Bitmap.createScaledBitmap(truth, truth.width / maxOf(2, scale), truth.height / maxOf(2, scale), true)
+                val source = if (scale == 1) Bitmap.createScaledBitmap(sample, truth.width, truth.height, true) else sample
+                val baseline = Bitmap.createScaledBitmap(source, truth.width, truth.height, true)
+                try {
+                    NativeRestorer.restore(runner.targetContext, source, zoom, 800, scale, {}, { false }).use { result ->
+                        assertEquals(truth.width, result.bitmap.width)
+                        assertEquals(truth.height, result.bitmap.height)
+                        assertTrue(result.usedNeuralModel)
+                        assertFalse("The neural result must differ from simple interpolation", baseline.sameAs(result.bitmap))
+                        val line = "text zoom=$zoom source=${source.width}x${source.height} " +
+                            "bilinearPSNR=${psnr(baseline, truth)} neuralPSNR=${psnr(result.bitmap, truth)} " +
+                            "backend=${result.backend} restoreMs=${result.elapsedMs} pssKiB=${android.os.Debug.getPss()}"
+                        runner.sendStatus(0, Bundle().apply { putString("stream", "\n$line\n") })
+                    }
+                } finally {
+                    if (baseline !== source) baseline.recycle()
+                    if (source !== sample) source.recycle()
+                    sample.recycle()
+                }
+            }
+        } finally { truth.recycle() }
     }
 
     private fun psnr(a: Bitmap, b: Bitmap): Double {

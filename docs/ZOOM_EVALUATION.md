@@ -8,6 +8,12 @@ No SM-S9210 via ADB Wi-Fi, o ensaio incluiu toques rápidos nos presets e um arr
 
 A câmera independente `2` entregou o campo da ultrawide em 0,6×. A opção de abrir o mesmo sensor como `0/2` reportou um recorte de 1,397× no HAL e um campo equivalente a aproximadamente 0,83×. A rota automática preferiu a câmera independente. O código rejeita uma saída física quando o campo já vem mais fechado do que o solicitado, pois um recorte adicional não recupera o campo de visão.
 
+### Resposta do controle e substituição de sessão
+
+No ensaio seguinte, o CameraX substituiu o `SessionConfig` de Foto. A configuração levou 13–35 ms. No mesmo padrão de arraste rápido, houve uma troca física após a última movimentação, e o tempo entre guardar o quadro e voltar à prévia confirmada caiu de 1,90 para 0,83 s. A ultrawide independente levou até 1,34 s nessa rodada. A gravação de 602 quadros teve zero centros quase pretos. A tele foi verificada novamente no disparador após a troca, com focal de 7,0 mm no JPEG. [Substituição de SessionConfig](https://developer.android.com/reference/androidx/camera/lifecycle/ProcessCameraProvider)
+
+O slider usa décimos. Passagens lentas próximas a um inteiro mantêm o valor por até 500 ms, e um movimento mais amplo libera a retenção. A prévia acompanha o arraste usando pixels ao vivo da lente disponível. Ao pedir um quadro mais aberto do que ela fornece, a ampliação aguarda a lente mais ampla. O disparo aguarda a confirmação da nova sessão. Na gravação do arraste de 3× a 7×, a escala medida no visor passou por 1,20×, 1,33×, 1,63×, 1,90× e 2,23× antes de chegar à escala final de 2,33× em relação ao início.
+
 ### Escala e enquadramento na mesma cena
 
 Ensaio em retrato pelo disparador normal, com o APK de campo de SHA-256 `a0c51eb8c580d93b2b8a628a71245ead8d6095a4a394af5d06dbfd6c87ffc175`. O resíduo é o recorte digital adicional reportado pelo app. A escala é a razão entre os JPEGs de dois níveis consecutivos, estimada por correspondências de imagem. A última coluna conta as correspondências geométricas consistentes entre prévia e JPEG no mesmo nível.

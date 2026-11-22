@@ -11,6 +11,7 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.SessionConfig
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
@@ -92,11 +93,13 @@ class PhotoEngine(
         val landscapeHeight = minOf(it.width,it.height)
         if (portrait) Rational(landscapeHeight,landscapeWidth) else Rational(landscapeWidth,landscapeHeight)
     } ?: if (portrait) Rational(3,4) else Rational(4,3)
-    val group: UseCaseGroup = UseCaseGroup.Builder()
-        .setViewPort(ViewPort.Builder(aspect, rotation).setScaleType(ViewPort.FILL_CENTER).build())
-        .addUseCase(preview)
-        .addUseCase(capture)
-        .build()
+    private val viewport = ViewPort.Builder(aspect, rotation).setScaleType(ViewPort.FILL_CENTER).build()
+    val group: UseCaseGroup by lazy {
+        UseCaseGroup.Builder().setViewPort(viewport).addUseCase(preview).addUseCase(capture).build()
+    }
+    val sessionConfig: SessionConfig by lazy {
+        SessionConfig.Builder(preview, capture).setViewPort(viewport).build()
+    }
 
     /** CameraX's OUTPUT_FORMAT_RAW disk path uses DngCreator + actual capture metadata. */
     fun shoot(resolver: ContentResolver, executor: Executor, onResult: (Result<Uri>) -> Unit) {

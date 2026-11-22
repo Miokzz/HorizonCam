@@ -73,6 +73,8 @@ internal object InferenceRuntime {
             input.rewind()
             output.rewind()
             interpreter.run(input, output)
+            // LiteRT copies with ByteBuffer.put(), leaving position at the end of the tensor.
+            output.rewind()
             return output.asFloatBuffer()
         }
 
@@ -167,7 +169,7 @@ internal object InferenceRuntime {
     }
 
     private fun direct(size: Int) = ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
-    private fun key(prior: PhotoPrior) = "v4-${prior.hash}-${Build.FINGERPRINT}"
+    private fun key(prior: PhotoPrior) = "v5-${prior.hash}-${Build.FINGERPRINT}"
     private fun preferences(context: Context) =
         context.getSharedPreferences("horizon-inference", Context.MODE_PRIVATE)
 
