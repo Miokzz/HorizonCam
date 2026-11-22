@@ -72,6 +72,95 @@ class AuxiliaryCameraAccessTest {
         } finally { thread.quitSafely(); thread.join(2000) }
     }
 
+    @Test fun reopenMainAfterClosingPhysicalTeleDevice() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("teleDeviceClose") == "yes")
+        assumeTrue(android.os.Build.MODEL == "SM-S9210" && android.os.Build.VERSION.SDK_INT >= 31)
+        val runner = InstrumentationRegistry.getInstrumentation()
+        val manager = runner.targetContext.getSystemService(CameraManager::class.java)
+        val thread = HandlerThread("tele-device-close").apply { start() }
+        try {
+            val handler = Handler(thread.looper)
+            for (cycle in 1..4) {
+                val tele = previewAndCloseDevice(manager, handler, "6")
+                assertEquals(7.0, tele.first.toDouble(), 0.05)
+                val main = previewAndCloseDevice(manager, handler, null)
+                assertEquals(5.4, main.first.toDouble(), 0.05)
+                runner.sendStatus(0, Bundle().apply {
+                    putString("stream", "\ncycle=$cycle teleMm=${tele.first} mainMm=${main.first} " +
+                        "teleCloseMs=${tele.second} mainCloseMs=${main.second}\n")
+                })
+            }
+        } finally {
+            thread.quitSafely()
+            thread.join(2000)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun previewAndCloseDevice(manager: CameraManager, handler: Handler, physicalId: String?): Pair<Float, Long> {
+        val opened = CompletableFuture<CameraDevice>()
+        val closed = CompletableFuture<Unit>()
+        val focal = CompletableFuture<Float>()
+        manager.openCamera("0", object : CameraDevice.StateCallback() {
+            override fun onOpened(camera: CameraDevice) { if (!opened.complete(camera)) camera.close() }
+            override fun onClosed(camera: CameraDevice) { closed.complete(Unit) }
+            override fun onDisconnected(camera: CameraDevice) = onError(camera, ERROR_CAMERA_DEVICE)
+            override fun onError(camera: CameraDevice, error: Int) {
+                val failure = IllegalStateException("Erro de Camera2: $error")
+                opened.completeExceptionally(failure)
+                focal.completeExceptionally(failure)
+                camera.close()
+            }
+        }, handler)
+        val device = try { opened.get(6, TimeUnit.SECONDS) }
+            catch (error: Exception) { opened.cancel(false); throw error }
+        val jpegSize = if (physicalId != null) android.util.Size(3648, 2736) else android.util.Size(4080, 3060)
+        var previewReader: ImageReader? = null
+        var jpegReader: ImageReader? = null
+        try {
+            val preview = ImageReader.newInstance(1440, 1080, ImageFormat.PRIVATE, 3,
+                android.hardware.HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE).also { previewReader = it }
+            val jpeg = ImageReader.newInstance(jpegSize.width, jpegSize.height, ImageFormat.JPEG, 2)
+                .also { jpegReader = it }
+            preview.setOnImageAvailableListener({ it.acquireLatestImage()?.close() }, handler)
+            val configured = CompletableFuture<CameraCaptureSession>()
+            val outputs = listOf(preview.surface, jpeg.surface).map { surface ->
+                OutputConfiguration(surface).apply { physicalId?.let(::setPhysicalCameraId) }
+            }
+            device.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs,
+                { handler.post(it) }, object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) { configured.complete(session) }
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        configured.completeExceptionally(IllegalStateException("Sessão recusada"))
+                    }
+                }))
+            val session = configured.get(6, TimeUnit.SECONDS)
+            val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                .apply { addTarget(preview.surface) }.build()
+            var frames = 0
+            session.setRepeatingRequest(request, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                    val measurement = if (physicalId == null) result else result.physicalCameraTotalResults[physicalId]
+                    measurement?.get(CaptureResult.LENS_FOCAL_LENGTH)?.let {
+                        if (++frames >= 6) focal.complete(it)
+                    }
+                }
+            }, handler)
+            val millimeters = focal.get(6, TimeUnit.SECONDS)
+            val started = android.os.SystemClock.elapsedRealtime()
+            // Leave the repeating session attached. Closing CameraCaptureSession first
+            // can make the framework configure an empty session on this device.
+            device.close()
+            closed.get(6, TimeUnit.SECONDS)
+            return millimeters to (android.os.SystemClock.elapsedRealtime() - started)
+        } finally {
+            device.close()
+            runCatching { closed.get(6, TimeUnit.SECONDS) }
+            previewReader?.close()
+            jpegReader?.close()
+        }
+    }
+
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
     private fun probe(manager: CameraManager, id: String, chars: CameraCharacteristics?, handler: Handler,
