@@ -84,6 +84,25 @@ Começar por uma sessão lógica persistente separada por modo. Em Foto, usar pr
 
 Experimentar a sobreposição de 2+5 apenas perto da fronteira de 1×, caso a prova de movimento demonstre ganho qualificado. Experimentos com 5+6 exigem confirmar os dois fluxos e a fase óptica. A medição atual favorece a sessão lógica para a primeira implementação experimental e mantém a troca física validada como fallback do aplicativo.
 
+## Protótipo de Foto no aplicativo
+
+O build de campo do SM-S9210 oferece **Sessão lógica experimental** no menu de Foto. O ADB também pode habilitar a rota com o extra booleano `com.miokzz.horizoncam.EXPERIMENTAL_LOGICAL_PHOTO`. O modo normal preserva a seleção física validada. O caminho experimental mantém uma sessão lógica Camera2 para preview e JPEG. O zoom nativo do protótipo vai de 0,6× a 3×. Acima de 3×, o recorte digital relativo à tele é compartilhado pelo visor e pela fila de JPEG. A confirmação exige o pedido atual, focal, sensor e quadro exibido. Divergências acionam o retorno à rota física preservada.
+
+Validação no Galaxy S24 SM-S9210 por ADB Wi-Fi em retrato, com APK de SHA-256 `8cf75aa9e38ce8d1706f8b90575112984fce7bcb32537eeda5b52a579fe0b432`.
+
+| Ensaio | Resultado |
+| --- | --- |
+| Dez presets 0,6×, 1× e 3× | Sensores 2, 5 e 6 confirmados na mesma sessão. 344–453 ms do comando ADB ao log de confirmação. |
+| Reversão antes de concluir 3× | O pedido de 0,6× chegou com o anterior em andamento. A tele intermediária ficou sem confirmação. |
+| Quatro arrastes 0,6× ↔ 30× | Destino e sensor confirmados em 453–547 ms. Uma sessão e nenhum fallback durante a série. |
+| Gravação da prévia | Zero centros quase pretos em 1.222 quadros da cena estática iluminada. |
+| JPEG e galeria | Três disparos, três JPEGs. EXIF 2,2 mm em 0,6× e 7,0 mm em 3× e 30×. O acionamento em 3× chegou 109 ms após a confirmação. |
+| Correspondência prévia/JPEG | Erro mediano de 0,20 px em 0,6× e 0,26 px em 3×. A captura em 30× saiu em 1224 × 1632. |
+| Campo da ultrawide | A razão de ampliação entre a lógica e a câmera direta em 0,6× foi 0,989, com 2.879 correspondências no mesmo alvo. |
+| Fallback físico | Com o protótipo desativado no mesmo APK, a câmera direta 2 e a saída 0/6 voltaram a salvar um JPEG de 2,2 mm e de 7,0 mm, respectivamente. |
+
+Build, lint e testes JVM passaram. O ensaio de app mediu 6,56–9,67 s do disparo à galeria nos três níveis. Esses valores incluem o processamento já existente. A correspondência por imagem em 30× e a continuidade de cor e movimento ainda exigem ensaios específicos. O protótipo desta etapa é de Foto.
+
 ## Critérios para a próxima prova
 
 - Medir FOV a cada fronteira por resolução, proporção e estabilização. Meta inicial de erro ≤3%. Conferir prévia e JPEG com alvo distante.

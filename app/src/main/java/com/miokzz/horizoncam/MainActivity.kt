@@ -140,6 +140,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var closingTele: PhysicalTelePhotoSession? = null
     private var afterTeleClosed: (() -> Unit)? = null
     private var nativeTeleRejected = false
+    private var logicalPhotoEnabled = false
+    private var logicalPhotoRejected = false
+    private val logicalPhotoExperimentAvailable
+        get() = packageName == "com.miokzz.horizoncam.gl.field" && android.os.Build.MODEL == "SM-S9210"
     private var recoveredPhotoGeneration: Long? = null
     private var handoffStartedAt: Long? = null
     private var handoffExposure: Float? = null
@@ -227,6 +231,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val previous = if (prefs.getBoolean("photoMode", true)) ShootingMode.PHOTO else ShootingMode.VIDEO
         mode = runCatching { ShootingMode.valueOf(prefs.getString("shootingMode", previous.name)!!) }.getOrDefault(previous)
         audio = prefs.getBoolean("sound", true)
+        if (logicalPhotoExperimentAvailable) {
+            logicalPhotoEnabled = intent.getBooleanExtra("com.miokzz.horizoncam.EXPERIMENTAL_LOGICAL_PHOTO",
+                prefs.getBoolean("experimentalLogicalPhoto", false))
+        }
         if (!sensor.isAvailable) horizon.setMode(StabilizationMode.OFF)
         if (prefs.contains("stabilization")) {
             runCatching { StabilizationMode.valueOf(prefs.getString("stabilization", "")!!) }
@@ -380,6 +388,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         recoveryMessage = null
         recoveredPhotoGeneration = null
         nativeTeleRejected = false
+        logicalPhotoRejected = false
         lenses?.clearRejections(lensProfile)
         if (locked && !lockLensExplicit) lockLensConfigured = false
         if (hasCamera()) openCamera() else if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
@@ -485,6 +494,12 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         }
     }
 
+    private fun useLogicalPhoto(): Boolean =
+        logicalPhotoEnabled && !logicalPhotoRejected && softwareStillZoom &&
+            photoZoom.intent.preferred == null && photoSettings == AdvancedPhotoSettings() && !burstDetail
+
+    private fun nativePhotoZoom(total: Float): Float = total.coerceIn(0.6f, 3f)
+
     private fun useNativeTele(choice: LensOption): Boolean =
         !nativeTeleRejected && softwareStillZoom && android.os.Build.MODEL == "SM-S9210" &&
             choice.cameraId == "0" && choice.physicalCameraId == "6" &&
@@ -505,7 +520,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         }
         val nextPhotoCase = if (softwareStillZoom && camera != null)
             route(targetZoom, photoZoom.intent.preferred)?.let { lenses?.option(it.targetKey) } else null
-        if (nextPhotoCase?.let(::useNativeTele) == true) {
+        if (camera != null && (useLogicalPhoto() || nextPhotoCase?.let(::useNativeTele) == true)) {
             reopenPhotoAfterClose(keepPhotoHandoff, enteringNative = true)
             return
         }
@@ -530,7 +545,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             val requestedLens = if (softwareStillZoom) {
                 route(targetZoom, photoZoom.intent.preferred)?.let { manager.option(it.targetKey) }
             } else lens
-            val choice = requestedLens ?: manager.defaultOption
+            val logicalPhoto = useLogicalPhoto()
+            val choice = if (logicalPhoto) manager.defaultOption else requestedLens ?: manager.defaultOption
             lens = choice
             zoomPending = !softwareStillZoom
             focusMessage = null
@@ -546,8 +562,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             }.getOrNull()
             photoCaps = runCatching { photoCapsCache.getOrPut(choice.key) { AdvancedPhotoCapabilities.inspect(this, info, choice.physicalCameraId) } }.getOrNull()
             eisSupported = capabilities?.nativeEisDeclared == true
-            if (useNativeTele(choice)) {
-                openNativeTele(token)
+            if (logicalPhoto || useNativeTele(choice)) {
+                openNativePhoto(token, logical = logicalPhoto)
                 return
             }
             val captureSelector = if (hdrRequested && photoMode) {
@@ -666,11 +682,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         } catch (error: Exception) { fallback(allowEis, error) }
     }
 
-    private fun openNativeTele(token: Int) {
+    private fun openNativePhoto(token: Int, logical: Boolean) {
         fun rejected(error: Throwable) {
             if (session != token || isDestroyed) return
-            Log.w(TAG, "Camera2 tele indisponível; retomando a saída física CameraX", error)
-            nativeTeleRejected = true
+            if (logical) {
+                Log.w(TAG, "Camera2 logical fallback; retomando lentes físicas validadas", error)
+                holdPhotoFrame()
+                logicalPhotoRejected = true
+                toast("Zoom lógico interrompido. Usando as lentes físicas.")
+            } else {
+                Log.w(TAG, "Camera2 tele indisponível; retomando a saída física CameraX", error)
+                nativeTeleRejected = true
+            }
             ready = false
             if (busy) render() else rebind(keepPhotoHandoff = handoffStartedAt != null)
         }
@@ -696,14 +719,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 renderZoom()
                 renderStatus()
             }
-        })
+        }, logicalInitialZoom = if (logical) nativePhotoZoom(targetZoom) else null,
+            onLogicalZoomApplied = {
+                if (session == token && !isDestroyed) applyLatestPhotoZoom()
+            })
         telePhoto = tele
         render()
         try {
-            Log.i(TAG, "session=$token mode=foto camera=0 requestedPhysical=6 backend=Camera2 tele nativeEdge=${tele.nativeEdge}")
+            val route = if (logical) "requestedPhysical=null backend=Camera2 logical" else "requestedPhysical=6 backend=Camera2 tele"
+            Log.i(TAG, "session=$token mode=foto camera=0 $route nativeEdge=${tele.nativeEdge}")
             tele.start()
             val timeout = Runnable {
-                if (session == token && !ready) rejected(IllegalStateException("A tele Camera2 não confirmou a prévia em 5 s"))
+                if (session == token && !ready) rejected(IllegalStateException("O Camera2 não confirmou a prévia em 5 s"))
             }
             openingTimeout = timeout
             if (!ready) ui.root.postDelayed(timeout, 5_000L)
@@ -899,7 +926,11 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         if (!canZoom || takingPhoto || awaitingMic || stopping) return
         if (softwareStillZoom) {
             val desired = if (preferred == null) requested.coerceIn(0.6f, StillFraming.MAX_ZOOM) else requested
+            val priorGeneration = photoZoom.intent.generation
             photoZoom.request(desired, preferred, continuous, SystemClock.elapsedRealtime())
+            if (telePhoto?.isLogicalZoomSession == true && priorGeneration != photoZoom.intent.generation) {
+                Log.i(TAG, "logicalZoomRequest session=$session requested=$desired t=${SystemClock.elapsedRealtime()}")
+            }
             applyLatestPhotoZoom()
             renderZoom()
             renderStatus()
@@ -944,7 +975,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     private fun finishPhotoZoomGesture(generation: Long?) {
-        if (photoZoom.finishGesture(generation)) applyLatestPhotoZoom()
+        if (!photoZoom.finishGesture(generation)) return
+        val settled = !photoZoom.isPending
+        applyLatestPhotoZoom()
+        if (settled && telePhoto?.isLogicalZoomSession == true) logTransition("zoom-confirmed")
     }
 
     private fun cancelLensSwitch() {
@@ -955,6 +989,26 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun applyLatestPhotoZoom(failedNativeRatio: Float? = null) {
         if (!ready || busy || !photoZoom.isPending) return
         val intent = photoZoom.intent
+        telePhoto?.takeIf { it.isLogicalZoomSession }?.let { logical ->
+            if (!useLogicalPhoto()) {
+                holdPhotoFrame()
+                rebind(keepPhotoHandoff = true)
+            } else {
+                val requested = nativePhotoZoom(intent.total)
+                val evidence = logical.evidence
+                val applied = evidence?.logicalZoom
+                if (applied != null && logical.hasConfirmedLogicalZoom(requested) &&
+                    photoZoom.confirm(session, intent.generation)) {
+                    commitZoom(applied * evidence.cropZoom, log = !intent.continuous)
+                } else {
+                    // The real logical frame already contains HAL zoom. Apply the
+                    // residual only after the requested native frame has arrived.
+                    dragPreviewCrop = 1f
+                    logical.setLogicalZoom(requested)
+                }
+            }
+            return
+        }
         val choice = lens ?: return
         val route = route(intent.total, intent.preferred) ?: return
         val native = appliedNativeRatio
@@ -1075,8 +1129,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 if (session != token || cancelPhotoClose == null) return
                 val intent = photoZoom.intent
                 val destination = route(intent.total, intent.preferred)?.let { lenses?.option(it.targetKey) }
-                val destinationId = destination?.cameraId ?: cameraId
-                val mustReleaseDevice = enteringNative && destination?.let(::useNativeTele) == true
+                val logicalPhoto = useLogicalPhoto()
+                val destinationId = if (logicalPhoto) "0" else destination?.cameraId ?: cameraId
+                val mustReleaseDevice = enteringNative && (logicalPhoto || destination?.let(::useNativeTele) == true)
                 val elapsed = SystemClock.elapsedRealtime() - started
                 val knownToCameraX = provider?.availableCameraInfos?.any {
                     Camera2CameraInfo.from(it).cameraId == destinationId
@@ -1091,7 +1146,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     cancelPhotoClose?.invoke()
                     if (mustReleaseDevice && knownToCameraX) {
                         Log.w(TAG, "CameraX não confirmou a liberação de $cameraId; mantendo o backend CameraX")
-                        nativeTeleRejected = true
+                        if (useLogicalPhoto()) logicalPhotoRejected = true
+                        else nativeTeleRejected = true
                         rebind(keepPhotoHandoff = keepPhotoHandoff)
                     } else {
                         fail("Câmera indisponível · toque para tentar",
@@ -1177,7 +1233,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val outputPhysical = evidence?.physicalCameraId ?: details?.outputPhysicalCameraId
         Log.i(TAG, "transition=$event t=${SystemClock.elapsedRealtime()} session=$session mode=$mode " +
             "camera=$cameraId physicalRequested=$requestedPhysical " +
-            "physicalActive=${details?.activePhysicalCameraId} physicalOutput=$outputPhysical " +
+            "physicalActive=${if (tele?.isLogicalZoomSession == true) outputPhysical else details?.activePhysicalCameraId} physicalOutput=$outputPhysical " +
             "requested=$targetZoom applied=$displayZoom " +
             "extraCrop=$extraCrop previewScale=${ui.photoPreview.scaleX} buffer=${resolution?.resolution} " +
             "viewportCrop=${resolution?.cropRect} readyMs=${if(firstFrameAt>0) firstFrameAt-bindingStartedAt else null} " +
@@ -1452,7 +1508,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 val cameraId = if (tele != null) lens?.cameraId else trace?.selectedCameraId
                 val physicalId = if (tele != null) lens?.physicalCameraId else trace?.selectedPhysicalCameraId
                 Log.i(TAG, "Disparo zoom=$displayZoom recorte=$extraCrop camera=$cameraId " +
-                    "fisicaSolicitada=$physicalId ativaHAL=${trace?.activePhysicalCameraId} " +
+                    "fisicaSolicitada=$physicalId ativaHAL=${if (tele?.isLogicalZoomSession == true) tele.evidence?.physicalCameraId else trace?.activePhysicalCameraId} " +
                     "sensor=${tele?.evidence?.physicalCameraId ?: trace?.outputPhysicalCameraId}")
                 val captureEpoch = session
                 val captureCamera = camera
@@ -1619,7 +1675,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val started = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
         when {
             started && camera == null && telePhoto == null && hasCamera() -> openCamera()
-            started && ((nativeTeleRejected && telePhoto != null) || (!locked && ui.root.display?.rotation != boundRotation)) -> rebind()
+            started && ((nativeTeleRejected && telePhoto != null) ||
+                (logicalPhotoRejected && telePhoto?.isLogicalZoomSession == true) ||
+                (!locked && ui.root.display?.rotation != boundRotation)) ->
+                rebind(keepPhotoHandoff = handoffStartedAt != null)
             else -> render()
         }
     }
@@ -1699,6 +1758,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             if (autoJpeg && !hdrRequested) menu.add(0, 11, 9,
                 if (distantFocus) "Voltar ao foco automático" else "Foco distante").isEnabled = ready && !busy &&
                     (telePhoto?.supportsDistantFocus ?: photoCaps?.manual?.supportsManualFocus) == true
+            if (logicalPhotoExperimentAvailable && mode == ShootingMode.PHOTO) {
+                menu.add(0, 12, 10, "Sessão lógica experimental").apply {
+                    isCheckable = true
+                    isChecked = logicalPhotoEnabled && !logicalPhotoRejected
+                    isEnabled = !busy
+                }
+            }
             if (BurstJobs.states.value?.running == true) menu.add(0, 10, 8, "Cancelar processamento da sequência")
             if (failure != null) menu.add(0, 5, 4, "Tentar abrir a câmera")
             setOnMenuItemClickListener { item ->
@@ -1718,6 +1784,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                         rebind()
                     }
                     10 -> BurstJobs.cancel()
+                    12 -> {
+                        logicalPhotoEnabled = !logicalPhotoEnabled || logicalPhotoRejected
+                        logicalPhotoRejected = false
+                        prefs.edit().putBoolean("experimentalLogicalPhoto", logicalPhotoEnabled).apply()
+                        if (previewStreaming) holdPhotoFrame()
+                        rebind(keepPhotoHandoff = handoffStartedAt != null)
+                    }
                     11 -> {
                         val tele = telePhoto
                         if (tele != null) {
@@ -1862,7 +1935,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             "Saída física solicitada: ${physicalId ?: "automática"}",
             "Sensor ativo informado pelo HAL: ${info?.activePhysicalCameraId ?: "não informado"}",
             "Sensor da saída confirmado: ${tele?.evidence?.physicalCameraId ?: info?.outputPhysicalCameraId ?: "não informado"}",
-            tele?.evidence?.let { "Camera2 direto · focal ${it.focalLengthMm} mm" }.orEmpty(),
+            tele?.evidence?.let {
+                val backend = if (tele.isLogicalZoomSession) "Camera2 lógico" else "Camera2 físico"
+                "$backend · focal ${it.focalLengthMm} mm"
+            }.orEmpty(),
             "Zoom confirmado: ${formatZoom(displayZoom)} · solicitado: ${formatZoom(targetZoom)}",
             "Recorte adicional: $extraCrop · escala do visor: ${ui.photoPreview.scaleX}",
             "Resultado AF/AE: ${info?.capture ?: "aguardando"}",

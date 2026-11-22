@@ -24,6 +24,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Range
 import android.util.Rational
 import android.util.Size
@@ -37,8 +38,9 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * Direct Camera2 owner for the S24's fixed 0/6 JPEG route. The view, public controls,
- * and callbacks belong to main. Camera operations and JPEG I/O use one serial handler.
+ * Direct Camera2 owner for the S24's fixed 0/6 and persistent logical JPEG routes.
+ * The view, public controls, and callbacks belong to main. Camera operations and
+ * JPEG I/O use one serial handler.
  */
 internal class PhysicalTelePhotoSession(
     context: Context,
@@ -46,9 +48,28 @@ internal class PhysicalTelePhotoSession(
     private val rotation: Int,
     private val onReady: (Evidence) -> Unit,
     private val onError: (Throwable) -> Unit,
-    private val onCaptureIdle: () -> Unit = {}
+    private val onCaptureIdle: () -> Unit = {},
+    logicalInitialZoom: Float? = null,
+    private val onLogicalZoomApplied: (Evidence) -> Unit = {}
 ) : TextureView.SurfaceTextureListener {
-    data class Evidence(val physicalCameraId: String, val focalLengthMm: Float, val cropZoom: Float)
+    data class Evidence(
+        val physicalCameraId: String,
+        val focalLengthMm: Float,
+        val cropZoom: Float,
+        val logicalZoom: Float? = null
+    )
+
+    private data class ZoomRequest(val generation: Long, val ratio: Float) {
+        val physicalId: String get() = when {
+            ratio < 1f -> "2"
+            ratio < 3f -> "5"
+            else -> PHYSICAL_ID
+        }
+
+        fun matches(actualRatio: Float, actualId: String, focal: Float): Boolean =
+            abs(actualRatio - ratio) <= ratio * 0.005f && actualId == physicalId &&
+                abs(focal - checkNotNull(LOGICAL_FOCALS[actualId])) <= 0.05f
+    }
 
     private class Capabilities(val logical: CameraCharacteristics, val physical: CameraCharacteristics) {
         val sensorOrientation = checkNotNull(physical[CameraCharacteristics.SENSOR_ORIENTATION])
@@ -76,7 +97,8 @@ internal class PhysicalTelePhotoSession(
         val evidence: Evidence,
         val timestamp: Long,
         val physicalTimestamp: Long?,
-        val crop: Rect
+        val crop: Rect,
+        val zoomRequest: ZoomRequest? = null
     ) {
         val earliestTimestamp get() = minOf(timestamp, physicalTimestamp ?: timestamp)
     }
@@ -97,9 +119,15 @@ internal class PhysicalTelePhotoSession(
         var image: Image? = null
     }
 
+    val isLogicalZoomSession = logicalInitialZoom != null
+    private val jpegSize = if (isLogicalZoomSession) LOGICAL_JPEG_SIZE else PHYSICAL_JPEG_SIZE
+    @Volatile private var requestedLogicalZoom = logicalInitialZoom?.let { ZoomRequest(0, nativeRatio(it)) }
+    @Volatile private var deliveredLogicalZoom: ZoomRequest? = null
+
     private val manager = context.getSystemService(CameraManager::class.java)
     private val main = Handler(Looper.getMainLooper())
-    private val thread = HandlerThread("HorizonCam-physical-tele").apply { start() }
+    private val thread = HandlerThread(if (isLogicalZoomSession) "HorizonCam-logical-photo" else "HorizonCam-physical-tele")
+        .apply { start() }
     private val worker = Handler(thread.looper)
     private val closeListeners = mutableListOf<() -> Unit>()
 
@@ -110,13 +138,15 @@ internal class PhysicalTelePhotoSession(
     private var detachedTexture = false
     private var deliveredTimestamp = 0L
     private var previewFrame: Frame? = null
+    private val logicalPreviewFrames = LinkedHashMap<Long, Frame>()
+    private var deliveredLogicalFrame: Frame? = null
     private var viewToBuffer: PreviewFitTransform.Affine? = null
     private var mainCaps: Capabilities? = null
     var evidence: Evidence? = null
         private set
     var captureInFlight = false
         private set
-    val nativeEdge: Int get() = JPEG_SIZE.width
+    val nativeEdge: Int get() = jpegSize.width
     val exposureRange: Range<Int> get() = mainCaps?.exposureRange ?: Range(0, 0)
     val exposureStep: Rational get() = mainCaps?.exposureStep ?: Rational.ZERO
     val hasTorch: Boolean get() = mainCaps?.torch == true
@@ -138,13 +168,24 @@ internal class PhysicalTelePhotoSession(
     private var released = false
     private var terminalError: Throwable? = null
     private var lastFrame: Frame? = null
+    private var submittedLogicalZoom: ZoomRequest? = null
+    private var logicalMismatchStartedAt = 0L
+    private var logicalMismatch: String? = null
     private var shot: Shot? = null
     private var compensation = 0
     private var useTorch = false
     private var distant = false
     private var focus: FocusPoint? = null
 
-    private val openDeadline = Runnable { fail(IllegalStateException("A teleobjetiva não entregou prévia confirmada.")) }
+    private val openDeadline = Runnable { fail(IllegalStateException("A câmera não entregou prévia confirmada.")) }
+    private val logicalZoomDeadline = Runnable {
+        val requested = requestedLogicalZoom
+        if (requested != null && requested == submittedLogicalZoom && requested != deliveredLogicalZoom) {
+            val detail = logicalMismatch ?: "sem correspondência entre resultado e textura"
+            fail(IllegalStateException("A sessão lógica não confirmou ${requested.ratio}× no sensor ${requested.physicalId} ($detail)."))
+        }
+    }
+    private val logicalZoomUpdate = Runnable { applyLatestLogicalZoom() }
     private val shotDeadline = Runnable {
         shot?.let { finishShot(it, Result.failure(IllegalStateException("A teleobjetiva não entregou o JPEG."))) }
     }
@@ -161,6 +202,23 @@ internal class PhysicalTelePhotoSession(
         if (preview.isAvailable) preview.surfaceTexture?.let(::attach)
     }
 
+    fun setLogicalZoom(ratio: Float) {
+        val previous = requestedLogicalZoom ?: return
+        if (closeRequested || closed) return
+        val zoom = nativeRatio(ratio)
+        if (previous.ratio == zoom) return
+        requestedLogicalZoom = ZoomRequest(previous.generation + 1L, zoom)
+        logicalPreviewFrames.clear()
+        worker.removeCallbacks(logicalZoomUpdate)
+        worker.post(logicalZoomUpdate)
+    }
+
+    fun hasConfirmedLogicalZoom(ratio: Float): Boolean {
+        val requested = requestedLogicalZoom ?: return false
+        return !closeRequested && !closed && ratio.isFinite() &&
+            requested.ratio == nativeRatio(ratio) && requested == deliveredLogicalZoom
+    }
+
     fun close(onClosed: () -> Unit = {}) {
         if (closed) {
             onClosed()
@@ -174,8 +232,10 @@ internal class PhysicalTelePhotoSession(
     }
 
     fun captureTo(file: File, finished: (Result<Unit>) -> Unit) {
-        if (closeRequested || closed || evidence == null || captureInFlight) {
-            main.post { finished(Result.failure(IllegalStateException("A teleobjetiva ainda não está pronta."))) }
+        val expected = deliveredLogicalFrame
+        if (closeRequested || closed || evidence == null || captureInFlight ||
+            (isLogicalZoomSession && (expected == null || expected.zoomRequest != requestedLogicalZoom))) {
+            main.post { finished(Result.failure(IllegalStateException("A câmera ainda não está pronta."))) }
             return
         }
         captureInFlight = true
@@ -183,19 +243,21 @@ internal class PhysicalTelePhotoSession(
             captureInFlight = false
             try { finished(result) } finally { onCaptureIdle() }
         }
-        if (!worker.post { requestJpeg(file, ::complete) }) {
+        if (!worker.post { requestJpeg(file, expected, ::complete) }) {
             main.post { complete(Result.failure(CancellationException("Sessão da teleobjetiva encerrada."))) }
         }
     }
 
     fun focusAt(x: Float, y: Float, residual: Float = 1f): Boolean {
-        if (closeRequested || closed || evidence == null || !supportsFocus) return false
+        if (closeRequested || closed || evidence == null || !supportsFocus ||
+            requestedLogicalZoom != deliveredLogicalZoom) return false
         val (bx, by) = viewToBuffer?.map(x.toDouble(), y.toDouble()) ?: return false
         if (bx !in 0.0..PREVIEW_SIZE.width.toDouble() || by !in 0.0..PREVIEW_SIZE.height.toDouble()) return false
         val point = FocusPoint(bx / PREVIEW_SIZE.width, by / PREVIEW_SIZE.height,
             (0.08f / residual.coerceAtLeast(1f)).coerceAtLeast(0.005f))
+        val focusedZoom = deliveredLogicalZoom
         return worker.post {
-            if (closing || cameraSession == null) return@post
+            if (closing || cameraSession == null || focusedZoom != requestedLogicalZoom) return@post
             distant = false
             focus = point
             runRequest {
@@ -252,7 +314,8 @@ internal class PhysicalTelePhotoSession(
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-        if (surface !== texture || closeRequested || detachedTexture || closed || evidence != null) return
+        if (surface !== texture || closeRequested || detachedTexture || closed) return
+        if (evidence != null && requestedLogicalZoom == deliveredLogicalZoom) return
         deliveredTimestamp = surface.timestamp
         publishReady()
     }
@@ -288,12 +351,27 @@ internal class PhysicalTelePhotoSession(
     }
 
     private fun publishReady() {
-        val frame = previewFrame ?: return
-        if (evidence != null || closeRequested || closed || detachedTexture || viewToBuffer == null ||
-            deliveredTimestamp < frame.earliestTimestamp) return
+        if (closeRequested || closed || detachedTexture || viewToBuffer == null) return
+        val firstFrame = evidence == null
+        val zoom = requestedLogicalZoom
+        val frame = if (zoom != null) {
+            if (zoom == deliveredLogicalZoom) return
+            // Both the capture result and the displayed texture must belong to this request.
+            logicalPreviewFrames[deliveredTimestamp]?.takeIf { it.zoomRequest == zoom } ?: return
+        } else {
+            if (!firstFrame) return
+            previewFrame?.takeIf { deliveredTimestamp >= it.earliestTimestamp } ?: return
+        }
         evidence = frame.evidence
-        worker.removeCallbacks(openDeadline)
-        onReady(frame.evidence)
+        if (zoom != null) {
+            deliveredLogicalFrame = frame
+            deliveredLogicalZoom = zoom
+            logicalPreviewFrames.clear()
+        }
+        if (firstFrame) {
+            worker.removeCallbacks(openDeadline)
+            onReady(frame.evidence)
+        } else onLogicalZoomApplied(frame.evidence)
     }
 
     @SuppressLint("MissingPermission")
@@ -301,14 +379,29 @@ internal class PhysicalTelePhotoSession(
         if (closing) return
         runRequest {
             val logical = manager.getCameraCharacteristics(LOGICAL_ID)
-            require(PHYSICAL_ID in logical.physicalCameraIds) { "A câmera 0 não lista a teleobjetiva física 6." }
-            val physical = manager.getCameraCharacteristics(PHYSICAL_ID)
-            val streams = checkNotNull(physical[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP])
-            require(PREVIEW_SIZE in streams.getOutputSizes(SurfaceTexture::class.java).orEmpty() &&
-                JPEG_SIZE in streams.getOutputSizes(ImageFormat.JPEG).orEmpty()) {
-                "A câmera física 6 não lista a prévia ou o JPEG 4:3 necessários."
+            val source = if (isLogicalZoomSession) {
+                if (Build.VERSION.SDK_INT < 33) {
+                    error("A sessão lógica precisa de timestamps de sensor na textura.")
+                }
+                require(logical.physicalCameraIds.containsAll(LOGICAL_FOCALS.keys)) {
+                    "A câmera lógica não anuncia os três sensores."
+                }
+                val range = logical[CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE]
+                require(range != null && MIN_LOGICAL_ZOOM in range && MAX_LOGICAL_ZOOM in range &&
+                    CaptureRequest.CONTROL_ZOOM_RATIO in logical.availableCaptureRequestKeys) {
+                    "A faixa de zoom lógico necessária não está disponível."
+                }
+                logical
+            } else {
+                require(PHYSICAL_ID in logical.physicalCameraIds) { "A câmera 0 não lista a teleobjetiva física 6." }
+                manager.getCameraCharacteristics(PHYSICAL_ID)
             }
-            caps = Capabilities(logical, physical)
+            val streams = checkNotNull(source[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP])
+            require(PREVIEW_SIZE in streams.getOutputSizes(SurfaceTexture::class.java).orEmpty() &&
+                jpegSize in streams.getOutputSizes(ImageFormat.JPEG).orEmpty()) {
+                "A câmera não lista a combinação de prévia e JPEG 4:3 necessária."
+            }
+            caps = Capabilities(logical, source)
             val config = caps
             main.post {
                 if (!closeRequested && !closed) {
@@ -317,7 +410,7 @@ internal class PhysicalTelePhotoSession(
                 }
             }
             previewSurface = Surface(surface)
-            jpegReader = ImageReader.newInstance(JPEG_SIZE.width, JPEG_SIZE.height, ImageFormat.JPEG, 2)
+            jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, ImageFormat.JPEG, 2)
             jpegReader?.setOnImageAvailableListener(::readJpeg, worker)
             opening = true
             try {
@@ -355,11 +448,11 @@ internal class PhysicalTelePhotoSession(
     private fun configure(camera: CameraDevice) {
         val outputs = listOf(checkNotNull(previewSurface), checkNotNull(jpegReader).surface).map { surface ->
             OutputConfiguration(surface).apply {
-                setPhysicalCameraId(PHYSICAL_ID)
+                if (!isLogicalZoomSession) setPhysicalCameraId(PHYSICAL_ID)
                 if (Build.VERSION.SDK_INT >= 33) timestampBase = OutputConfiguration.TIMESTAMP_BASE_SENSOR
             }
         }
-        camera.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs,
+        val configuration = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs,
             { worker.post(it) }, object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     if (closing || device !== camera) return
@@ -368,21 +461,55 @@ internal class PhysicalTelePhotoSession(
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    if (!closing && device === camera) fail(IllegalStateException("Sessão física 0/6 recusada."))
+                    if (!closing && device === camera) fail(IllegalStateException("Configuração Camera2 recusada."))
                 }
-            }))
+            })
+        if (isLogicalZoomSession) {
+            try {
+                check(camera.isSessionConfigurationSupported(configuration)) { "A combinação lógica de prévia e JPEG foi recusada." }
+            } catch (_: UnsupportedOperationException) {
+                // Some HALs only report support when the session is opened.
+            }
+        }
+        camera.createCaptureSession(configuration)
+    }
+
+    private fun applyLatestLogicalZoom() {
+        if (!closing && cameraSession != null && shot == null &&
+            requestedLogicalZoom != submittedLogicalZoom) runRequest { repeatPreview() }
     }
 
     private fun repeatPreview() {
         val session = checkNotNull(cameraSession)
         val target = checkNotNull(previewSurface)
-        session.setRepeatingRequest(request(CameraDevice.TEMPLATE_PREVIEW, target).build(), previewCallback, worker)
+        val zoom = if (shot == null) requestedLogicalZoom else submittedLogicalZoom
+        val previousZoom = submittedLogicalZoom
+        if (zoom != null && zoom != previousZoom) {
+            if (previousZoom != null && previousZoom.physicalId != zoom.physicalId) {
+                focus = null
+                worker.removeCallbacks(resetFocus)
+            }
+            lastFrame = null
+            logicalMismatch = null
+            logicalMismatchStartedAt = 0L
+        }
+        val previewRequest = request(CameraDevice.TEMPLATE_PREVIEW, target, zoom).build()
+        session.setRepeatingRequest(previewRequest, previewCallback, worker)
+        if (zoom != null && zoom != previousZoom) {
+            submittedLogicalZoom = zoom
+            worker.removeCallbacks(logicalZoomDeadline)
+            worker.postDelayed(logicalZoomDeadline, LOGICAL_ZOOM_TIMEOUT_MS)
+        }
     }
 
     private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
             if (closing || session !== cameraSession) return
-            val frame = readFrame(result) ?: return
+            if (isLogicalZoomSession) {
+                readLogicalPreview(request, result)
+                return
+            }
+            val frame = readPhysicalFrame(result) ?: return
             val previous = lastFrame
             lastFrame = frame
             if (previous == null || abs(previous.evidence.cropZoom - frame.evidence.cropZoom) > 0.001f) {
@@ -395,8 +522,54 @@ internal class PhysicalTelePhotoSession(
         }
     }
 
+    private fun readLogicalPreview(request: CaptureRequest, result: TotalCaptureResult) {
+        val zoom = request.tag as? ZoomRequest ?: return
+        if (zoom != requestedLogicalZoom) return
+        val frame = readLogicalFrame(result, zoom)
+        lastFrame = frame
+        if (frame == null) {
+            logicalMismatch = "sensor=${result[CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID]} " +
+                "focal=${result[CaptureResult.LENS_FOCAL_LENGTH]}"
+            if (deliveredLogicalZoom == zoom) {
+                val now = SystemClock.elapsedRealtime()
+                if (logicalMismatchStartedAt == 0L) logicalMismatchStartedAt = now
+                else if (now - logicalMismatchStartedAt >= LOGICAL_ZOOM_TIMEOUT_MS && zoom == requestedLogicalZoom) {
+                    fail(IllegalStateException("A sessão lógica perdeu o sensor confirmado para ${zoom.ratio}× ($logicalMismatch)."))
+                }
+            }
+            return
+        }
+        logicalMismatch = null
+        logicalMismatchStartedAt = 0L
+        if (zoom == deliveredLogicalZoom) return
+        main.post {
+            if (closeRequested || closed || detachedTexture || zoom != requestedLogicalZoom ||
+                zoom == deliveredLogicalZoom) return@post
+            logicalPreviewFrames[frame.timestamp] = frame
+            if (logicalPreviewFrames.size > MAX_PREVIEW_METADATA) {
+                logicalPreviewFrames.remove(logicalPreviewFrames.keys.first())
+            }
+            publishReady()
+        }
+    }
+
+    private fun readLogicalFrame(result: TotalCaptureResult, zoom: ZoomRequest): Frame? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        val id = result[CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID] ?: return null
+        val focal = result[CaptureResult.LENS_FOCAL_LENGTH] ?: return null
+        val ratio = result[CaptureResult.CONTROL_ZOOM_RATIO] ?: return null
+        if (!zoom.matches(ratio, id, focal)) return null
+        val timestamp = result[CaptureResult.SENSOR_TIMESTAMP]?.takeIf { it > 0L } ?: return null
+        val active = if (result[CaptureResult.DISTORTION_CORRECTION_MODE] == CaptureResult.DISTORTION_CORRECTION_MODE_OFF) {
+            caps.logical[CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE] ?: caps.logicalArray
+        } else caps.logicalArray
+        val crop = result[CaptureResult.SCALER_CROP_REGION]?.takeIf { !it.isEmpty && active.contains(it) } ?: return null
+        val residual = minOf(active.width().toFloat() / crop.width(), active.height().toFloat() / crop.height())
+        return Frame(Evidence(id, focal, residual, ratio), timestamp, null, Rect(crop), zoom)
+    }
+
     @Suppress("DEPRECATION")
-    private fun readFrame(result: TotalCaptureResult): Frame? {
+    private fun readPhysicalFrame(result: TotalCaptureResult): Frame? {
         val physical = if (Build.VERSION.SDK_INT >= 31) {
             result.physicalCameraTotalResults[PHYSICAL_ID] ?: result.physicalCameraResults[PHYSICAL_ID]
         } else result.physicalCameraResults[PHYSICAL_ID]
@@ -414,9 +587,10 @@ internal class PhysicalTelePhotoSession(
             physical[CaptureResult.SENSOR_TIMESTAMP]?.takeIf { it > 0L }, Rect(crop))
     }
 
-    private fun request(template: Int, target: Surface): CaptureRequest.Builder {
+    private fun request(template: Int, target: Surface, zoom: ZoomRequest? = submittedLogicalZoom): CaptureRequest.Builder {
         val camera = checkNotNull(device)
-        val usePhysicalKeys = caps.physicalKeys.isNotEmpty() && (focus != null || distant || compensation != 0)
+        val usePhysicalKeys = !isLogicalZoomSession && caps.physicalKeys.isNotEmpty() &&
+            (focus != null || distant || compensation != 0)
         val builder = if (usePhysicalKeys) camera.createCaptureRequest(template, setOf(PHYSICAL_ID))
             else camera.createCaptureRequest(template)
         fun <T> set(key: CaptureRequest.Key<T>, value: T) {
@@ -424,6 +598,10 @@ internal class PhysicalTelePhotoSession(
             if (usePhysicalKeys && key in caps.physicalKeys) builder.setPhysicalCameraKey(key, value, PHYSICAL_ID)
         }
         builder.addTarget(target)
+        if (zoom != null && Build.VERSION.SDK_INT >= 30) {
+            builder.setTag(zoom)
+            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom.ratio)
+        }
         if (Build.VERSION.SDK_INT >= 31 &&
             CaptureRequest.SCALER_ROTATE_AND_CROP_NONE in
                 (caps.logical[CameraCharacteristics.SCALER_AVAILABLE_ROTATE_AND_CROP_MODES] ?: intArrayOf())) {
@@ -443,12 +621,13 @@ internal class PhysicalTelePhotoSession(
             if (useTorch) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF)
         focus?.let { point ->
             val physicalCrop = lastFrame?.crop ?: caps.sensorArray
-            if (caps.logicalAfRegions) builder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(point.region(caps.logicalArray)))
-            if (caps.logicalAeRegions) builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(point.region(caps.logicalArray)))
-            if (caps.afRegions && CaptureRequest.CONTROL_AF_REGIONS in caps.physicalKeys) {
+            val logicalCrop = if (isLogicalZoomSession) lastFrame?.crop ?: caps.logicalArray else caps.logicalArray
+            if (caps.logicalAfRegions) builder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(point.region(logicalCrop)))
+            if (caps.logicalAeRegions) builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(point.region(logicalCrop)))
+            if (usePhysicalKeys && caps.afRegions && CaptureRequest.CONTROL_AF_REGIONS in caps.physicalKeys) {
                 builder.setPhysicalCameraKey(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(point.region(physicalCrop)), PHYSICAL_ID)
             }
-            if (caps.aeRegions && CaptureRequest.CONTROL_AE_REGIONS in caps.physicalKeys) {
+            if (usePhysicalKeys && caps.aeRegions && CaptureRequest.CONTROL_AE_REGIONS in caps.physicalKeys) {
                 builder.setPhysicalCameraKey(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(point.region(physicalCrop)), PHYSICAL_ID)
             }
         }
@@ -465,20 +644,22 @@ internal class PhysicalTelePhotoSession(
         return (config.sensorOrientation - displayDegrees + 360) % 360
     }
 
-    private fun requestJpeg(file: File, finished: (Result<Unit>) -> Unit) {
+    private fun requestJpeg(file: File, confirmedLogicalFrame: Frame?, finished: (Result<Unit>) -> Unit) {
         val current = cameraSession
         val reader = jpegReader
         val target = previewSurface
-        val expected = lastFrame
-        if (closing || current == null || reader == null || target == null || shot != null || expected == null) {
-            main.post { finished(Result.failure(IllegalStateException("Captura da teleobjetiva indisponível."))) }
+        val expected = confirmedLogicalFrame ?: lastFrame
+        val zoom = confirmedLogicalFrame?.zoomRequest
+        if (closing || current == null || reader == null || target == null || shot != null || expected == null ||
+            (isLogicalZoomSession && (zoom == null || zoom != lastFrame?.zoomRequest))) {
+            main.post { finished(Result.failure(IllegalStateException("Captura Camera2 indisponível."))) }
             return
         }
         val pending = Shot(file, finished)
         shot = pending
         worker.postDelayed(shotDeadline, 3_000L)
         try {
-            val request = request(CameraDevice.TEMPLATE_STILL_CAPTURE, reader.surface).apply {
+            val request = request(CameraDevice.TEMPLATE_STILL_CAPTURE, reader.surface, zoom).apply {
                 addTarget(target)
                 set(CaptureRequest.JPEG_ORIENTATION, relativeRotation(caps))
                 set(CaptureRequest.JPEG_QUALITY, 95.toByte())
@@ -486,10 +667,13 @@ internal class PhysicalTelePhotoSession(
             current.capture(request, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                     if (shot !== pending || closing) return
-                    val actual = readFrame(result)
-                    if (actual == null || abs(actual.evidence.cropZoom - expected.evidence.cropZoom) >
+                    val actual = if (zoom != null) readLogicalFrame(result, zoom) else readPhysicalFrame(result)
+                    if (actual == null || (zoom != null && actual.crop != expected.crop) ||
+                        abs(actual.evidence.cropZoom - expected.evidence.cropZoom) >
                         expected.evidence.cropZoom * 0.02f) {
-                        finishShot(pending, Result.failure(IllegalStateException("O JPEG não confirmou o enquadramento da teleobjetiva.")))
+                        val error = IllegalStateException("O JPEG não confirmou o enquadramento da prévia.")
+                        finishShot(pending, Result.failure(error))
+                        if (zoom != null) fail(error)
                         return
                     }
                     pending.frame = actual
@@ -531,8 +715,8 @@ internal class PhysicalTelePhotoSession(
     private fun completeJpeg(pending: Shot) {
         val image = pending.image ?: return
         val frame = pending.frame ?: return
-        // The JPEG is pinned to 6 and on some HALs its buffer timestamp comes
-        // from the physical result. Accept only the two timestamps of this shot.
+        // A pinned JPEG can use the physical timestamp. The logical stream
+        // uses the logical result timestamp already verified for this shot.
         if (image.timestamp != frame.timestamp && image.timestamp != frame.physicalTimestamp) {
             image.close()
             pending.image = null
@@ -553,6 +737,7 @@ internal class PhysicalTelePhotoSession(
         worker.removeCallbacks(shotDeadline)
         pending.image?.close()
         main.post { pending.finished(result) }
+        applyLatestLogicalZoom()
     }
 
     private fun runRequest(operation: () -> Unit) {
@@ -571,6 +756,8 @@ internal class PhysicalTelePhotoSession(
         closing = true
         worker.removeCallbacks(openDeadline)
         worker.removeCallbacks(resetFocus)
+        worker.removeCallbacks(logicalZoomDeadline)
+        worker.removeCallbacks(logicalZoomUpdate)
         shot?.let { finishShot(it, Result.failure(CancellationException("Sessão da teleobjetiva encerrada."))) }
         val camera = device
         if (camera != null) {
@@ -596,6 +783,8 @@ internal class PhysicalTelePhotoSession(
     private fun finishClose(error: Throwable?) {
         closed = true
         evidence = null
+        deliveredLogicalFrame = null
+        logicalPreviewFrames.clear()
         if (preview.surfaceTextureListener === this) preview.surfaceTextureListener = null
         if (detachedTexture) texture?.release()
         texture = null
@@ -609,7 +798,18 @@ internal class PhysicalTelePhotoSession(
         const val LOGICAL_ID = "0"
         const val PHYSICAL_ID = "6"
         const val EXPECTED_FOCAL_MM = 7f
+        const val MIN_LOGICAL_ZOOM = 0.6f
+        const val MAX_LOGICAL_ZOOM = 3f
+        const val LOGICAL_ZOOM_TIMEOUT_MS = 1_500L
+        const val MAX_PREVIEW_METADATA = 12
+        val LOGICAL_FOCALS = mapOf("2" to 2.2f, "5" to 5.4f, PHYSICAL_ID to EXPECTED_FOCAL_MM)
         val PREVIEW_SIZE = Size(1440, 1080)
-        val JPEG_SIZE = Size(3648, 2736)
+        val PHYSICAL_JPEG_SIZE = Size(3648, 2736)
+        val LOGICAL_JPEG_SIZE = Size(4080, 3060)
+
+        fun nativeRatio(ratio: Float): Float {
+            require(ratio.isFinite()) { "Zoom lógico inválido." }
+            return ratio.coerceIn(MIN_LOGICAL_ZOOM, MAX_LOGICAL_ZOOM)
+        }
     }
 }
