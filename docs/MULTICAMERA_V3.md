@@ -103,6 +103,25 @@ Validação no Galaxy S24 SM-S9210 por ADB Wi-Fi em retrato, com APK de SHA-256 
 
 Build, lint e testes JVM passaram. O ensaio de app mediu 6,56–9,67 s do disparo à galeria nos três níveis. Esses valores incluem o processamento já existente. A correspondência por imagem em 30× e a continuidade de cor e movimento ainda exigem ensaios específicos. O protótipo desta etapa é de Foto.
 
+## Estabilização de Foto acima de 10×
+
+Na fusão automática acima de 10×, os quadros extras alinhados recebem peso proporcional à energia relativa das bordas, limitada ao peso de um quadro tão nítido quanto a referência. A publicação mantém o campo do primeiro quadro do disparo. A máscara de movimento, a rejeição de quadros incompatíveis e a recuperação de altas luzes seguem os mesmos critérios. Essa etapa protege os detalhes já registrados no quadro de referência. A restauração neural e o fluxo de publicação continuam a operar sobre o mesmo recorte.
+
+O teste A/B JVM usou o mesmo conjunto de imagens sintéticas para ambas as versões, com deslocamento fracionário e desfoque direcional. Passou com a mesma referência, os mesmos parâmetros de alinhamento e redução de pelo menos 10% no erro quadrático médio em relação ao quadro nítido de referência. A fusão subpixel de múltiplos quadros também é descrita por Wronski et al. [Handheld Multi-Frame Super-Resolution](https://arxiv.org/abs/1905.03277)
+
+O ensaio instrumentado `HighZoomOisFieldTest#probeOpticalStabilizationForTelePhoto` confirmou OIS `ON` por padrão nas duas rotas da tele, a saída física `0/6` e a lógica `0` a 3×. Em cada uma, foram pareados 12 quadros da prévia com seus resultados e confirmado o JPEG de 7,0 mm. Pedir OIS explicitamente também retornou `ON`. O EIS ficou `OFF` no ensaio de Foto. O firmware informou relógio `REALTIME` e cinco intrínsecos para os IDs 0/2/5/6. O campo de disponibilidade das amostras do atuador OIS retornou `null` em todos eles. Para estimar tremor residual no visor, a etapa seguinte deve medir o movimento dos pixels após o OIS. [Metadados Camera2](https://developer.android.com/reference/android/hardware/camera2/CaptureResult#STATISTICS_OIS_SAMPLES)
+
+A Samsung descreve processamento computacional ProVisual na série S24. O X200 Pro usa uma tele ZEISS de 85 mm equivalente com classificação CIPA 4,5 declarada pela vivo. As referências de produto dão contexto. As decisões para o SM-S9210 dependem dos resultados Camera2 medidos acima. [Samsung ProVisual](https://news.samsung.com/global/closing-the-distance-between-you-and-a-great-shot) · [vivo X200 Pro](https://www.vivo.com/en/products/x200-pro)
+
+Build de campo, APK instrumentado, lint e 108 testes JVM passaram. Com o APK `86013c1d4038ae1d9625624c167791fbb30d6b53bea05f5bd789d82a72627377`, o teste de captura em cena estática usou uma sessão lógica e registrou um JPEG de 7,0 mm por disparo. O controle físico do slider atingiu 19,9× e 30×.
+
+| Zoom | Recorte nativo → JPEG | Prévia/JPEG | Disparo → galeria | Fusão | Inferência GPU | PSS após render |
+| --- | --- | --- | --- | --- | --- | --- |
+| 19,9× | 461 × 615 → 1844 × 2460 | 49 pontos, erro mediano 1,19 px | 15,13 s | 5,94 s | 2,19 s | 258 MiB |
+| 30× | 306 × 408 → 1224 × 1632 | 49 pontos, erro mediano 1,28 px | 10,85 s | 6,11 s | 1,01 s | 270 MiB |
+
+Em ambos os casos, dois quadros contribuíram e o Real-ESRGAN usou a GPU. O status térmico ao fim foi `NONE`. A latência inclui processamento e publicação, e a PSS é uma leitura pontual. O ensaio mede geometria e publicação em cena estática. A comparação de tremor e nitidez com a câmera em movimento continua pendente. Uma tentativa anterior de recriação da Activity por ADB registrou `ERROR_CAMERA_DEVICE` e fallback durante a abertura. Os dois JPEGs foram publicados naquela tentativa. O ensaio acima partiu de uma abertura fria e não registrou fallback. A recriação com a câmera já aberta merece validação própria.
+
 ## Critérios para a próxima prova
 
 - Medir FOV a cada fronteira por resolução, proporção e estabilização. Meta inicial de erro ≤3%. Conferir prévia e JPEG com alvo distante.

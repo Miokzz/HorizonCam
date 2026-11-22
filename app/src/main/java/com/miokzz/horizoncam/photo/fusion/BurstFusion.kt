@@ -15,6 +15,7 @@ object BurstFusion {
         val frame: PreparedFrame,
         val alignment: FrameAlignment,
         val mask: ByteArray,
+        val blendWeight: Double,
     )
 
     private data class Rendered(
@@ -103,7 +104,17 @@ object BurstFusion {
                             subpixelReliable = false,
                             reason = "Movimento ou exposição local incompatível",
                         )
-                } else registered.add(Registered(prepared[index], alignment, mask))
+                } else {
+                    val frame = prepared[index]
+                    val gain = alignment.exposureGain
+                    val noise = frame.noise * gain
+                    // The motion mask rejects local differences. Also reduce the contribution
+                    // of a compatible frame whose edges are softer than the shutter reference.
+                    val detail = if (options.protectReferenceDetail)
+                        alignment.sharpnessRatio.coerceIn(0.0, 1.0) else 1.0
+                    val weight = max(0.5, alignment.confidence) * detail / max(1.0, noise * noise)
+                    registered.add(Registered(frame, alignment, mask, weight))
+                }
             }
             alignments.add(alignment)
             onProgress(FusionProgress(index + 1, frames.size, "Alinhando"))
@@ -281,16 +292,7 @@ object BurstFusion {
                     val sx = refX + alignment.dx
                     val sy = refY + alignment.dy
                     if (sx < 0 || sy < 0 || sx > width - 1 || sy > height - 1) continue
-                    val confidence = max(0.5, alignment.confidence)
-                    var weight =
-                        confidence /
-                            max(
-                                1.0,
-                                candidate.frame.noise *
-                                    candidate.frame.noise *
-                                    alignment.exposureGain *
-                                    alignment.exposureGain,
-                            )
+                    var weight = candidate.blendWeight
                     val candidateRed: Double
                     val candidateGreen: Double
                     val candidateBlue: Double

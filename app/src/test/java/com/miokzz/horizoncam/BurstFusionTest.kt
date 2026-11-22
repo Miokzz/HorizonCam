@@ -157,6 +157,27 @@ class BurstFusionTest {
     }
 
     @Test
+    fun highZoomBlendPreservesDetailAgainstAlignedMotionBlur() {
+        val original = frame()
+        val blurred = original.copy(pixels = IntArray(original.pixels.size) { index ->
+            val x = index % original.width + 1.25
+            val y = index / original.width - 0.6
+            pixel((-4..4).map { signal(x + it, y) }.average())
+        })
+        val burst = listOf(original, blurred)
+        val options = FusionOptions(referenceIndex = 0, maxShiftPixels = 6)
+        val baseline = BurstFusion.fuse(burst, options)
+        val protected = BurstFusion.fuse(burst, options.copy(protectReferenceDetail = true))
+        val alignment = protected.alignments[1]
+        assertTrue(alignment.toString(), alignment.accepted && alignment.sharpnessRatio in 0.40..0.90)
+        assertEquals(baseline.alignments, protected.alignments)
+        assertEquals(0, protected.referenceIndex)
+        val baselineError = mse(baseline.pixels, original.pixels, 8)
+        val protectedError = mse(protected.pixels, original.pixels, 8)
+        assertTrue("baseline=$baselineError protected=$protectedError", protectedError < baselineError * 0.9)
+    }
+
+    @Test
     fun actualDistinctHalfPixelMeasurementsEnableTwoTimesReconstruction() {
         val frames =
             listOf(

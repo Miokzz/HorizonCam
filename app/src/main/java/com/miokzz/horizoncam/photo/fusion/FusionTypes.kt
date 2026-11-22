@@ -16,6 +16,7 @@ data class FusionOptions(
     val referenceIndex: Int? = null,
     val maxLongEdge: Int = 1280,
     val srMaxLongEdge: Int = 960,
+    val protectReferenceDetail: Boolean = false,
 )
 
 data class FusionProgress(

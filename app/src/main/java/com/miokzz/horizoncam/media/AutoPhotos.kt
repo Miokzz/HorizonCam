@@ -328,7 +328,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
 
     private fun extras(file: File) = (1..2).map { File(file.parentFile, "${file.nameWithoutExtension}.extra$it") }
 
-    private fun fuseIfAvailable(file: File, base: Bitmap, crop: Float): Pair<Bitmap, Int> {
+    private fun fuseIfAvailable(file: File, base: Bitmap, crop: Float, zoom: Float): Pair<Bitmap, Int> {
         val additional = extras(file).filter { it.isFile }
         if (additional.isEmpty() || maxOf(base.width, base.height) > 1280 || minOf(base.width,base.height)<16) return base to 1
         fun frame(bitmap: Bitmap, input: File): com.miokzz.horizoncam.photo.fusion.FusionFrame {
@@ -347,7 +347,8 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             finally { bitmap.recycle() }
         }
         val result = com.miokzz.horizoncam.photo.fusion.BurstFusion.fuse(frames,
-            com.miokzz.horizoncam.photo.fusion.FusionOptions(referenceIndex = 0),
+            com.miokzz.horizoncam.photo.fusion.FusionOptions(
+                referenceIndex = 0, protectReferenceDetail = zoom > 10f),
             onProgress = { p -> AutoPhotos.post(AutoPhotos.State(true,"Alinhando · ${p.completedFrames}/${p.totalFrames}")) },
             isCancelled = { isStopped })
         if (result.acceptedFrameCount<2) return base to 1
@@ -361,7 +362,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         val framed = decodeFramed(file, crop)
         val decodedAt = SystemClock.elapsedRealtime()
         val base = framed.bitmap
-        val pair = try { fuseIfAvailable(file,base,crop) }
+        val pair = try { fuseIfAvailable(file, base, crop, zoom) }
         catch (e: CancellationException) { base.recycle(); throw e }
         catch (e: Exception) { Log.w("HorizonAuto","Fusão opcional dispensada",e); base to 1 }
         catch (e: OutOfMemoryError) { Log.w("HorizonAuto","Memória insuficiente para fusão opcional",e); base to 1 }
