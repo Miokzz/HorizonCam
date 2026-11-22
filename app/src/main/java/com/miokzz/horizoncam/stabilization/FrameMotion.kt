@@ -27,6 +27,8 @@ internal class FrameMotion(private val width: Int, private val height: Int) {
 
     var matchedPatches = 0
         private set
+    var measuredPixels: FrameShift? = null
+        private set
 
     init { require(width >= 48 && height >= 32) }
 
@@ -34,15 +36,18 @@ internal class FrameMotion(private val width: Int, private val height: Int) {
         lastNs = 0L
         correction = FrameShift.ZERO
         matchedPatches = 0
+        measuredPixels = null
     }
 
     fun advance(timestampNs: Long): FrameShift {
         val gap = timestampNs - lastNs
         matchedPatches = 0
+        measuredPixels = null
         if (lastNs == 0L || gap !in 1..150_000_000L) {
             correction = FrameShift.ZERO
         } else {
             val measured = estimate()
+            measuredPixels = measured
             val motion = if (measured == null) FrameShift.ZERO else
                 FrameShift(2 * measured.x / width, 2 * measured.y / height)
             // Track a slowly moving camera path. Constant pans are followed while short

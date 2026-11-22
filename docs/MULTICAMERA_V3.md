@@ -122,6 +122,21 @@ Build de campo, APK instrumentado, lint e 108 testes JVM passaram. Com o APK `86
 
 Em ambos os casos, dois quadros contribuíram e o Real-ESRGAN usou a GPU. O status térmico ao fim foi `NONE`. A latência inclui processamento e publicação, e a PSS é uma leitura pontual. O ensaio mede geometria e publicação em cena estática. A comparação de tremor e nitidez com a câmera em movimento continua pendente. Uma tentativa anterior de recriação da Activity por ADB registrou `ERROR_CAMERA_DEVICE` e fallback durante a abertura. Os dois JPEGs foram publicados naquela tentativa. O ensaio acima partiu de uma abertura fria e não registrou fallback. A recriação com a câmera já aberta merece validação própria.
 
+### Fluxo sincronizado e movimento residual
+
+`HighZoomMotionFieldTest#probeTelePhotoMotionStream` validou três saídas simultâneas no SM-S9210 por ADB Wi-Fi em 22/11/2026. O APK de campo tem SHA-256 `70d6c48ec98560889f792938c4e6f62126d5920d4629c2185beb6f619000e10f`. O ensaio usou prévia PRIVATE de 1440 × 1080, YUV de 960 × 720 e JPEG nativo. O sensor 6 foi confirmado pelos resultados de captura e pela distância focal de 7 mm. OIS permaneceu `ON` e EIS `OFF` em todos os quadros medidos. Os buffers ficaram em memória e a instrumentação publicou somente estatísticas.
+
+| Rota | JPEG | YUV antes do JPEG, intervalo P50/P95 de chegada | Intervalo YUV atravessando o disparo | Movimento RMS / máximo no recorte central de 96 × 72 |
+| --- | --- | --- | --- | --- |
+| Lógica `0` a 3× | 4080 × 3060 | 31,7 / 42,0 ms | 376,6 ms | 0,52 / 0,87 px |
+| Física `0/6` | 3648 × 2736 | 33,6 / 37,7 ms | 65,6 ms | 0,64 / 1,12 px |
+
+As duas rotas parearam 24 quadros antes do disparo e 16 após o JPEG, com timestamps idênticos entre YUV e prévia e sem perdas reportadas. O intervalo mediano por timestamp do sensor foi 33,32 ms. O comando de JPEG até o buffer levou 912,6 ms na lógica e 115,8 ms na física. O pedido do JPEG excluiu o YUV em ambas as rotas. A lacuna maior na lógica foi observada em uma captura e precisa ser considerada na continuidade da prévia e na invalidação do estimador durante a captura.
+
+Na cena estática, o estimador subpixel encontrou vetores em 24/24 pares de cada rota. O recorte de 96 × 72 no YUV corresponde à escala do recorte digital de 10× sobre a tele de 3×. A medida inclui a incerteza do estimador. O A/B JVM com tremor sintético reteve menos de metade do deslocamento RMS após a correção calculada. O teste de campo mediu movimento, com a estabilização adicional do visor ainda desativada.
+
+O giroscópio cobriu o intervalo da primeira linha em 24/24 exposições por rota, com relógio Camera2 `REALTIME` e sem lacunas acima de 40 ms nessa janela. Os picos foram 0,013 e 0,016 rad/s na lógica e física. Isso viabiliza usar movimento angular para telemetria ou sinal auxiliar. A correção do OIS segue desconhecida em cada instante. Para uma futura transformação, a referência escolhida é o movimento observado no YUV pós-HAL, com a leitura do giroscópio servindo de contexto. A comparação com movimento controlado no aparelho, a correspondência de um crop deslocado entre prévia e JPEG e a carga térmica em uso prolongado seguem pendentes. Se a combinação de saídas for recusada, a alternativa de protótipo é amostrar a textura da própria prévia no GPU, mantendo as saídas atuais. [Timestamp Camera2](https://developer.android.com/reference/android/hardware/camera2/CaptureResult#SENSOR_TIMESTAMP) · [Timestamp dos sensores](https://developer.android.com/reference/android/hardware/SensorEvent#timestamp) · [Combinações Camera2](https://developer.android.com/reference/android/hardware/camera2/CameraDevice#createCaptureSession(android.hardware.camera2.params.SessionConfiguration))
+
 ## Critérios para a próxima prova
 
 - Medir FOV a cada fronteira por resolução, proporção e estabilização. Meta inicial de erro ≤3%. Conferir prévia e JPEG com alvo distante.
