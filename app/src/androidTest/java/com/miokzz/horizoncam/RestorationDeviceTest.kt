@@ -66,12 +66,16 @@ class RestorationDeviceTest {
                         val baseline = psnr(input, truth)
                         val restored = psnr(out, truth)
                         assertTrue(restored.isFinite() && baseline.isFinite())
+                        if (zoom >= 7.8f) {
+                            assertEquals(PhotoPrior.MAX.display, prediction.model)
+                            assertTrue("Zoom $zoom: detail fell below the matched reference gate", restored > baseline + 0.1)
+                        }
                         val line = "fixture=$scene zoom=$zoom originalPSNR=$baseline restoredPSNR=$restored " +
                             "tiles=${prediction.tiles} ms=${prediction.elapsedMs} model=${prediction.model} " +
                             "backend=${prediction.backend} neuralMs=${prediction.inferenceMs} invokeMs=${prediction.nativeInferenceMs}"
                         android.util.Log.i("HorizonQuality", line)
                         runner.sendStatus(0, Bundle().apply { putString("stream", "\n$line\n") })
-                    } finally { prediction.bitmap.recycle() }
+                    } finally { prediction.close() }
                 }
             } finally { input.recycle(); truth.recycle() }
         }

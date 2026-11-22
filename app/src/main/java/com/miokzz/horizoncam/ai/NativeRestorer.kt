@@ -12,9 +12,15 @@ import kotlin.math.max
 
 object NativeRestorer {
     const val MAX_PIXELS = 12_600_000
+    /** Close the result before recycling the source. A native result borrows that source. */
     data class Result(val bitmap: Bitmap, val modelWidth: Int, val modelHeight: Int, val elapsedMs: Long,
         val model: String, val backend: String, val tiles: Int, val inferenceMs: Long, val scene: SceneEvidence,
-        val nativeInferenceMs: Long)
+        val nativeInferenceMs: Long) : AutoCloseable {
+        val usedNeuralModel get() = tiles > 0
+        override fun close() {
+            if (usedNeuralModel) bitmap.recycle()
+        }
+    }
 
     fun restore(context: Context, original: Bitmap, zoom: Float, iso: Int, upscale: Int,
                 onProgress: (AiProgress) -> Unit, cancelled: () -> Boolean, exposureSeconds: Double = 0.0): Result {
@@ -30,16 +36,10 @@ object NativeRestorer {
         if (upscale == 1 && scene.preserveNative(zoom)) {
             onProgress(AiProgress(0, 1))
             checkActive()
-            val copy = checkNotNull(original.copy(Bitmap.Config.ARGB_8888, false))
-            try {
-                checkActive()
-                onProgress(AiProgress(1, 1))
-                return Result(copy, width, height, (System.nanoTime()-start)/1_000_000,
-                    "Detalhe nativo", "Nenhum", 0, 0, scene, 0)
-            } catch (t: Throwable) {
-                copy.recycle()
-                throw t
-            }
+            onProgress(AiProgress(1, 1))
+            checkActive()
+            return Result(original, 0, 0, (System.nanoTime()-start)/1_000_000,
+                "Detalhe nativo", "Nenhum", 0, 0, scene, 0)
         }
         val plan = ReconstructionPlan.choose(original.width,original.height,width,height,zoom,scene)
         val guide = if (plan.guideW == original.width && plan.guideH == original.height) original
@@ -62,7 +62,7 @@ object NativeRestorer {
             var nativeNs = 0L
             var reportedTiles = 0
             val inferenceStart = System.nanoTime()
-            InferenceRuntime.run(context,plan.prior,::checkActive) { engine ->
+            InferenceRuntime.run(context,plan.prior,::checkActive) { engine, ensureActive ->
                 backend = engine.backend.label
                 val inputEdge = InferenceRuntime.INPUT_EDGE
                 val outputEdge = InferenceRuntime.OUTPUT_EDGE
@@ -78,7 +78,7 @@ object NativeRestorer {
                     val minY = iy.min()
                     val spanY = iy.max() - minY + 1
                     for (x in 0 until guide.width step plan.prior.core) {
-                        checkActive()
+                        ensureActive()
                         val ix = IntArray(inputEdge) { AiGeometry.mirror(x - plan.prior.halo + it, guide.width) }
                         val minX = ix.min()
                         val spanX = ix.max() - minX + 1
@@ -97,7 +97,7 @@ object NativeRestorer {
                         engine.rgb.put(inputValues)
                         val output = engine.invoke()
                         nativeNs += engine.nativeNs
-                        checkActive()
+                        ensureActive()
                         val w = minOf(plan.prior.core, guide.width - x) * plan.neuralScale
                         val h = minOf(plan.prior.core, guide.height - y) * plan.neuralScale
                         val left = plan.prior.halo * 4
@@ -140,6 +140,7 @@ object NativeRestorer {
                     }
                 }
             }
+            checkActive()
             val ms=(System.nanoTime()-inferenceStart)/1_000_000
             val result=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888)
             try {
@@ -187,7 +188,8 @@ object NativeRestorer {
             val nativeSampling = source.width == out.width && source.height == out.height
             val filter=Paint(Paint.FILTER_BITMAP_FLAG)
             val measured=IntArray(w*(BAND+2))
-            val lp=IntArray(w*BAND)
+            val lp = if (low !== source) IntArray(w * BAND) else null
+            val lowPixels = lp ?: measured
             val prior=IntArray(w*BAND)
             val mean = priorMean?.let { IntArray(w * BAND) }
             val result=IntArray(w*BAND)
@@ -209,7 +211,7 @@ object NativeRestorer {
                 val bottom=minOf(out.height,y+h+1)
                 read(source,top,bottom-top,measured)
                 for (i in 0 until (bottom-top)*w) lum[i]=DetailTransfer.y(measured[i])
-                read(low,y,h,lp)
+                if (lp != null) read(low,y,h,lp)
                 read(prediction,y,h,prior)
                 if (priorMean != null && mean != null) read(priorMean, y, h, mean)
                 val sourceTop = if(nativeSampling) 0 else maxOf(0,y/sourceScale-1)
@@ -236,13 +238,14 @@ object NativeRestorer {
                 }
                 for (j in 0 until h) {
                     val row=(j+y-top)*w
+                    val lowRow = if (lp == null) row else j * w
                     val prev=max(0,j+y-top-1)*w
                     val next=minOf(bottom-top-1,j+y-top+1)*w
                     for (x in 0 until w) {
                         val i=j*w+x
                         val envelopeIndex = if(nativeSampling) 0 else
                             ((y+j)/sourceScale-sourceTop)*source.width+x/sourceScale
-                        result[i]=DetailTransfer.pixel(measured[row+x],lp[i],prior[i],lum[row+max(0,x-1)],
+                        result[i]=DetailTransfer.pixel(measured[row+x],lowPixels[lowRow+x],prior[i],lum[row+max(0,x-1)],
                             lum[row+minOf(w-1,x+1)],lum[prev+x],lum[next+x],zoom,scene,blind,nativeSampling,
                             if(nativeSampling) 0 else envelopeMin[envelopeIndex],
                             if(nativeSampling) 255 else envelopeMax[envelopeIndex],

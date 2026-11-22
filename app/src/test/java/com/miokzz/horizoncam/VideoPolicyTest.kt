@@ -62,11 +62,15 @@ class VideoPolicyTest {
     }
 
     @Test
-    fun eisIsCapabilityGatedAndNeverQuietlyEnabledForUhdOrSixty() {
-        assertTrue(VideoRatePolicy.nativeEisAllowed(VideoQualityPreset.FHD, 30, true))
-        assertFalse(VideoRatePolicy.nativeEisAllowed(VideoQualityPreset.FHD, 30, false))
-        assertFalse(VideoRatePolicy.nativeEisAllowed(VideoQualityPreset.FHD, 60, true))
-        assertFalse(VideoRatePolicy.nativeEisAllowed(VideoQualityPreset.UHD, 30, true))
+    fun allFourDeclaredModesCanAttemptEisBeforeFallingBackAtTheSameResolutionAndRate() {
+        for (quality in listOf(VideoQualityPreset.FHD, VideoQualityPreset.UHD)) {
+            for (fps in listOf(30, 60)) {
+                val request = VideoModeRequest(quality, fps, true)
+                val modes = VideoRatePolicy.fallbacks(request, mapOf(quality to setOf(30, 60)), true)
+                assertEquals(request, modes[0])
+                assertEquals(request.copy(nativeEis = false), modes[1])
+            }
+        }
         val fallback =
             VideoRatePolicy.fallbacks(
                 VideoModeRequest(VideoQualityPreset.FHD, 30, true),

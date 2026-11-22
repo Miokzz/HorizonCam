@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageOps, ImageStat
-from media_checks import require, validate_geometry, validate_probe, validate_ai_output, validate_processing_dimensions
+from media_checks import auto_photo_kind, require, validate_ai_output, validate_auto_photo, validate_geometry, validate_probe
 from ui_checks import wait_for, immersive_confirmation, pixel_launcher_anr_close
 
 PACKAGE = "com.miokzz.horizoncam.gl"
@@ -245,13 +245,13 @@ class Smoke:
                     with Image.open(path) as candidate:
                         candidate.load()
                         description = candidate.getexif().get(270, "")
-                        if "Horizon AI 2" not in str(description) or "textura estimada" not in str(description):
+                        if not auto_photo_kind(description):
                             return None
                 except (OSError, ValueError):
                     return None
                 return remote
             remote = self.wait(signed_final,
-                "Normal Foto did not publish its single attributed neural final JPEG within6min", seconds=360)
+                "Normal Foto did not publish its single attributed final JPEG within six minutes", seconds=360)
         else:
             remote = self.new_media(True, before)
         self.wait_node("recordButton", "Tirar foto")
@@ -266,19 +266,16 @@ class Smoke:
             validate_geometry(*displayed.size, portrait, 4 / 3)
             assert_visible_scene(displayed)
             description = image.getexif().get(270, "")
+            processing = None
             if auto:
                 # The worker logs the upright native source dimensions, independently of saved EXIF.
                 logs = self.adb("logcat", "-d", "-s", "HorizonAuto:I", "*:S")
                 (self.output / (label + "-auto-worker.txt")).write_text(logs, encoding="utf-8")
-                dimensions = re.findall(r"AI2 source=(\d+)x(\d+) output=(\d+)x(\d+)", logs)
-                require(bool(dimensions), "No actual neural worker completion evidence")
-                source_w, source_h, out_w, out_h = map(int, dimensions[-1])
-                require((out_w, out_h) == displayed.size, "Worker dimensions differ from the saved JPEG")
-                validate_processing_dimensions(description, (source_w, source_h), displayed.size)
+                processing = validate_auto_photo(logs, Path(remote).name.removeprefix("HC_"), displayed.size, description)
                 require(len(self.media_paths(True) - before) == 1, "Normal Foto left extra public JPEGs")
             self.report["captures"].append({"name": label, "kind": "JPEG", "encoded": encoded,
                 "displayed": displayed.size, "exif_orientation": orientation,
-                "automatic_blind_restoration": auto, "image_description": description})
+                "automatic_photo": auto, "processing": processing, "image_description": description})
         self.snapshot(label + "-saved")
 
     def capture_ai(self):

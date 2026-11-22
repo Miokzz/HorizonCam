@@ -7,6 +7,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
+import com.miokzz.horizoncam.ai.NativeRestorer
+import com.miokzz.horizoncam.ai.PhotoProvenance
 import com.miokzz.horizoncam.photo.BurstCapture
 import com.miokzz.horizoncam.photo.fusion.BurstFusion
 import com.miokzz.horizoncam.photo.fusion.FusionFrame
@@ -67,20 +69,26 @@ object BurstJobs {
                     try {
                         val notes = "$detail · $used/${frames.size} quadros · ${output.width}×${output.height}"
                         val exif = android.media.ExifInterface(reference)
-                        val iso = exif.getAttributeInt(android.media.ExifInterface.TAG_ISO_SPEED_RATINGS,100)
+                        val iso = exif.getAttributeInt(android.media.ExifInterface.TAG_ISO_SPEED_RATINGS, 0)
                         val exposure = exif.getAttributeDouble(android.media.ExifInterface.TAG_EXPOSURE_TIME,0.0)
                         val restored = try {
-                            com.miokzz.horizoncam.ai.NativeRestorer.restore(app,bitmap,zoom,iso,1,
+                            NativeRestorer.restore(app,bitmap,zoom,iso,1,
                                 { p -> updates.postValue(State(true, "Revelando · ${p.completedTiles}/${p.totalTiles}")) },
                                 cancelled::get, exposure)
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) { Log.w("HorizonBurst","Fusão concluída sem etapa neural", e); null }
-                        val description = if (restored != null) {
-                            "$notes | Horizon AI 2 | ${restored.model} | textura estimada | zoom ${zoom}x | " +
-                                "input/output ${bitmap.width}x${bitmap.height} -> ${restored.bitmap.width}x${restored.bitmap.height}"
-                        } else "$notes | sem restauracao neural"
-                        try { AiPhotoFiles.encode(app, Uri.fromFile(reference), restored?.bitmap ?: bitmap, temporary, description) }
-                            finally { restored?.bitmap?.recycle() }
+                        catch (e: OutOfMemoryError) {
+                            Log.w("HorizonBurst", "Memória insuficiente para a etapa neural", e)
+                            null
+                        }
+                        restored.use { result ->
+                            if (cancelled.get()) throw CancellationException()
+                            val jpeg = result?.bitmap ?: bitmap
+                            val model = result?.takeIf { it.usedNeuralModel }?.model
+                            val provenance = PhotoProvenance.describe(model, used, zoom,
+                                bitmap.width, bitmap.height, jpeg.width, jpeg.height)
+                            AiPhotoFiles.encode(app, Uri.fromFile(reference), jpeg, temporary, "$notes | $provenance")
+                        }
                         if (cancelled.get()) throw CancellationException()
                         check(temporary.renameTo(AutoPhotos.encodedFor(referenceFile))) { "Falha ao confirmar a fusão privada." }
                         Log.i("HorizonBurst", "$notes · cobertura subpixel ${output.phaseCoverage} · ${output.alignments}")

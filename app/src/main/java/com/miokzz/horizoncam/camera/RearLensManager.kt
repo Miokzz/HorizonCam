@@ -9,6 +9,7 @@ import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.os.Build
 import android.os.SystemClock
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
@@ -33,7 +34,9 @@ data class LensOption(
     val autofocus: Boolean?,
     val isStandaloneSensor: Boolean = false,
     val activeArray: Rect? = null,
-    val uncorrectedActiveArray: Rect? = null
+    val uncorrectedActiveArray: Rect? = null,
+    val physicalPhotoOutputs: PhysicalPhotoOutputs? = null,
+    val focalLengthsMm: List<Float> = emptyList()
 ) {
     val initialCameraZoom: Float get() = 1f.coerceIn(minCameraZoom, maxCameraZoom)
     val isPhysicalOnly: Boolean get() = physicalCameraId != null
@@ -44,8 +47,11 @@ data class LensOption(
 data class CaptureTelemetry(
     val atMs: Long, val frame: Long, val afState: Int?, val aeState: Int?,
     val focalLength: Float?, val focusDistance: Float?, val crop: String?, val zoomRatio: Float?,
-    val sourceCameraId: String, val physicalResult: Boolean, val videoStabilizationMode: Int?,
-    val physicalCropZoom: Float?
+    val sourceCameraId: String?, val physicalResult: Boolean, val videoStabilizationMode: Int?,
+    val physicalCropZoom: Float?,
+    val nativeZoom: NativeZoomObservation?,
+    val stillCapture: Boolean,
+    val activePhysicalCameraId: String?
 )
 
 data class LensDiagnostics(
@@ -56,13 +62,18 @@ data class LensDiagnostics(
     val activePhysicalCameraId: String?,
     val rejection: String?,
     val capture: CaptureTelemetry? = null,
-    val standaloneSensor: Boolean = false
+    val standaloneSensor: Boolean = false,
+    val lastStillCapture: CaptureTelemetry? = null
 ) {
     /** The logical active ID describes the logical output, not a pinned physical output. */
     val outputPhysicalCameraId: String?
         get() = if (standaloneSensor) capture?.sourceCameraId
             else if (selectedPhysicalCameraId == null) activePhysicalCameraId
             else capture?.takeIf { it.physicalResult && it.sourceCameraId == selectedPhysicalCameraId }?.sourceCameraId
+
+    /** The value recorded by the HAL for a request issued by the current zoom command. */
+    fun nativeZoomAfter(requestedRatio: Float, issuedAtMs: Long, afterFrame: Long = -1L): Float? =
+        capture?.takeIf { it.atMs >= issuedAtMs && it.frame > afterFrame }?.nativeZoom?.appliedFor(requestedRatio)
 }
 
 /**
@@ -74,14 +85,16 @@ data class LensDiagnostics(
 @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 class RearLensManager private constructor(
     val defaultOption: LensOption,
-    val options: List<LensOption>
+    val options: List<LensOption>,
+    val publicCameraIds: Set<String>,
+    val cameraXCameraIds: Set<String>
 ) {
     private val evidence = CaptureEvidence(SystemClock::elapsedRealtime)
     private val rejected = mutableMapOf<String, MutableMap<String, String>>()
     private val runtimeSpecs = mutableMapOf<String, LensZoomSpec>()
-    @Volatile private var selected: LensOption? = null
-    @Volatile private var telemetry: CaptureTelemetry? = null
-    @Volatile private var telemetryToken = 0L
+    private var selected: LensOption? = null
+    private var telemetry: CaptureTelemetry? = null
+    private var lastStillCapture: CaptureTelemetry? = null
 
     fun option(key: String): LensOption? = options.firstOrNull { it.key == key }
 
@@ -128,16 +141,19 @@ class RearLensManager private constructor(
     /** Call on a failed bind, then bind defaultOption with fresh builders/use cases. */
     @Synchronized fun onBindRejected(option: LensOption, profile: String, reason: String) {
         if (option.key != defaultOption.key) rejected.getOrPut(profile, ::linkedMapOf)[option.key] = reason.take(240)
-        selected = null
-        telemetry = null
-        evidence.reset().also { telemetryToken = it }
+        invalidateCaptureDiagnostics()
     }
 
     /** Call before every unbind and on lifecycle stop; attach will start a fresh epoch. */
-    fun invalidateCaptureDiagnostics() {
+    @Synchronized fun invalidateCaptureDiagnostics() {
         selected = null
+        clearTelemetry()
+        evidence.reset()
+    }
+
+    private fun clearTelemetry() {
         telemetry = null
-        evidence.reset().also { telemetryToken = it }
+        lastStillCapture = null
     }
 
     /**
@@ -145,61 +161,107 @@ class RearLensManager private constructor(
      * Callback reads metadata only and never controls the Camera2 session. Safe to poll
      * diagnostics from main; stale generations, missing IDs, failures and closed sessions clear ID.
      */
-    fun attachCaptureDiagnostics(previewBuilder: Preview.Builder, option: LensOption,
-        onNativeVideoStabilization: (Boolean) -> Unit = {}) {
+    @Synchronized fun attachCaptureDiagnostics(previewBuilder: Preview.Builder, option: LensOption,
+        onNativeVideoStabilization: (Boolean?) -> Unit = {}) {
         selected = null
-        telemetry = null
-        val token = evidence.reset().also { telemetryToken = it }
+        clearTelemetry()
+        val token = evidence.reset()
         Camera2Interop.Extender(previewBuilder).apply { option.physicalCameraId?.let(::setPhysicalCameraId) }
             .setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest,
                     result: TotalCaptureResult) {
                     if (session.device.id != option.cameraId) return
-                    val reported = runCatching {
-                        result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)
-                    }.getOrNull()
-                    evidence.record(token, result.frameNumber, reported, session)
-                    val physical = option.physicalCameraId?.let { result.physicalCameraResults[it] }
-                    val measurement = physical ?: result
-                    if (telemetryToken == token && selected?.key == option.key) {
-                        val nativeMode = measurement.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)
-                            ?: result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)
-                        onNativeVideoStabilization(listOfNotNull(nativeMode, result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE))
-                            .any { it != CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF })
-                        val crop = measurement.get(CaptureResult.SCALER_CROP_REGION)
-                        val active = if (physical != null && measurement.get(CaptureResult.DISTORTION_CORRECTION_MODE) == CaptureRequest.DISTORTION_CORRECTION_MODE_OFF)
-                            option.uncorrectedActiveArray ?: option.activeArray else option.activeArray
-                        val physicalZoom = if (physical != null && crop != null && active != null &&
-                            !crop.isEmpty && active.contains(crop)) {
-                            minOf(active.width().toFloat() / crop.width(), active.height().toFloat() / crop.height())
-                        } else null
-                        telemetry = CaptureTelemetry(SystemClock.elapsedRealtime(), result.frameNumber,
-                            measurement.get(CaptureResult.CONTROL_AF_STATE), measurement.get(CaptureResult.CONTROL_AE_STATE),
-                            measurement.get(CaptureResult.LENS_FOCAL_LENGTH), measurement.get(CaptureResult.LENS_FOCUS_DISTANCE),
-                            crop?.toShortString(),
-                            if (android.os.Build.VERSION.SDK_INT >= 30) measurement.get(CaptureResult.CONTROL_ZOOM_RATIO) else null,
-                            if (physical != null) option.physicalCameraId!! else option.cameraId, physical != null, nativeMode, physicalZoom)
+                    synchronized(this@RearLensManager) {
+                        val reported = result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)
+                        if (selected?.key != option.key || !evidence.record(token, result.frameNumber, reported, session)) return
+                        val data = measure(option, request, result, reported)
+                        if (data.stillCapture) lastStillCapture = data else telemetry = data
+                        if (!data.stillCapture) onNativeVideoStabilization(nativeStabilization(
+                            data.videoStabilizationMode, result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)))
                     }
                 }
 
                 override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest,
-                    failure: CaptureFailure) { evidence.clear(token, session); if (telemetryToken == token) telemetry = null }
+                    failure: CaptureFailure) = clearSession(token, session, close = false)
 
                 override fun onCaptureSequenceAborted(session: CameraCaptureSession,
-                    sequenceId: Int) { evidence.clear(token, session); if (telemetryToken == token) telemetry = null }
+                    sequenceId: Int) = clearSession(token, session, close = false)
             })
             .setSessionStateCallback(object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(session: CameraCaptureSession) { evidence.beginSession(token, session) }
-                override fun onConfigureFailed(session: CameraCaptureSession) { evidence.endSession(token, session); if (telemetryToken == token) telemetry = null }
-                override fun onClosed(session: CameraCaptureSession) { evidence.endSession(token, session); if (telemetryToken == token) telemetry = null }
+                override fun onConfigured(session: CameraCaptureSession) {
+                    synchronized(this@RearLensManager) {
+                        if (evidence.beginSession(token, session)) clearTelemetry()
+                    }
+                }
+                override fun onConfigureFailed(session: CameraCaptureSession) = clearSession(token, session, close = true)
+                override fun onClosed(session: CameraCaptureSession) = clearSession(token, session, close = true)
             })
+    }
+
+    @Synchronized private fun clearSession(token: Long, session: CameraCaptureSession, close: Boolean) {
+        val accepted = if (close) evidence.endSession(token, session) else evidence.clear(token, session)
+        if (accepted) clearTelemetry()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun measure(option: LensOption, request: CaptureRequest, result: TotalCaptureResult,
+        activePhysicalCameraId: String?): CaptureTelemetry {
+        val physical = option.physicalCameraId?.let { id ->
+            if (Build.VERSION.SDK_INT >= 31) result.physicalCameraTotalResults[id] ?: result.physicalCameraResults[id]
+            else result.physicalCameraResults[id]
+        }?.takeIf { matchesFocalLength(option, it) }
+        val measurement = physical ?: result
+        val active = if (measurement.get(CaptureResult.DISTORTION_CORRECTION_MODE) == CaptureRequest.DISTORTION_CORRECTION_MODE_OFF)
+            option.uncorrectedActiveArray ?: option.activeArray else option.activeArray
+        val crop = measurement.get(CaptureResult.SCALER_CROP_REGION)
+        val zoom = if (Build.VERSION.SDK_INT >= 30) measurement.get(CaptureResult.CONTROL_ZOOM_RATIO) else null
+        val requested = if (Build.VERSION.SDK_INT >= 30) request.get(CaptureRequest.CONTROL_ZOOM_RATIO) else null
+        val requestCrop = request.get(CaptureRequest.SCALER_CROP_REGION)
+        val standaloneEvidence = option.isStandaloneSensor && matchesFocalLength(option, result)
+        return CaptureTelemetry(
+            SystemClock.elapsedRealtime(), result.frameNumber, measurement.get(CaptureResult.CONTROL_AF_STATE),
+            measurement.get(CaptureResult.CONTROL_AE_STATE), measurement.get(CaptureResult.LENS_FOCAL_LENGTH),
+            measurement.get(CaptureResult.LENS_FOCUS_DISTANCE), crop?.toShortString(), zoom,
+            if (physical != null) option.physicalCameraId else option.cameraId.takeIf { standaloneEvidence || !option.isStandaloneSensor },
+            physical != null, measurement.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE),
+            if (physical != null) opticalCropZoom(active, crop) else null,
+            if (option.isPhysicalOnly) null else NativeZoomObservation(requested, opticalCropZoom(active, requestCrop), zoom,
+                opticalCropZoom(active, crop)),
+            request.get(CaptureRequest.CONTROL_CAPTURE_INTENT) == CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE,
+            activePhysicalCameraId?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    private fun nativeStabilization(measured: Int?, logical: Int?): Boolean? {
+        val off = CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+        val on = CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON
+        val preview = CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION
+        return when {
+            measured == on || measured == preview || logical == on || logical == preview -> true
+            measured == off || logical == off -> false
+            else -> null
+        }
+    }
+
+    private fun matchesFocalLength(option: LensOption, result: CaptureResult): Boolean {
+        val reported = result.get(CaptureResult.LENS_FOCAL_LENGTH) ?: return true
+        return option.focalLengthsMm.isEmpty() || option.focalLengthsMm.any { expected ->
+            kotlin.math.abs(reported - expected) <= 0.05f * expected
+        }
+    }
+
+    private fun opticalCropZoom(active: Rect?, crop: Rect?): Float? {
+        if (crop == null || active == null || crop.isEmpty || !active.contains(crop)) return null
+        return minOf(active.width().toFloat() / crop.width(), active.height().toFloat() / crop.height())
     }
 
     @Synchronized fun diagnostics(profile: String): LensDiagnostics {
         val bound = selected
+        val now = SystemClock.elapsedRealtime()
+        val preview = telemetry?.takeIf { now - it.atMs in 0..1500 }
         return LensDiagnostics(bound?.key, bound?.cameraId, bound?.physicalCameraId,
-            evidence.activePhysicalId(), rejected[profile]?.entries?.lastOrNull()?.let { "${it.key}: ${it.value}" },
-            telemetry?.takeIf { SystemClock.elapsedRealtime() - it.atMs in 0..1500 }, bound?.isStandaloneSensor == true)
+            preview?.activePhysicalCameraId, rejected[profile]?.entries?.lastOrNull()?.let { "${it.key}: ${it.value}" },
+            preview, bound?.isStandaloneSensor == true, lastStillCapture?.takeIf { now - it.atMs in 0..1500 })
     }
 
     companion object {
@@ -207,51 +269,58 @@ class RearLensManager private constructor(
             val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val primary = provider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
             val primaryId = Camera2CameraInfo.from(primary).cameraId
-            val primaryFov = horizontalFov(manager, primaryId)
-            val rear = provider.availableCameraInfos.filter { info ->
-                runCatching { Camera2CameraInfo.from(info).getCameraCharacteristic(
-                    CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
-                }.getOrDefault(false)
+            val cameraIds = runCatching { manager.cameraIdList.toSet() }.getOrDefault(emptySet())
+            val cameraXInfos = provider.availableCameraInfos.mapNotNull { info ->
+                runCatching { Camera2CameraInfo.from(info).cameraId to info }.getOrNull()
+            }.toMap()
+            val metadata = mutableMapOf<String, CameraCharacteristics?>()
+            fun characteristics(id: String) = metadata.getOrPut(id) {
+                runCatching { manager.getCameraCharacteristics(id) }.getOrNull()
             }
-            val primaryPhysicalIds = runCatching { manager.getCameraCharacteristics(primaryId).physicalCameraIds }
-                .getOrDefault(emptySet())
+            val primaryFov = characteristics(primaryId)?.let(::horizontalFov)
             val discovered = mutableListOf<LensOption>()
-            for (info in rear) {
-                val c2 = Camera2CameraInfo.from(info)
-                val id = c2.cameraId
-                val degrees = horizontalFov(manager, id)
-                val ratio = if (id == primaryId) 1f else {
-                    LensGeometry.relativeZoom(primaryFov, degrees)
-                        ?: runCatching { info.intrinsicZoomRatio }.getOrNull()
-                        ?.takeIf { it.isFinite() && it > 0f && it != 1f }
-                        ?: 1f
-                }
+            for ((id, info) in cameraXInfos + (primaryId to primary)) {
+                val chars = characteristics(id)
+                if (id != primaryId && (id !in cameraIds ||
+                        chars?.get(CameraCharacteristics.LENS_FACING) != CameraCharacteristics.LENS_FACING_BACK)) continue
+                val degrees = chars?.let(::horizontalFov)
+                // An uncharacterized camera should never replace the known 1× baseline.
+                val ratio = if (id == primaryId) 1f else LensGeometry.relativeZoom(primaryFov, degrees) ?: continue
                 val zoom = runCatching { info.zoomState.value }.getOrNull()
                 val min = zoom?.minZoomRatio ?: 1f
                 val max = zoom?.maxZoomRatio ?: 1f
-                // CameraManager includes public metadata for non-standalone physical IDs.
-                val physicalIds = runCatching { manager.getCameraCharacteristics(id).physicalCameraIds }
-                    .getOrDefault(emptySet())
+                val physicalIds = chars?.physicalCameraIds.orEmpty()
+                val capabilities = chars?.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+                val outputs = chars?.let { runCatching { PhysicalPhotoOutputs.from(it) }.getOrNull() }
+                val standalone = id in cameraIds && degrees != null && physicalIds.isEmpty() && capabilities != null &&
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE in capabilities &&
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA !in capabilities &&
+                    outputs != null && outputs.preview.isNotEmpty() && outputs.jpeg.isNotEmpty()
                 discovered += LensOption("camera:$id", id, null, ratio, min, max,
                     label(ratio, id == primaryId, false, id), selector(id), degrees,
-                    supportsAf(manager, id), isStandaloneSensor = id in primaryPhysicalIds && physicalIds.isEmpty())
+                    supportsAf(chars), isStandaloneSensor = standalone,
+                    activeArray = chars?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE),
+                    uncorrectedActiveArray = chars?.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE),
+                    focalLengthsMm = focalLengths(chars))
+                // A physical-only option is eligible only through a public logical parent.
+                if (id !in cameraIds) continue
                 for (physicalId in physicalIds.sorted()) {
-                    val physicalFov = horizontalFov(manager, physicalId)
+                    val physicalChars = characteristics(physicalId) ?: continue
+                    if (physicalChars.get(CameraCharacteristics.LENS_FACING) != CameraCharacteristics.LENS_FACING_BACK) continue
+                    val physicalFov = horizontalFov(physicalChars)
                     val relative = LensGeometry.relativeZoom(primaryFov, physicalFov) ?: continue
-                    // Unknown FOV is not enough to manufacture an ultrawide/tele option.
-                    val physicalSelector = runCatching { selector(id, physicalId) }.getOrNull() ?: continue
-                    val physicalChars = runCatching { manager.getCameraCharacteristics(physicalId) }.getOrNull()
                     discovered += LensOption("physical:$id/$physicalId", id, physicalId, relative,
-                        1f, 1f, label(relative, false, true, physicalId), physicalSelector, physicalFov,
-                        supportsAf(manager, physicalId), activeArray = physicalChars?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE),
-                        uncorrectedActiveArray = physicalChars?.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE))
+                        1f, 1f, label(relative, false, true, physicalId), selector(id, physicalId), physicalFov,
+                        supportsAf(physicalChars), activeArray = physicalChars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE),
+                        uncorrectedActiveArray = physicalChars.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE),
+                        physicalPhotoOutputs = runCatching { PhysicalPhotoOutputs.from(physicalChars) }.getOrNull(),
+                        focalLengthsMm = focalLengths(physicalChars))
                 }
             }
-            val default = discovered.firstOrNull { it.cameraId == primaryId && !it.isPhysicalOnly }
-                ?: LensOption("camera:$primaryId", primaryId, null, 1f, 1f, 1f,
-                    "Principal · automática", selector(primaryId), primaryFov, supportsAf(manager, primaryId)).also { discovered += it }
+            val default = discovered.first { it.cameraId == primaryId && !it.isPhysicalOnly }
             return RearLensManager(default, discovered.distinctBy { it.key }
-                .sortedWith(compareBy<LensOption> { it.key != default.key }.thenBy { it.relativeZoom }))
+                .sortedWith(compareBy<LensOption> { it.key != default.key }.thenBy { it.relativeZoom }),
+                cameraIds, cameraXInfos.keys)
         }
 
         private fun selector(logicalId: String, physicalId: String? = null): CameraSelector {
@@ -263,26 +332,26 @@ class RearLensManager private constructor(
             return builder.build()
         }
 
-        private fun horizontalFov(manager: CameraManager, id: String): Double? = runCatching {
-            val chars = manager.getCameraCharacteristics(id)
-            val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                ?.firstOrNull()?.takeIf { it > 0f }?.toDouble() ?: return@runCatching null
-            val sensor = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return@runCatching null
+        private fun horizontalFov(chars: CameraCharacteristics): Double? {
+            val focal = focalLengths(chars).firstOrNull()?.toDouble() ?: return null
+            val sensor = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
             val pixels = chars.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
             val active = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: pixels?.let { Rect(0, 0, it.width, it.height) }
             val width = if (pixels != null && active != null && pixels.width > 0)
                 sensor.width * active.width().toDouble() / pixels.width else sensor.width.toDouble()
             val height = if (pixels != null && active != null && pixels.height > 0)
                 sensor.height * active.height().toDouble() / pixels.height else sensor.height.toDouble()
-            LensGeometry.stillHorizontalFov(focal, width, height)
-        }.getOrNull()
+            return LensGeometry.stillHorizontalFov(focal, width, height)
+        }
 
-        private fun supportsAf(manager: CameraManager, id: String): Boolean? = runCatching {
-            val chars = manager.getCameraCharacteristics(id)
-            val modes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: return@runCatching null
-            modes.any { it == CaptureRequest.CONTROL_AF_MODE_AUTO || it == CaptureRequest.CONTROL_AF_MODE_MACRO ||
+        private fun focalLengths(chars: CameraCharacteristics?): List<Float> =
+            chars?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.filter { it.isFinite() && it > 0f }.orEmpty()
+
+        private fun supportsAf(chars: CameraCharacteristics?): Boolean? {
+            val modes = chars?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: return null
+            return modes.any { it == CaptureRequest.CONTROL_AF_MODE_AUTO || it == CaptureRequest.CONTROL_AF_MODE_MACRO ||
                 it == CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE || it == CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO }
-        }.getOrNull()
+        }
 
         private fun label(ratio: Float, primary: Boolean, physical: Boolean, id: String): String {
             val kind = when { primary -> "Principal · automática"; ratio < 0.85f -> "Ultra-wide"

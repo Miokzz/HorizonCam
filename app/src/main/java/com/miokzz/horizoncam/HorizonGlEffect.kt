@@ -32,7 +32,7 @@ class HorizonGlEffect private constructor(
     companion object {
         fun create(
             state: HorizonState,
-            nativeEisActive: () -> Boolean,
+            nativeEisActive: () -> Boolean?,
             onError: (Throwable) -> Unit
         ): HorizonGlEffect {
             val thread = HandlerThread("HorizonCam-GL").apply { start() }

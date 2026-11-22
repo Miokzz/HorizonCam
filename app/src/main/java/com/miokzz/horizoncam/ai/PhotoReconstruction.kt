@@ -15,7 +15,7 @@ data class SceneEvidence(val noise: Float, val texture: Float, val sharpFraction
     val shutterSeconds: Double, val iso: Int) {
     /** Fine measured texture can raise the Laplacian noise estimate on a clean, native crop. */
     fun preserveNative(zoom: Float): Boolean =
-        zoom < 4f && iso <= 400 && meanY >= 65f && shutterSeconds < 1.0 / 40 &&
+        zoom < 4f && iso in 1..400 && meanY >= 65f && shutterSeconds > 0 && shutterSeconds < 1.0 / 40 &&
             texture >= 0.80f && sharpFraction >= 0.58f
 }
 

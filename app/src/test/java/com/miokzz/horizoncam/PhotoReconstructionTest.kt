@@ -1,6 +1,7 @@
 package com.miokzz.horizoncam
 
 import com.miokzz.horizoncam.ai.DetailTransfer
+import com.miokzz.horizoncam.ai.PhotoProvenance
 import com.miokzz.horizoncam.ai.PhotoPrior
 import com.miokzz.horizoncam.ai.ReconstructionPlan
 import com.miokzz.horizoncam.ai.SceneEvidence
@@ -39,6 +40,8 @@ class PhotoReconstructionTest {
         assertTrue(texture.preserveNative(1f))
         assertFalse(texture.preserveNative(4f))
         assertFalse(texture.copy(iso = 1200).preserveNative(1f))
+        assertFalse(texture.copy(iso = 0).preserveNative(1f))
+        assertFalse(texture.copy(shutterSeconds = 0.0).preserveNative(1f))
         assertFalse(texture.copy(shutterSeconds = 1.0 / 15).preserveNative(1f))
         assertFalse(texture.copy(sharpFraction = 0.43f).preserveNative(1f))
     }
@@ -62,5 +65,20 @@ class PhotoReconstructionTest {
         val darker = restored(101, 122)
         assertTrue(brighter in 111 until restored(139, -1))
         assertTrue(darker < restored(101, -1))
+    }
+
+    @Test fun provenanceDescribesOnlyProcessingThatOccurred() {
+        fun description(model: String?, frames: Int, scale: Int) =
+            PhotoProvenance.describe(model, frames, 30f, 296, 394, 296 * scale, 394 * scale)
+        val native = description(null, 1, 1)
+        assertEquals(PhotoProvenance.Kind.NATIVE, PhotoProvenance.classify(native))
+        assertTrue("input/output 296x394 -> 296x394" in native)
+        assertFalse("Horizon AI" in native)
+        assertFalse("textura estimada" in native)
+        assertEquals(PhotoProvenance.Kind.FUSION, PhotoProvenance.classify(description(null, 2, 1)))
+        val neural = description(PhotoPrior.MAX.display, 2, 4)
+        assertEquals(PhotoProvenance.Kind.NEURAL, PhotoProvenance.classify(neural))
+        assertTrue("frames=2 | input/output 296x394 -> 1184x1576" in neural)
+        assertEquals(PhotoProvenance.Kind.CAMERA, PhotoProvenance.classify(""))
     }
 }

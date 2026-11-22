@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Rational
+import android.util.Size
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.ImageCapture
@@ -15,6 +16,7 @@ import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import com.miokzz.horizoncam.camera.PhysicalPhotoOutputs
 import java.util.concurrent.Executor
 
 @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
@@ -26,7 +28,8 @@ class PhotoEngine(
     val settings: AdvancedPhotoSettings = AdvancedPhotoSettings(),
     capabilities: AdvancedPhotoCapabilities? = null,
     extensionActive: Boolean = false,
-    physicalCameraId: String? = null
+    physicalCameraId: String? = null,
+    physicalOutputs: PhysicalPhotoOutputs? = null
 ) {
     init {
         if (capabilities != null) capabilities.validate(settings, extensionActive)
@@ -36,6 +39,13 @@ class PhotoEngine(
         }
     }
 
+    private val physicalCaptureSizes = physicalOutputs?.let { outputs ->
+        when {
+            settings.format == PhotoFormat.RAW_DNG -> outputs.raw
+            settings.highResolution -> outputs.highResolutionJpeg
+            else -> outputs.jpeg
+        }
+    }
     private val selector = ResolutionSelector.Builder()
         .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
         .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
@@ -48,7 +58,11 @@ class PhotoEngine(
                     capabilities!!.normalJpegSizes, capabilities.highResolutionJpegSizes).toSet()
                 // Do not silently select a normal size while displaying "high resolution".
                 // A device-specific unsupported combination must fail bind and let UX fall back.
-                setResolutionFilter { sizes, _ -> sizes.filter { PhotoSize(it.width,it.height) in allowed } }
+                setResolutionFilter { sizes, _ -> sizes.filter {
+                    PhotoSize(it.width, it.height) in allowed && (physicalCaptureSizes == null || it in physicalCaptureSizes)
+                } }
+            } else if (physicalCaptureSizes != null) {
+                setResolutionFilter { sizes, _ -> sizes.filter { it in physicalCaptureSizes } }
             }
         }
         .build()
@@ -60,7 +74,16 @@ class PhotoEngine(
         .setJpegQuality(if (settings.highResolution) 100 else 95)
         .apply { physicalCameraId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) } }
         .build()
-    private val preview = previewBuilder.setTargetRotation(rotation).build().apply { setSurfaceProvider(surface) }
+    private val preview = previewBuilder.setTargetRotation(rotation)
+        .apply {
+            physicalOutputs?.let { outputs ->
+                setResolutionSelector(ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                    .setResolutionStrategy(ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+                    .setResolutionFilter { sizes, _ -> sizes.filter { it in outputs.preview } }
+                    .build())
+            }
+        }.build().apply { setSurfaceProvider(surface) }
     // DNG contains the full sensor array; cropping raw mosaic data would corrupt
     // its metadata. Match preview viewport to a declared native RAW aspect.
     private val rawSize = if (settings.format == PhotoFormat.RAW_DNG) capabilities?.rawSizes?.maxByOrNull { it.pixels } else null

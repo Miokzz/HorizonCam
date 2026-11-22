@@ -47,7 +47,7 @@ class FieldReplayTest {
                 File(ctx.filesDir,"quality-${prefix}.png").outputStream().use { check(result.compress(Bitmap.CompressFormat.PNG,100,it)) }
                 Log.i("HorizonReplay","sample=${base.width}x${base.height} zoom=$zoom legacy=$legacy model=$model " +
                     "backend=$backend tiles=$tiles neuralMs=$neuralMs invokeMs=$invokeMs wallMs=$ms")
-            } finally { result.recycle() }
+            } finally { if (result !== base) result.recycle() }
         } finally { base.recycle() }
     }
 }

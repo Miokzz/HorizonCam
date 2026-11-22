@@ -41,9 +41,6 @@ object VideoRatePolicy {
     fun frameRates(ranges: Collection<VideoFpsRange>): Set<Int> =
         setOf(30, 60).filter { selectRange(ranges, it) != null }.toSet()
 
-    fun nativeEisAllowed(quality: VideoQualityPreset, fps: Int, declared: Boolean) =
-        declared && quality != VideoQualityPreset.UHD && fps == 30
-
     /** Preserve selected resolution before reducing it; every change is explicit to the UI. */
     fun fallbacks(
         request: VideoModeRequest,
@@ -61,8 +58,7 @@ object VideoRatePolicy {
             )
         return candidates.distinct().filter { candidate ->
             candidate.fps in supported[candidate.quality].orEmpty() &&
-                (!candidate.nativeEis ||
-                    nativeEisAllowed(candidate.quality, candidate.fps, eisDeclared))
+                (!candidate.nativeEis || eisDeclared)
         }
     }
 }

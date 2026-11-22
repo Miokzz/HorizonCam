@@ -17,34 +17,38 @@ class CaptureEvidence(private val nowMillis: () -> Long, private val maxAgeMilli
         return generation
     }
 
-    @Synchronized fun beginSession(token: Long, session: Any) {
-        if (token != generation) return
+    @Synchronized fun beginSession(token: Long, session: Any): Boolean {
+        if (token != generation || sessionIdentity === session) return false
         sessionIdentity = session
         lastFrame = -1L
         physicalId = null
         receivedAt = null
+        return true
     }
 
-    @Synchronized fun record(token: Long, frame: Long, reportedPhysicalId: String?, session: Any? = null) {
-        if (token != generation || sessionIdentity !== session || frame <= lastFrame) return
+    @Synchronized fun record(token: Long, frame: Long, reportedPhysicalId: String?, session: Any? = null): Boolean {
+        if (token != generation || sessionIdentity !== session || frame <= lastFrame) return false
         lastFrame = frame
         // Null on a new result MUST clear the previous ID.
         physicalId = reportedPhysicalId?.takeIf { it.isNotBlank() }
         receivedAt = nowMillis()
+        return true
     }
 
-    @Synchronized fun clear(token: Long, session: Any? = null) {
-        if (token != generation || sessionIdentity !== session) return
+    @Synchronized fun clear(token: Long, session: Any? = null): Boolean {
+        if (token != generation || sessionIdentity !== session) return false
         physicalId = null
         receivedAt = null
+        return true
     }
 
-    @Synchronized fun endSession(token: Long, session: Any) {
-        if (token != generation || sessionIdentity !== session) return
+    @Synchronized fun endSession(token: Long, session: Any): Boolean {
+        if (token != generation || sessionIdentity !== session) return false
         sessionIdentity = null
         physicalId = null
         receivedAt = null
         lastFrame = -1L
+        return true
     }
 
     @Synchronized fun activePhysicalId(): String? {

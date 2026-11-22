@@ -1,7 +1,7 @@
 """Regression tests for the CI oracle, not substitutes for emulator captures."""
 import unittest
 
-from media_checks import media_geometry, validate_geometry, validate_probe, validate_ai_output
+from media_checks import media_geometry, validate_geometry, validate_probe, validate_ai_output, validate_auto_photo
 
 
 class MediaOracleTest(unittest.TestCase):
@@ -74,6 +74,38 @@ class MediaOracleTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validate_ai_output(2560, 2560, 640,
                 "pretrained ESRGAN; estimated details; input/output 640×640 → 2560×2560")
+
+    def test_auto_native_jpeg_requires_a_finished_matching_zero_tile_render(self):
+        description = ("HorizonCam | detalhe nativo | sem restauracao neural | "
+                       "zoom 1.0x | frames=1 | input/output 960x1280 -> 960x1280")
+        logs = ("I HorizonAuto: render capture=other.jpg source=960x1280 output=960x1280 zoom=1.0 "
+                "tiles=80 frames=1 originalScan=false\n"
+                "I HorizonAuto: render capture=shot.jpg source=960x1280 output=960x1280 zoom=1.0 "
+                "tiles=0 frames=1 originalScan=true")
+        self.assertEqual(validate_auto_photo(logs, "shot.jpg", (960, 1280), description),
+                         {"kind": "native", "tiles": 0, "frames": 1, "original_scan": True})
+        with self.assertRaises(AssertionError):
+            validate_auto_photo(logs, "other.jpg", (960, 1280), description)
+        with self.assertRaises(AssertionError):
+            validate_auto_photo(logs, "shot.jpg", (1280, 960), description)
+        with self.assertRaises(AssertionError):
+            validate_auto_photo(logs, "shot.jpg", (960, 1280), "JPEG da camera")
+
+    def test_auto_neural_and_fusion_require_consistent_provenance(self):
+        logs = ("render capture=tele.jpg source=296x394 output=1184x1576 "
+                "zoom=30.0 tiles=35 frames=2 originalScan=false")
+        description = ("Horizon AI 2 | Real-ESRGAN general-x4v3 | textura estimada | "
+                       "zoom 30.0x | frames=2 | input/output 296x394 -> 1184x1576")
+        self.assertEqual(validate_auto_photo(logs, "tele.jpg", (1184, 1576), description)["kind"], "neural")
+        with self.assertRaises(AssertionError):
+            validate_auto_photo(logs, "tele.jpg", (1184, 1576), description.replace("frames=2", "frames=1"))
+        with self.assertRaises(AssertionError):
+            validate_auto_photo(logs.replace("tiles=35", "tiles=0"), "tele.jpg", (1184, 1576), description)
+        fusion_log = ("render capture=fusion.jpg source=960x720 output=960x720 "
+                      "tiles=0 frames=3 originalScan=false")
+        fusion = ("HorizonCam | detalhe multiframe | sem restauracao neural | "
+                  "frames=3 | input/output 960x720 -> 960x720")
+        self.assertEqual(validate_auto_photo(fusion_log, "fusion.jpg", (960, 720), fusion)["kind"], "fusion")
 
 
 if __name__ == "__main__":

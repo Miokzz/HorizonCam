@@ -21,7 +21,7 @@ class HorizonSurfaceProcessor(
     private val state: HorizonState,
     private val glHandler: Handler,
     private val glExecutor: Executor,
-    private val nativeEisActive: () -> Boolean,
+    private val nativeEisActive: () -> Boolean?,
     private val onRenderError: (Throwable) -> Unit
 ) : SurfaceProcessor, SurfaceTexture.OnFrameAvailableListener {
 
@@ -94,7 +94,8 @@ class HorizonSurfaceProcessor(
         val v = if (mask and CameraEffect.VIDEO_CAPTURE != 0) 1 else 0
         val sync = if (timestampsMatched) "SYNC" else "LATEST"
         val translation = when {
-            nativeEisActive() -> "HAL"
+            nativeEisActive() == true -> "HAL"
+            nativeEisActive() == null -> "HAL solicitado, sem leitura"
             motionUnavailable -> "indisponível"
             else -> "visual=$visualEisFrames/$motionPairs scan=${motionSampleMicros / 1000.0}ms"
         }
@@ -264,7 +265,7 @@ class HorizonSurfaceProcessor(
     }
 
     private fun measureSharedTranslation(frame: FrameGeometry, timestamp: Long): Double {
-        if (!state.isEnabled() || motionUnavailable || nativeEisActive() || !frame.orientationAvailable ||
+        if (!state.isEnabled() || motionUnavailable || nativeEisActive() != false || !frame.orientationAvailable ||
             frame.sensorAgeMs > 100f || drawTargets.any { it.motionViewport == null }) {
             motion.reset()
             return 0.0

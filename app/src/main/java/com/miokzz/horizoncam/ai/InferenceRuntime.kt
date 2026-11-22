@@ -17,6 +17,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 /** Model, delegate and tensor views belong to the inference thread. */
@@ -87,26 +88,30 @@ internal object InferenceRuntime {
     private var active: PhotoPrior? = null
     private var timeout: java.util.concurrent.ScheduledFuture<*>? = null
 
-    fun <T> run(context: Context, prior: PhotoPrior, checkActive: () -> Unit, work: (Engine) -> T): T =
-        onInferenceThread {
+    fun <T> run(context: Context, prior: PhotoPrior, checkActive: () -> Unit, work: (Engine, () -> Unit) -> T): T =
+        onInferenceThread { checkWaiter ->
+            fun ensureActive() {
+                checkWaiter()
+                checkActive()
+            }
             timeout?.cancel(false)
             try {
-                checkActive()
+                ensureActive()
                 if (active != prior || current == null) {
                     clear()
-                    current = choose(context, prior, checkActive)
+                    current = choose(context, prior, ::ensureActive)
                     active = prior
                 }
                 try {
-                    work(requireNotNull(current))
+                    work(requireNotNull(current), ::ensureActive)
                 } catch (e: InferenceFailure) {
                     if (current?.backend?.gpu != true) throw e
-                    checkActive()
+                    ensureActive()
                     Log.w(TAG, "GPU execution interrupted, retrying on CPU", e)
                     clear()
                     current = open(bytes(context, prior), Backend.CPU_4)
                     active = prior
-                    val result = work(requireNotNull(current))
+                    val result = work(requireNotNull(current), ::ensureActive)
                     preferences(context).edit().putString(key(prior), Backend.CPU_4.name).apply()
                     result
                 }
@@ -117,12 +122,10 @@ internal object InferenceRuntime {
 
     /** Uses the production setup and does not override the app's stored backend selection. */
     fun benchmark(context: Context, prior: PhotoPrior, probes: List<FloatArray>): List<Measurement> =
-        onInferenceThread {
+        onInferenceThread { checkWaiter ->
             timeout?.cancel(false)
             clear()
-            measure(bytes(context, prior), prior, candidates(), probes) {
-                if (Thread.currentThread().isInterrupted) throw CancellationException()
-            }
+            measure(bytes(context, prior), prior, candidates(), probes, checkWaiter)
         }
 
     private fun clear() {
@@ -132,15 +135,33 @@ internal object InferenceRuntime {
         engine?.close()
     }
 
-    private fun <T> onInferenceThread(work: () -> T): T {
-        val task = thread.submit(Callable { work() })
+    private fun <T> onInferenceThread(work: (() -> Unit) -> T): T {
+        val stopped = AtomicBoolean()
+        fun checkWaiter() {
+            if (stopped.get() || Thread.currentThread().isInterrupted) throw CancellationException()
+        }
+        val task = thread.submit(Callable { checkWaiter(); work(::checkWaiter) })
         try {
             return task.get()
         } catch (e: ExecutionException) {
             throw (e.cause ?: e)
-        } catch (e: InterruptedException) {
-            task.cancel(true)
-            Thread.currentThread().interrupt()
+        } catch (_: InterruptedException) {
+            stopped.set(true)
+            // The caller still owns the input and assembly bitmaps. A running delegate
+            // must finish the current native call before the caller can recycle them.
+            try {
+                while (!task.isDone) {
+                    try {
+                        task.get()
+                    } catch (_: InterruptedException) {
+                        continue
+                    } catch (_: ExecutionException) {
+                        break
+                    }
+                }
+            } finally {
+                Thread.currentThread().interrupt()
+            }
             throw CancellationException()
         }
     }

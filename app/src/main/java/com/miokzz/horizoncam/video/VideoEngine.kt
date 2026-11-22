@@ -37,6 +37,7 @@ data class VideoSessionDiagnostics(
     val expectedEncodedWidth: Int?,
     val expectedEncodedHeight: Int?,
     val nativeEisRequested: Boolean,
+    val nativeEisReported: Boolean?,
 )
 
 @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
@@ -51,15 +52,12 @@ class VideoEngine(
     val nativeEis: Boolean,
     cameraInfo: CameraInfo,
     physicalCameraId: String? = null,
-    nativeEisActive: () -> Boolean = { false },
+    private val nativeEisActive: () -> Boolean? = { null },
     onRenderError: (Throwable) -> Unit,
 ) : AutoCloseable {
     init {
         require(quality in listOf(Quality.FHD, Quality.UHD, Quality.HD, Quality.SD))
         require(fps == 30 || fps == 60)
-        require(!nativeEis || (quality == Quality.FHD && fps == 30 && !state.isEnabled())) {
-            "A estabilização nativa é oferecida somente em FHD/30, sem o efeito Horizon Lock."
-        }
     }
 
     private val preview =
@@ -86,7 +84,9 @@ class VideoEngine(
             .setVideoStabilizationEnabled(nativeEis)
             .apply { physicalCameraId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) } }
             .build()
-    val effect = if (state.isEnabled()) HorizonGlEffect.create(state, nativeEisActive, onRenderError) else null
+    val effect = if (state.isEnabled()) HorizonGlEffect.create(state, {
+        nativeEisActive() ?: if (nativeEis) null else false
+    }, onRenderError) else null
     private val viewport =
         ViewPort.Builder(aspect, rotation).setScaleType(ViewPort.FILL_CENTER).build()
 
@@ -99,6 +99,7 @@ class VideoEngine(
     val configuredFpsRange: VideoFpsRange?
     val frameRateVerificationNote: String
     val sessionConfig: SessionConfig
+    val reportedEis: Boolean? get() = nativeEisActive()
 
     init {
         try {
@@ -134,6 +135,9 @@ class VideoEngine(
                         configuredFpsRange?.let { setFrameRateRange(Range(it.lower, it.upper)) }
                     }
                     .build()
+            if (nativeEis) require(info.isSessionConfigSupported(sessionConfig)) {
+                "CameraX recusou EIS em ${label(quality)}/$fps com estes fluxos."
+            }
         } catch (error: Throwable) {
             effect?.close()
             throw error
@@ -155,6 +159,7 @@ class VideoEngine(
             crop?.let { if (transpose) it.height() else it.width() },
             crop?.let { if (transpose) it.width() else it.height() },
             nativeEis,
+            nativeEisActive(),
         )
     }
 

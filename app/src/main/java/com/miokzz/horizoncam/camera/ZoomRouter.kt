@@ -57,14 +57,13 @@ object ZoomRouter {
         // close to 3x must still be attempted at the nominal 3x boundary.
         val band = when { safeRequested < 1f -> 0; safeRequested < 3f -> 1; else -> 2 }
         val dedicated = if (stillPhoto && !recording) usable.filter { candidate ->
-            candidate.key != defaultKey && when (band) {
+            candidate.key != defaultKey && (candidate.standaloneSensor || candidate.fixedPhysicalStream) && when (band) {
                 0 -> candidate.relativeZoom in 0.35f..0.85f && candidate.relativeZoom <= safeRequested + 0.06f
                 1 -> candidate.relativeZoom in 0.85f..1.2f
                 else -> candidate.relativeZoom in 2.2f..4.2f && candidate.relativeZoom <= safeRequested + 0.08f
             }
-        }.minWithOrNull(compareBy<LensZoomSpec> {
-            when { it.standaloneSensor -> 0; it.fixedPhysicalStream -> 1; else -> 2 }
-        }.thenBy { abs(it.relativeZoom - when (band) { 0 -> 0.6f; 1 -> 1f; else -> 3f }) }) else null
+        }.minWithOrNull(compareBy<LensZoomSpec> { !it.standaloneSensor }
+            .thenBy { abs(it.relativeZoom - when (band) { 0 -> 0.6f; 1 -> 1f; else -> 3f }) }) else null
         val target = when {
             recording -> current // A recording must never trigger unbind/rebind.
             explicit != null -> explicit

@@ -52,6 +52,44 @@ def validate_processing_dimensions(description, source_size, output_size):
             "AI JPEG description disagrees with actual input/output dimensions")
 
 
+def auto_photo_kind(description):
+    if not isinstance(description, str):
+        return None
+    if "Horizon AI 2" in description and "textura estimada" in description:
+        return "neural"
+    if "Horizon AI" in description or "textura estimada" in description:
+        return None
+    if "sem restauracao neural" in description:
+        if "detalhe nativo" in description:
+            return "native"
+        if "detalhe multiframe" in description:
+            return "fusion"
+    return None
+
+
+def validate_auto_photo(logs, capture, displayed_size, description):
+    kind = auto_photo_kind(description)
+    require(kind is not None, "Automatic JPEG is missing its processing provenance")
+    pattern = (rf"\brender capture={re.escape(capture)} source=(\d+)x(\d+) output=(\d+)x(\d+)"
+               r" [^\n]*?\btiles=(\d+) frames=(\d+) originalScan=(true|false)\b")
+    renders = re.findall(pattern, logs)
+    require(bool(renders), f"No worker render evidence for {capture}")
+    source_w, source_h, out_w, out_h, tiles, frames, original_scan = renders[-1]
+    source = (int(source_w), int(source_h))
+    output = (int(out_w), int(out_h))
+    tiles, frames = int(tiles), int(frames)
+    require(output == displayed_size, "Worker dimensions differ from the saved JPEG")
+    validate_processing_dimensions(description, source, output)
+    require(re.search(rf"\bframes={frames}\b", description), "EXIF and worker frame counts differ")
+    require(frames >= 1 and (tiles > 0) == (kind == "neural"),
+            "EXIF neural attribution differs from performed inference")
+    if kind != "neural":
+        require(source == output and (frames > 1) == (kind == "fusion"),
+                "Non-neural output attribution disagrees with worker measurements")
+    require(original_scan == "false" or kind == "native", "Only native output can retain the original JPEG scan")
+    return {"kind": kind, "tiles": tiles, "frames": frames, "original_scan": original_scan == "true"}
+
+
 def validate_ai_output(width, height, patch_edge, description):
     require(0 < patch_edge <= 256, "AI smoke must use a bounded native patch")
     require((width, height) == (patch_edge * 4, patch_edge * 4),

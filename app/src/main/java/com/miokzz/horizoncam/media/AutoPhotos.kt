@@ -21,6 +21,7 @@ import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import com.miokzz.horizoncam.ai.NativeRestorer
+import com.miokzz.horizoncam.ai.PhotoProvenance
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CancellationException
@@ -191,11 +192,12 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                 if (encoded.isFile) ExifInterface(encoded).getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION)
                 else resolver.openInputStream(saved)?.use { ExifInterface(it).getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION) }
             }.getOrNull().orEmpty()
-            val neural = "Horizon AI" in description
-            val message = when {
-                neural -> "Foto restaurada"
-                "quadros" in description -> "Fusão salva · sem restauração neural"
-                else -> "JPEG da câmera salvo · sem restauração neural"
+            val provenance = PhotoProvenance.classify(description)
+            val message = when (provenance) {
+                PhotoProvenance.Kind.NEURAL -> "Foto restaurada"
+                PhotoProvenance.Kind.FUSION -> "Fusão salva · sem restauração neural"
+                PhotoProvenance.Kind.NATIVE -> "Foto salva · detalhe nativo preservado"
+                PhotoProvenance.Kind.CAMERA -> "JPEG da câmera salvo · sem restauração neural"
             }
             check(app.getSharedPreferences("horizoncam", Context.MODE_PRIVATE).edit()
                 .putString("autoFinalUri", saved.toString()).putString("autoFinalMessage", message)
@@ -206,7 +208,8 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                 AutoPhotos.capturedFlag(file).delete()
                 extras(file).forEach { it.delete() }
             }
-            Log.i("HorizonAuto", "published zoom=$zoom neural=$neural shutterToGalleryMs=${System.currentTimeMillis()-name.substringBefore('_').toLong()}")
+            Log.i("HorizonAuto", "published zoom=$zoom neural=${provenance == PhotoProvenance.Kind.NEURAL} " +
+                "provenance=$provenance shutterToGalleryMs=${System.currentTimeMillis()-name.substringBefore('_').toLong()}")
             AutoPhotos.post(AutoPhotos.State(false, message, saved, zoom))
             Result.success()
         } catch (e: CancellationException) { Result.retry() }
@@ -221,7 +224,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         Log.w("HorizonAuto", "Restauro indisponível para ${file.name}", error)
         if (isStopped) throw CancellationException()
         if (crop <= 1f) { file.copyTo(target, overwrite = true); return }
-        val framed = decodeFramed(file, crop)
+        val framed = decodeFramed(file, crop).bitmap
         try { AiPhotoFiles.encode(app, Uri.fromFile(file), framed, target, "Zoom ${zoom}x · JPEG com recorte digital") }
         finally { framed.recycle() }
     }
@@ -242,7 +245,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         }
         val frames = mutableListOf(frame(base,file))
         for (input in additional) {
-            val bitmap = decodeFramed(input,crop)
+            val bitmap = decodeFramed(input,crop).bitmap
             try { if (bitmap.width==base.width && bitmap.height==base.height) frames.add(frame(bitmap,input)) }
             finally { bitmap.recycle() }
         }
@@ -256,11 +259,13 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
 
     private fun restore(file: File, target: File, zoom: Float, crop: Float) {
         val exif = ExifInterface(file)
-        val iso = exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 100)
-        val base = decodeFramed(file, crop)
+        val iso = exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 0)
+        val framed = decodeFramed(file, crop)
+        val base = framed.bitmap
         val pair = try { fuseIfAvailable(file,base,crop) }
         catch (e: CancellationException) { base.recycle(); throw e }
         catch (e: Exception) { Log.w("HorizonAuto","Fusão opcional dispensada",e); base to 1 }
+        catch (e: OutOfMemoryError) { Log.w("HorizonAuto","Memória insuficiente para fusão opcional",e); base to 1 }
         val (source, usedFrames) = pair
         if (source !== base) base.recycle()
         try {
@@ -268,7 +273,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             val power = app.getSystemService(PowerManager::class.java)
             var tooHot = false
             val upscale = com.miokzz.horizoncam.camera.StillFraming.reconstructionScale(source.width, source.height, crop, NativeRestorer.MAX_PIXELS)
-            val result = NativeRestorer.restore(app, source, zoom, iso, upscale, { progress ->
+            NativeRestorer.restore(app, source, zoom, iso, upscale, { progress ->
                 val percent = 100 * progress.completedTiles / progress.totalTiles
                 if (lastPercent != percent) {
                     AutoPhotos.post(AutoPhotos.State(true, "Revelando foto · $percent%"))
@@ -276,19 +281,39 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                     tooHot = (power?.currentThermalStatus ?: 0) >= PowerManager.THERMAL_STATUS_SEVERE
                     if (tooHot) AutoPhotos.post(AutoPhotos.State(true, "Restauração aguardando resfriamento"))
                 }
-            }, { isStopped || tooHot }, exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0))
-            try {
+            }, { isStopped || tooHot }, exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0)).use { result ->
                 if (isStopped) throw CancellationException()
-                AiPhotoFiles.encode(app, Uri.fromFile(file), result.bitmap, target,
-                    "Horizon AI 2 | ${result.model} | textura estimada | zoom ${zoom}x | frames=$usedFrames | " +
-                        "input/output ${source.width}x${source.height} -> ${result.bitmap.width}x${result.bitmap.height}")
-                Log.i("HorizonAuto", "AI2 source=${source.width}x${source.height} output=${result.bitmap.width}x${result.bitmap.height} zoom=$zoom crop=$crop grid=${result.modelWidth}x${result.modelHeight} model=${result.model} backend=${result.backend} tiles=${result.tiles} frames=$usedFrames neuralMs=${result.inferenceMs} restoreMs=${result.elapsedMs} pssKiB=${android.os.Debug.getPss()} scene=${result.scene}")
-            } finally { result.bitmap.recycle() }
+                val output = result.bitmap
+                val description = PhotoProvenance.describe(result.model.takeIf { result.usedNeuralModel }, usedFrames,
+                    zoom, source.width, source.height, output.width, output.height)
+                val copyOriginal = !result.usedNeuralModel && source === base && framed.isFullImage
+                val writeStart = System.nanoTime()
+                if (copyOriginal) {
+                    // Retain the camera's compressed scan, dimensions and orientation.
+                    file.copyTo(target, overwrite = true)
+                    ExifInterface(target).apply {
+                        setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, description)
+                        saveAttributes()
+                    }
+                } else {
+                    AiPhotoFiles.encode(app, Uri.fromFile(file), output, target, description)
+                }
+                val encodeMs = (System.nanoTime() - writeStart) / 1_000_000
+                Log.i("HorizonAuto", "render capture=${file.name} source=${source.width}x${source.height} " +
+                    "output=${output.width}x${output.height} zoom=$zoom crop=$crop " +
+                    "grid=${result.modelWidth}x${result.modelHeight} model=${result.model} backend=${result.backend} " +
+                    "tiles=${result.tiles} frames=$usedFrames originalScan=$copyOriginal " +
+                    "invokeMs=${result.nativeInferenceMs} neuralMs=${result.inferenceMs} restoreMs=${result.elapsedMs} " +
+                    "encodeMs=$encodeMs pssKiB=${android.os.Debug.getPss()} scene=${result.scene}")
+            }
         } finally { source.recycle() }
     }
 
-    private fun decodeFramed(file: File, crop: Float): Bitmap =
-        ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
+    private data class FramedImage(val bitmap: Bitmap, val isFullImage: Boolean)
+
+    private fun decodeFramed(file: File, crop: Float): FramedImage {
+        var fullImage = false
+        val bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
             val w = info.size.width
             val h = info.size.height
             // The budget applies to the actual field of view returned by the decoder.
@@ -300,10 +325,13 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             val outH = (h * scale).toInt().coerceAtLeast(1)
             decoder.setTargetSize(outW, outH)
             val box = com.miokzz.horizoncam.camera.StillFraming.centerCrop(outW, outH, crop)
+            fullImage = outW == w && outH == h && box.width == w && box.height == h
             decoder.crop = android.graphics.Rect(box.left, box.top, box.left + box.width, box.top + box.height)
             decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             decoder.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB))
         }
+        return FramedImage(bitmap, fullImage)
+    }
 
     private fun pendingStatus(uri: Uri): Int? = checkNotNull(resolver.query(uri,
         arrayOf(MediaStore.Images.Media.IS_PENDING), null, null, null)).use { cursor ->

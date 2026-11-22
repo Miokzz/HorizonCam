@@ -67,7 +67,6 @@ import com.miokzz.horizoncam.photo.HdrPhotoExtension
 import com.miokzz.horizoncam.ui.PhotoControlsDialog
 import com.miokzz.horizoncam.photo.PhotoFormat
 import com.miokzz.horizoncam.photo.PhotoEngine
-import com.miokzz.horizoncam.stabilization.AngleMath
 import com.miokzz.horizoncam.video.VideoEngine
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -103,6 +102,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         }
     }
     private var eisSupported = false
+    private var attemptingNativeEis = false
     private var mode = ShootingMode.VIDEO
     private val photoMode get() = mode != ShootingMode.VIDEO
     private var photoSettings = AdvancedPhotoSettings()
@@ -383,6 +383,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             torchState.removeObservers(this@MainActivity)
         }
         ready = false
+        attemptingNativeEis = false
         lenses?.invalidateCaptureDiagnostics()
         provider?.unbindAll()
         video?.close()
@@ -417,8 +418,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             zoomPending = true
             focusMessage = null
             val builder = Preview.Builder()
-            val halEis = java.util.concurrent.atomic.AtomicBoolean(false)
-            manager.attachCaptureDiagnostics(builder, choice) { enabled -> if (enabled) halEis.set(true) }
+            val halEis = java.util.concurrent.atomic.AtomicReference<Boolean?>(null)
+            manager.attachCaptureDiagnostics(builder, choice, halEis::set)
             boundRotation = ui.root.display?.rotation ?: Surface.ROTATION_0
             val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
             val info = owner.availableCameraInfos.firstOrNull { Camera2CameraInfo.from(it).cameraId == choice.cameraId }
@@ -435,14 +436,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             } else choice.selector
             val bound = if (photoMode) {
                 val engine = PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider,
-                    photoSettings, photoCaps, hdrRequested, choice.physicalCameraId)
+                    photoSettings, photoCaps, hdrRequested, choice.physicalCameraId, choice.physicalPhotoOutputs)
                 photo = engine
                 owner.bindToLifecycle(this, captureSelector, engine.group)
             } else {
-                if (horizon.mode() == StabilizationMode.STEADY && (!eisSupported || !allowEis)) {
-                    horizon.setMode(StabilizationMode.OFF)
-                    toast("Estabilização nativa indisponível nesta combinação.")
-                }
                 val rotation = if (locked) Surface.ROTATION_90 else boundRotation
                 val aspect = if (locked || !portrait) Rational(16, 9) else Rational(9, 16)
                 val surface = if (locked) ui.previewView.sessionSurfaceProvider {
@@ -451,7 +448,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                         updateCameraReady()
                     }
                 } else ui.photoPreview.surfaceProvider
-                val eis = allowEis && eisSupported && horizon.mode() == StabilizationMode.STEADY && fps == 30 && requestedQuality == Quality.FHD
+                val eis = allowEis && eisSupported && horizon.mode() != StabilizationMode.OFF
+                attemptingNativeEis = eis
                 val engine = VideoEngine(horizon, builder, surface, rotation, aspect, requestedQuality, fps,
                     eis, info, choice.physicalCameraId, halEis::get) { error ->
                     main.execute { if (session == token && !isDestroyed) {
@@ -565,7 +563,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         if (reopen != null || isDestroyed || isFinishing || busy) return
         val backoff = StillPreviewGeometry.retryDelay(recoveryAttempt)
         if (backoff == null) {
-            if (lens?.isPhysicalOnly == true) {
+            if (attemptingNativeEis || lens?.let { it != lenses?.defaultOption } == true) {
                 ui.root.post {
                     if (session == token && !busy && !ready) {
                         recoveryAttempt = 0
@@ -596,6 +594,11 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         Log.w(TAG, "Configuração recusada ${choice?.key}", error)
         recoveryMessage = null
         when {
+            !photoMode && allowEis && attemptingNativeEis -> {
+                toast(if (locked) "EIS nativo recusado. Mantendo Horizon Lock nesta lente."
+                    else "EIS nativo recusado. Tentando a mesma resolução e FPS sem EIS.")
+                rebind(false)
+            }
             photoMode && (photoSettings != AdvancedPhotoSettings() || hdrRequested) -> {
                 if (hdrRequested && choice != null) hdr?.onBindRejected(choice, error.message ?: "Sessão HDR recusada")
                 photoSettings = AdvancedPhotoSettings()
@@ -613,7 +616,6 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     else "Tentando outra câmera para este enquadramento.")
                 rebind()
             }
-            !photoMode && allowEis && horizon.mode() == StabilizationMode.STEADY -> rebind(false)
             !photoMode && fps != 30 -> { fps = 30; toast("Gravação disponível a 30 fps."); rebind() }
             !photoMode && requestedQuality == Quality.UHD -> {
                 requestedQuality = Quality.FHD; toast("4K indisponível nesta combinação."); rebind()
@@ -684,6 +686,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val ticket = ++zoomCommand
         val token = session
         val started = SystemClock.elapsedRealtime()
+        val previousFrame = lenses?.diagnostics(lensProfile)?.capture?.frame ?: -1L
         zoomPending = true
         val applied = runCatching { cam.cameraControl.setZoomRatio(ratio) }.getOrElse { error ->
             zoomRejected(cam, error)
@@ -694,9 +697,27 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         applied.addListener({
             if (ticket != zoomCommand || token != session || isDestroyed) return@addListener
             runCatching { applied.get() }.onSuccess {
-                val actual = cam.cameraInfo.zoomState.value?.zoomRatio ?: ratio
-                commitZoom(actual * (lens?.relativeZoom ?: 1f))
-                Log.i(TAG, "zoomCallback session=$token command=$ticket ratio=$ratio actual=$actual elapsedMs=${SystemClock.elapsedRealtime()-started}")
+                fun confirm() {
+                    if (ticket != zoomCommand || token != session || isDestroyed) return
+                    val info = lenses?.diagnostics(lensProfile)
+                    val observed = info?.nativeZoomAfter(ratio, started, previousFrame)
+                    if (observed == null && SystemClock.elapsedRealtime() - started < 1200L) {
+                        ui.root.postDelayed({ confirm() }, 60)
+                        return
+                    }
+                    if (observed == null && softwareStillZoom && ratio > 1.001f) {
+                        // A digital residual needs a known base. Return to the native field first.
+                        applyCameraZoom(cam, 1f)
+                        return
+                    }
+                    val actual = observed ?: cam.cameraInfo.zoomState.value?.zoomRatio ?: ratio
+                    commitZoom(actual * (lens?.relativeZoom ?: 1f))
+                    Log.i(TAG, "zoomCallback session=$token command=$ticket requestedNative=$ratio " +
+                        "hal=$observed cameraX=${cam.cameraInfo.zoomState.value?.zoomRatio} total=$displayZoom " +
+                        "elapsedMs=${SystemClock.elapsedRealtime()-started}")
+                    render()
+                }
+                confirm()
             }.onFailure {
                 zoomRejected(cam, it)
                 Log.w(TAG, "Zoom recusado session=$token command=$ticket", it)
@@ -794,9 +815,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val manualExposure = mode == ShootingMode.PRO && photoSettings.manual.iso != null
         val point = if (!locked) ui.photoPreview.meteringPointFactory.createPoint(x, y,
             StillPreviewGeometry.meteringSize(extraCrop, precise = photoMode && displayZoom >= 3f)) else {
-            val g = horizon.frameGeometry(SystemClock.elapsedRealtimeNanos())
-            val inv = AngleMath.correctionMatrix(g.rotationDegrees.toDouble(), g.cropScale.toDouble(), 16.0 / 9).inverse()
-            val p = inv.apply(2.0 * x / w - 1, 1 - 2.0 * y / h)
+            val displayed = video?.effect?.processor?.previewCorrection ?: return
+            val p = displayed.undo(2.0 * x / w - 1, 1 - 2.0 * y / h)
             SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(
                 ((1 + p.first) / 2).toFloat().coerceIn(0f, 1f), ((1 - p.second) / 2).toFloat().coerceIn(0f, 1f))
         }
@@ -988,7 +1008,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                         when (event) {
                             is VideoRecordEvent.Pause -> { paused = true; pausedCommand = false; render() }
                             is VideoRecordEvent.Resume -> { paused = false; pausedCommand = false; render() }
-                            is VideoRecordEvent.Start -> render()
+                            is VideoRecordEvent.Start -> {
+                                Log.i(TAG, "recordStart session=$session camera=${lens?.key} ${engine.diagnostics()}")
+                                render()
+                            }
                         }
                     }
                 }
@@ -1030,10 +1053,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val cap = capabilities ?: return
         PopupMenu(this, ui.qualityButton).apply {
             menu.add(0, 1, 0, "Full HD · 1080p").isEnabled = cap.fhd
-            menu.add(0, 2, 1, "Ultra HD · 4K").isEnabled = cap.uhd && horizon.mode() != StabilizationMode.STEADY
+            menu.add(0, 2, 1, "Ultra HD · 4K").isEnabled = cap.uhd
             setOnMenuItemClickListener {
                 requestedQuality = if (it.itemId == 2) Quality.UHD else Quality.FHD
-                if (!cap.supportsFps(requestedQuality, fps)) fps = 30
+                if (!cap.supportsFps(requestedQuality, fps)) {
+                    fps = 30
+                    toast("60 fps indisponível nesta resolução. Usando 30 fps.")
+                }
                 rebind()
                 true
             }
@@ -1062,7 +1088,6 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     lockLensExplicit = false
                 } else if (wasLocked && !locked) restoreLockLens()
                 prefs.edit().putString("stabilization", mode.name).apply()
-                if (mode == StabilizationMode.STEADY) { fps = 30; requestedQuality = Quality.FHD }
                 syncSensor()
                 rebind()
                 haptic()
@@ -1300,7 +1325,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val selectedVideo = video?.diagnostics()
         ui.qualityButton.text = selectedVideo?.selectedQuality?.replace("UHD", "4K")
             ?: if (requestedQuality == Quality.UHD) "4K" else "FHD"
-        ui.fpsButton.isEnabled = ready && !busy && (fps == 60 || (capabilities?.supportsFps(requestedQuality, 60) == true && horizon.mode() != StabilizationMode.STEADY))
+        ui.fpsButton.isEnabled = ready && !busy && (fps == 60 || capabilities?.supportsFps(requestedQuality, 60) == true)
         val cadence = selectedVideo?.configuredFpsRange
         ui.fpsButton.text = when {
             selectedVideo == null -> fps.toString()
@@ -1311,7 +1336,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.lockButton.isEnabled = !busy
         ui.lockButton.text = when (horizon.mode()) {
             StabilizationMode.HORIZONTAL_LOCK -> "360°"
-            StabilizationMode.STEADY -> "EIS"
+            StabilizationMode.STEADY -> if (video?.nativeEis == false) "EIS indisponível" else "EIS"
             StabilizationMode.OFF -> "Off"
         }
         ui.quickControlsButton.isEnabled = !busy
@@ -1359,8 +1384,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 .filterNotNull().joinToString(" · ")
             locked && !horizon.orientationFresh(SystemClock.elapsedRealtimeNanos()) -> "Buscando horizonte…"
             locked -> "Horizon Lock · 360°"
+            horizon.mode() == StabilizationMode.STEADY -> when {
+                video?.nativeEis != true -> "Vídeo · EIS indisponível nesta combinação"
+                video?.reportedEis == true -> "Vídeo · EIS ativo"
+                video?.reportedEis == false -> "Vídeo · HAL informa EIS desligado"
+                else -> "Vídeo · EIS solicitado"
+            }
             !audio -> "Vídeo · sem áudio"
-            horizon.mode() == StabilizationMode.STEADY -> "Vídeo · EIS"
             else -> "Vídeo"
         }
         if (ui.statusText.text != text) ui.statusText.text = text
