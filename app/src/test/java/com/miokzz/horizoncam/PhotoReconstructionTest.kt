@@ -9,6 +9,7 @@ import org.junit.Test
 
 class PhotoReconstructionTest {
     private val daylight = SceneEvidence(1f, 0.4f, 0.35f, 135f, 0.002, 100)
+    private fun gray(value: Int) = (255 shl 24) or (value * 0x010101)
 
     @Test fun choosesAnEngineWithoutChangingTheCapturedField() {
         val fast = ReconstructionPlan.choose(4080, 3060, 4080, 3060, 1f, daylight)
@@ -24,13 +25,42 @@ class PhotoReconstructionTest {
     }
 
     @Test fun preservesFlatFieldsAndTransfersMoreDetailOnAnEnlargedCrop() {
-        fun grey(n: Int) = (255 shl 24) or (n * 0x010101)
         fun transfer(prediction: Int, native: Boolean) = DetailTransfer.pixel(
-            grey(120), grey(120), grey(prediction), 120, 120, 120, 120, 12f, daylight, true, native)
-        assertEquals(grey(120), transfer(120, true))
+            gray(120), gray(120), gray(prediction), 120, 120, 120, 120, 12f, daylight, true, native)
+        assertEquals(gray(120), transfer(120, true))
         val native = DetailTransfer.y(transfer(146, true))
         val enlarged = DetailTransfer.y(transfer(146, false))
         assertTrue(native in 121 until enlarged)
         assertTrue(enlarged <= 146)
+    }
+
+    @Test fun preservesMeasuredTextureOnlyUnderClearNativeCaptureConditions() {
+        val texture = daylight.copy(noise = 7f, texture = 0.92f, sharpFraction = 0.68f)
+        assertTrue(texture.preserveNative(1f))
+        assertFalse(texture.preserveNative(4f))
+        assertFalse(texture.copy(iso = 1200).preserveNative(1f))
+        assertFalse(texture.copy(shutterSeconds = 1.0 / 15).preserveNative(1f))
+        assertFalse(texture.copy(sharpFraction = 0.43f).preserveNative(1f))
+    }
+
+    @Test fun constrainsUnsupportedDarkAndBrightStrokesInEitherPolarity() {
+        for (tone in listOf(52, 195)) {
+            for (prediction in listOf(tone - 42, tone + 42)) {
+                val restored = DetailTransfer.pixel(
+                    gray(tone), gray(tone), gray(prediction), tone, tone, tone, tone,
+                    30f, daylight, true, false, tone - 2, tone + 2)
+                assertTrue(DetailTransfer.y(restored) in tone - 5..tone + 5)
+            }
+        }
+    }
+
+    @Test fun priorMeanAnchorsToneWhileKeepingPositiveAndNegativeDetails() {
+        fun restored(prediction: Int, mean: Int) = DetailTransfer.y(DetailTransfer.pixel(
+            gray(110), gray(110), gray(prediction), 96, 120, 105, 110, 30f, daylight,
+            true, false, 73, 140, mean))
+        val brighter = restored(139, 122)
+        val darker = restored(101, 122)
+        assertTrue(brighter in 111 until restored(139, -1))
+        assertTrue(darker < restored(101, -1))
     }
 }

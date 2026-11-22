@@ -14,10 +14,10 @@ import com.miokzz.horizoncam.photo.fusion.FusionOptions
 import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.io.File
 
 object BurstJobs {
-    data class State(val running: Boolean = false, val detail: String = "",
-        val reference: Uri? = null, val output: Uri? = null)
+    data class State(val running: Boolean = false, val detail: String = "")
     private val updates = MutableLiveData(State())
     val states: LiveData<State> get() = updates
     private val executor = Executors.newSingleThreadExecutor()
@@ -29,14 +29,20 @@ object BurstJobs {
     /** Takes ownership of all private scratch files, including when admission fails. */
     fun process(context: Context, frames: List<BurstCapture.FrameFile>, superResolution: Boolean, zoom: Float) {
         val app = context.applicationContext
-        if (!active.compareAndSet(false, true)) { cleanup(frames); return }
+        val referenceFile = frames.first().file
+        if (frames.size == 1 || !active.compareAndSet(false, true)) {
+            AutoPhotos.releaseBurst(app, referenceFile, useCaptured = true)
+            cleanupExtras(frames)
+            return
+        }
         cancelled.set(false)
         updates.value = State(true, "Preparando quadros…")
         executor.execute {
-            var original: Uri? = null
-            val result = runCatching {
-                val referenceSensor = frames.firstNotNullOfOrNull { it.sensor }
-                val candidates = frames.filter { it.sensor == null || referenceSensor == null || it.sensor == referenceSensor }
+            val temporary = File(referenceFile.parentFile, "${referenceFile.nameWithoutExtension}.fusion")
+            val rendered = runCatching {
+                val referenceSensor = frames.first().sensor
+                val candidates = frames.filter { it.sensor == referenceSensor }
+                if (candidates.size < 2) return@runCatching false
                 val decoded = mutableListOf<FusionFrame>()
                 candidates.forEachIndexed { index, frame ->
                     if (cancelled.get()) throw CancellationException()
@@ -50,7 +56,7 @@ object BurstJobs {
                 if (cancelled.get()) throw CancellationException()
                 val reference = candidates[output.referenceIndex].file
                 val used = output.acceptedFrameCount
-                if (used < 2) State(detail = "Movimento ou sinal insuficiente. Original preservado.", reference = BurstLibrary.publishOriginal(app, reference))
+                if (used < 2) false
                 else {
                     val detail = when {
                         output.superResolved -> "Super-resolução multiframe 2×"
@@ -69,28 +75,37 @@ object BurstJobs {
                                 cancelled::get, exposure)
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) { Log.w("HorizonBurst","Fusão concluída sem etapa neural", e); null }
-                        val description = if (restored != null) "$notes | Horizon AI 2 | ${restored.model} | textura estimada" else "$notes | sem restauracao neural"
-                        val saved = try { AiPhotoFiles.save(app, Uri.fromFile(reference), restored?.bitmap ?: bitmap, if (superResolution) "HC_MULTI" else "HC_NIGHT", description) }
+                        val description = if (restored != null) {
+                            "$notes | Horizon AI 2 | ${restored.model} | textura estimada | zoom ${zoom}x | " +
+                                "input/output ${bitmap.width}x${bitmap.height} -> ${restored.bitmap.width}x${restored.bitmap.height}"
+                        } else "$notes | sem restauracao neural"
+                        try { AiPhotoFiles.encode(app, Uri.fromFile(reference), restored?.bitmap ?: bitmap, temporary, description) }
                             finally { restored?.bitmap?.recycle() }
+                        if (cancelled.get()) throw CancellationException()
+                        check(temporary.renameTo(AutoPhotos.encodedFor(referenceFile))) { "Falha ao confirmar a fusão privada." }
                         Log.i("HorizonBurst", "$notes · cobertura subpixel ${output.phaseCoverage} · ${output.alignments}")
-                        State(detail = if (restored == null) "$notes · sem restauração neural" else notes, output = saved)
+                        true
                     } finally { bitmap.recycle() }
                 }
             }.getOrElse { error ->
-                if (cancelled.get() || error is CancellationException) State(detail = "Fusão cancelada.", reference = original)
-                else {
-                    Log.e("HorizonBurst", "Falha na fusão", error)
-                    if (original == null) original = runCatching { BurstLibrary.publishOriginal(app, frames.first().file) }.getOrNull()
-                    State(detail = if (original == null) "Falha ao salvar a sequência." else "Falha na fusão. Original preservado.", reference = original)
-                }
+                if (error !is CancellationException) Log.e("HorizonBurst", "Fusão interrompida. Referência privada preservada.", error)
+                false
             }
-            cleanup(frames)
-            ContextCompat.getMainExecutor(app).execute { active.set(false); updates.value = result }
+            try {
+                AutoPhotos.releaseBurst(app, referenceFile, useCaptured = !rendered)
+            } catch (e: Exception) {
+                Log.e("HorizonBurst", "Referência privada aguardando recuperação da fila", e)
+            } finally {
+                temporary.delete()
+                cleanupExtras(frames)
+                ContextCompat.getMainExecutor(app).execute { active.set(false); updates.value = State() }
+            }
         }
     }
 
-    private fun cleanup(frames: List<BurstCapture.FrameFile>) {
-        frames.forEach { it.file.delete() }
-        frames.firstOrNull()?.file?.parentFile?.delete()
+    private fun cleanupExtras(frames: List<BurstCapture.FrameFile>) {
+        val extras = frames.drop(1)
+        extras.forEach { it.file.delete() }
+        extras.firstOrNull()?.file?.parentFile?.delete()
     }
 }

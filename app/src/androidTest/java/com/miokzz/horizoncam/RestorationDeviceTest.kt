@@ -4,15 +4,47 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.test.platform.app.InstrumentationRegistry
+import com.miokzz.horizoncam.ai.InferenceRuntime
 import com.miokzz.horizoncam.ai.NativeRestorer
+import com.miokzz.horizoncam.ai.PhotoPrior
 import org.junit.Assert.*
 import org.junit.Test
 import kotlin.math.log10
 
-/** Deterministic public-domain photographic crops, with fixed blur, noise and JPEG degradation.
- * Tests production CPU inference and default blend on the instrumented device, without a gallery.
+/** Matched public-domain crops with fixed blur, noise and JPEG degradation.
+ * Runs the production engine without writing to the gallery.
  */
 class RestorationDeviceTest {
+    @Test fun compareBackendsOnTheSamePhotographicInputs() {
+        val runner = InstrumentationRegistry.getInstrumentation()
+        val probes = listOf("face", "detail").map { scene ->
+            val input = runner.context.assets.open("quality/astronaut_$scene-degraded.png").use {
+                BitmapFactory.decodeStream(it)
+            }
+            val edge = InferenceRuntime.INPUT_EDGE
+            val resized = Bitmap.createScaledBitmap(input, edge, edge, true)
+            try {
+                val pixels = IntArray(edge * edge)
+                resized.getPixels(pixels, 0, edge, 0, 0, edge, edge)
+                FloatArray(pixels.size * 3) { i ->
+                    ((pixels[i / 3] ushr (16 - 8 * (i % 3))) and 255).toFloat()
+                }
+            } finally {
+                if (resized !== input) resized.recycle()
+                input.recycle()
+            }
+        }
+        for (prior in PhotoPrior.entries) {
+            val measurements = InferenceRuntime.benchmark(runner.targetContext, prior, probes)
+            assertTrue(measurements.any { !it.backend.gpu && it.matchesCpu })
+            measurements.forEach { measurement ->
+                val line = measurement.logLine(prior)
+                android.util.Log.i("HorizonQuality", line)
+                runner.sendStatus(0, Bundle().apply { putString("stream", "\n$line\n") })
+            }
+        }
+    }
+
     @Test fun compareMatchedFramesAgainstKnownReference() {
         val runner = InstrumentationRegistry.getInstrumentation()
         fun fixture(name: String) = runner.context.assets.open("quality/$name.png").use { BitmapFactory.decodeStream(it) }
@@ -34,7 +66,9 @@ class RestorationDeviceTest {
                         val baseline = psnr(input, truth)
                         val restored = psnr(out, truth)
                         assertTrue(restored.isFinite() && baseline.isFinite())
-                        val line = "fixture=$scene zoom=$zoom originalPSNR=$baseline restoredPSNR=$restored tiles=$total ms=${prediction.elapsedMs} model=${prediction.model} backend=${prediction.backend} neuralMs=${prediction.inferenceMs}"
+                        val line = "fixture=$scene zoom=$zoom originalPSNR=$baseline restoredPSNR=$restored " +
+                            "tiles=${prediction.tiles} ms=${prediction.elapsedMs} model=${prediction.model} " +
+                            "backend=${prediction.backend} neuralMs=${prediction.inferenceMs} invokeMs=${prediction.nativeInferenceMs}"
                         android.util.Log.i("HorizonQuality", line)
                         runner.sendStatus(0, Bundle().apply { putString("stream", "\n$line\n") })
                     } finally { prediction.bitmap.recycle() }

@@ -13,7 +13,7 @@ import kotlin.math.roundToInt
 
 /** Serial JPEG acquisition. Private scratch frames are transferred to processing only on success. */
 class BurstCapture(
-    cache: File, private val camera: Camera, private val capture: ImageCapture,
+    cache: File, private val reference: File, private val camera: Camera, private val capture: ImageCapture,
     private val main: Executor, private val night: Boolean,
     private val physicalId: () -> String?,
     private val progress: (Int, Int) -> Unit,
@@ -60,12 +60,18 @@ class BurstCapture(
     }
 
     private fun shoot(index: Int) {
-        val file = File(dir, "frame-${frames.size}.jpg")
+        val first = frames.isEmpty()
+        val file = if (first) File(reference.parentFile, "${reference.nameWithoutExtension}.part")
+            else File(dir, "frame-${frames.size}.jpg")
         val output = ImageCapture.OutputFileOptions.Builder(file).build()
         try {
             capture.takePicture(output, main, object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                    frames += FrameFile(file, (index - base) * step, physicalId())
+                    if (first && !file.renameTo(reference)) {
+                        finish(IllegalStateException("Falha ao confirmar quadro de referência."))
+                        return
+                    }
+                    frames += FrameFile(if (first) reference else file, (index - base) * step, physicalId())
                     next()
                 }
                 override fun onError(exception: ImageCaptureException) = finish(exception)
@@ -80,8 +86,12 @@ class BurstCapture(
             if (error != null || cancelled) {
                 dir.listFiles()?.forEach { it.delete() }
                 dir.delete()
-                done(Result.failure(error ?: CancellationException()))
-            } else done(Result.success(frames.toList()))
+                if (frames.isNotEmpty()) done(Result.success(listOf(frames.first())))
+                else done(Result.failure(error ?: CancellationException()))
+            } else {
+                if (frames.size == 1) dir.delete()
+                done(Result.success(frames.toList()))
+            }
         }
         if (applied == base) { complete(); return }
         try {

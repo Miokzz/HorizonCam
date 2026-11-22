@@ -24,7 +24,7 @@ import kotlin.math.floor
 class HorizonPreviewTextureView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : TextureView(context, attrs), Preview.SurfaceProvider, TextureView.SurfaceTextureListener {
-    private class Pending(val request: SurfaceRequest) {
+    private class Pending(val request: SurfaceRequest, val watch: Any?) {
         var info: SurfaceRequest.TransformationInfo? = null
     }
     private data class Active(val pending: Pending, val surface: Surface, val texture: SurfaceTexture)
@@ -32,6 +32,8 @@ class HorizonPreviewTextureView @JvmOverloads constructor(
     private var waiting: Pending? = null
     private var active: Active? = null
     private val retainedTextures = Collections.newSetFromMap(IdentityHashMap<SurfaceTexture, Boolean>())
+    private var firstFrameListener: (() -> Unit)? = null
+    private var frameWatch: Any? = null
 
     init {
         surfaceTextureListener = this
@@ -39,10 +41,16 @@ class HorizonPreviewTextureView @JvmOverloads constructor(
         alpha = 0f
     }
 
-    override fun onSurfaceRequested(request: SurfaceRequest) {
+    override fun onSurfaceRequested(request: SurfaceRequest) = attach(request, frameWatch)
+
+    private fun attach(request: SurfaceRequest, watch: Any?) {
         main.execute {
+            if (watch !== frameWatch) {
+                request.willNotProvideSurface()
+                return@execute
+            }
             waiting?.let(::decline)
-            val next = Pending(request)
+            val next = Pending(request, watch)
             waiting = next
             request.setTransformationInfoListener(main) { info ->
                 // An old request's callback must never change a newer frame.
@@ -60,6 +68,18 @@ class HorizonPreviewTextureView @JvmOverloads constructor(
             }
             tryProvide()
         }
+    }
+
+    /** Check readiness from a newly bound producer, even when the camera device stayed open. */
+    fun watchFirstFrame(listener: (() -> Unit)?) {
+        firstFrameListener = listener
+        frameWatch = listener?.let { Any() }
+    }
+
+    fun sessionSurfaceProvider(listener: () -> Unit): Preview.SurfaceProvider {
+        watchFirstFrame(listener)
+        val watch = frameWatch
+        return Preview.SurfaceProvider { attach(it, watch) }
     }
 
     private fun decline(pending: Pending) {
@@ -114,7 +134,13 @@ class HorizonPreviewTextureView @JvmOverloads constructor(
             false
         } else true
     }
-    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+        val current = active ?: return
+        if (current.texture !== texture || current.pending.info == null || current.pending.watch !== frameWatch) return
+        val listener = firstFrameListener ?: return
+        firstFrameListener = null
+        listener()
+    }
     override fun performClick(): Boolean = super.performClick()
 
     private fun updateTransformForLayout() {

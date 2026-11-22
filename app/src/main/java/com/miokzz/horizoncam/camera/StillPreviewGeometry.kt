@@ -17,5 +17,10 @@ object StillPreviewGeometry {
     fun visibleToLocal(coordinate: Float, extent: Float, residual: Float): Float =
         extent / 2f + (coordinate - extent / 2f) / residual
 
+    fun meteringSize(residual: Float, precise: Boolean = false): Float {
+        val visibleSize = if (precise) 0.08f else 0.15f
+        return (visibleSize / residual.coerceAtLeast(1f)).coerceAtLeast(0.005f)
+    }
+
     fun retryDelay(attempt: Int): Long? = listOf(450L, 1000L, 1800L).getOrNull(attempt)
 }

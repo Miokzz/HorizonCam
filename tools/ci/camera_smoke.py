@@ -17,8 +17,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageOps, ImageStat
-from media_checks import require, validate_geometry, validate_probe, validate_ai_output
-from ui_checks import wait_for, immersive_confirmation
+from media_checks import require, validate_geometry, validate_probe, validate_ai_output, validate_processing_dimensions
+from ui_checks import wait_for, immersive_confirmation, pixel_launcher_anr_close
 
 PACKAGE = "com.miokzz.horizoncam.gl"
 COMPONENT = f"{PACKAGE}/com.miokzz.horizoncam.MainActivity"
@@ -44,6 +44,7 @@ class Smoke:
         self.sensor_thread = None
         self.sequence = 0
         self.verified_emulator = False
+        self.launcher_anr_closed = False
         self.last_jpeg = None
         self.last_jpeg_remote = None
 
@@ -75,6 +76,13 @@ class Smoke:
                 xml = self.adb("exec-out", "cat", "/sdcard/camera-smoke-ui.xml")
                 root = ET.fromstring(xml)
                 (self.output / "latest-ui.xml").write_text(xml, encoding="utf-8")
+                if self.verified_emulator and not self.launcher_anr_closed:
+                    launcher_close = pixel_launcher_anr_close(root)
+                    if launcher_close is not None:
+                        (self.output / "pixel-launcher-anr.xml").write_text(xml, encoding="utf-8")
+                        self.tap_node(launcher_close)
+                        self.launcher_anr_closed = True
+                        continue
                 intro = immersive_confirmation(root)
                 if intro is not None:
                     (self.output / "system-fullscreen-intro.xml").write_text(xml, encoding="utf-8")
@@ -262,10 +270,11 @@ class Smoke:
                 # The worker logs the upright native source dimensions, independently of saved EXIF.
                 logs = self.adb("logcat", "-d", "-s", "HorizonAuto:I", "*:S")
                 (self.output / (label + "-auto-worker.txt")).write_text(logs, encoding="utf-8")
-                dimensions = re.findall(r"AI2 source=\d+x\d+ output=(\d+)x(\d+)", logs)
+                dimensions = re.findall(r"AI2 source=(\d+)x(\d+) output=(\d+)x(\d+)", logs)
                 require(bool(dimensions), "No actual neural worker completion evidence")
-                require(tuple(map(int, dimensions[-1])) == displayed.size,
-                        "Normal Foto changed the native source framing/dimensions")
+                source_w, source_h, out_w, out_h = map(int, dimensions[-1])
+                require((out_w, out_h) == displayed.size, "Worker dimensions differ from the saved JPEG")
+                validate_processing_dimensions(description, (source_w, source_h), displayed.size)
                 require(len(self.media_paths(True) - before) == 1, "Normal Foto left extra public JPEGs")
             self.report["captures"].append({"name": label, "kind": "JPEG", "encoded": encoded,
                 "displayed": displayed.size, "exif_orientation": orientation,

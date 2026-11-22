@@ -30,10 +30,14 @@ class FieldReplayTest {
             var tiles=0
             var model="general-x4v3-50"
             var backend="CPU-2"
+            var neuralMs: Long?=null
+            var invokeMs: Long?=null
             val result = if (legacy) LegacyRestorer.restore(InstrumentationRegistry.getInstrumentation().context,base,
                 zoom,400,1,{tiles=it.totalTiles},{false}).bitmap
             else NativeRestorer.restore(ctx,base,zoom,400,1,{}, {false}).let {
-                tiles=it.tiles; model=it.model; backend=it.backend; it.bitmap
+                tiles=it.tiles; model=it.model; backend=it.backend
+                neuralMs=it.inferenceMs; invokeMs=it.nativeInferenceMs
+                it.bitmap
             }
             try {
                 val ms=(System.nanoTime()-start)/1e6
@@ -41,7 +45,8 @@ class FieldReplayTest {
                 assertEquals(base.height,result.height)
                 val prefix=if(legacy) "baseline" else "ai2"
                 File(ctx.filesDir,"quality-${prefix}.png").outputStream().use { check(result.compress(Bitmap.CompressFormat.PNG,100,it)) }
-                Log.i("HorizonReplay","sample=${base.width}x${base.height} zoom=$zoom legacy=$legacy model=$model backend=$backend tiles=$tiles wallMs=$ms")
+                Log.i("HorizonReplay","sample=${base.width}x${base.height} zoom=$zoom legacy=$legacy model=$model " +
+                    "backend=$backend tiles=$tiles neuralMs=$neuralMs invokeMs=$invokeMs wallMs=$ms")
             } finally { result.recycle() }
         } finally { base.recycle() }
     }

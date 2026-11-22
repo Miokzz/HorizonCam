@@ -1,14 +1,9 @@
 package com.miokzz.horizoncam.media
 
-import android.content.ContentValues
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.media.ExifInterface
-import android.net.Uri
-import android.provider.MediaStore
 import com.miokzz.horizoncam.photo.BurstCapture
-import java.io.File
 import kotlin.math.roundToInt
 
 object BurstLibrary {
@@ -32,20 +27,4 @@ object BurstLibrary {
         } finally { bmp.recycle() }
     }
 
-    fun publishOriginal(context: Context, file: File): Uri {
-        val resolver = context.contentResolver
-        val meta = CaptureLibrary.values(photo = true).apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "HC_REF_${System.currentTimeMillis()}.jpg")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
-        val uri = requireNotNull(resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, meta))
-        try {
-            requireNotNull(resolver.openOutputStream(uri)).use { output -> file.inputStream().use { it.copyTo(output) } }
-            check(resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null) == 1)
-            return uri
-        } catch (error: Throwable) {
-            resolver.delete(uri, null, null)
-            throw error
-        }
-    }
 }

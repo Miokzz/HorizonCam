@@ -5,6 +5,8 @@ import android.content.ContentValues
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Rational
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -15,6 +17,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import java.util.concurrent.Executor
 
+@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 class PhotoEngine(
     rotation: Int,
     portrait: Boolean,
@@ -22,7 +25,8 @@ class PhotoEngine(
     surface: Preview.SurfaceProvider,
     val settings: AdvancedPhotoSettings = AdvancedPhotoSettings(),
     capabilities: AdvancedPhotoCapabilities? = null,
-    extensionActive: Boolean = false
+    extensionActive: Boolean = false,
+    physicalCameraId: String? = null
 ) {
     init {
         if (capabilities != null) capabilities.validate(settings, extensionActive)
@@ -54,6 +58,7 @@ class PhotoEngine(
         .setOutputFormat(if (settings.format == PhotoFormat.RAW_DNG) ImageCapture.OUTPUT_FORMAT_RAW else ImageCapture.OUTPUT_FORMAT_JPEG)
         .setCaptureMode(if (settings.highResolution) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
         .setJpegQuality(if (settings.highResolution) 100 else 95)
+        .apply { physicalCameraId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) } }
         .build()
     private val preview = previewBuilder.setTargetRotation(rotation).build().apply { setSurfaceProvider(surface) }
     // DNG contains the full sensor array; cropping raw mosaic data would corrupt

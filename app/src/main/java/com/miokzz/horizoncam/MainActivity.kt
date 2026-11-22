@@ -114,7 +114,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var fps = 30
     private var displayZoom = 1f
     private var targetZoom = 1f
-    private var pendingExtraCrop = 1f
+    private val softwareStillZoom get() = autoJpeg && !hdrRequested
     private var cameraOpen = false
     private var previewStreaming = false
     private var bindingStartedAt = 0L
@@ -124,9 +124,17 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var reopen: Runnable? = null
     private var lensSwitch: Runnable? = null
     private var openingTimeout: Runnable? = null
+    private var physicalVerification: Runnable? = null
+    private var physicalConfirmed = false
+    private var physicalCropZoom = 1f
     private var distantFocus = false
+    private var lockLensConfigured = false
+    private var lockLensExplicit = false
+    private var lockReturnKey: String? = null
+    private var lockReturnZoom = 1f
     private var focusMessage: String? = null
     private var lastFocusEvidence: String? = null
+    private var focusCommand = 0
     private var extraCrop = 1f
     private var zoomCommand = 0
     private var zoomPending = false
@@ -151,6 +159,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private var session = 0
     private var physicalLog: String? = null
     private val locked get() = !photoMode && horizon.isEnabled()
+    private val lensProfile get() = if (photoMode) "$mode/${photoSettings.format}/${photoSettings.highResolution}/$hdrRequested"
+        else "$mode/${horizon.mode()}/$requestedQuality/$fps"
     private val busy get() = recording != null || takingPhoto || awaitingMic || applyingManual
     private val presets get() = listOf(0.6f to ui.zoom06Button, 1f to ui.zoom1Button,
         2f to ui.zoom2Button, 3f to ui.zoom3Button)
@@ -205,16 +215,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.modeNight.text = "Noturno"
         ui.modeNight.contentDescription = "Modo Noturno multiframe"
         ui.modeNight.setOnClickListener { selectMode(ShootingMode.NIGHT) }
-        BurstJobs.states.observe(this) { state ->
-            if (!state.running && state.detail.isNotEmpty()) {
-                val uri = state.output ?: state.reference
-                if (uri != null && prefs.getString("burstSeen", null) != uri.toString()) {
-                    remember(uri, state.detail, burstZoom)
-                    prefs.edit().putString("burstSeen", uri.toString()).apply()
-                } else if (uri == null) toast(state.detail)
-            }
-            renderStatus()
-        }
+        BurstJobs.states.observe(this) { renderStatus() }
         AutoPhotos.recover(applicationContext)
         AutoPhotos.states.observe(this) { state ->
             if (state.uri != null && prefs.getString("autoSeen", null) != state.uri.toString()) {
@@ -306,6 +307,10 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun hasCamera() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     private fun retry() {
         recoveryAttempt = 0
+        recoveryMessage = null
+        lenses?.clearRejections(lensProfile)
+        if (locked && !lockLensExplicit) lockLensConfigured = false
+        else if (softwareStillZoom) route(targetZoom)?.let { lens = lenses?.option(it.targetKey) }
         if (hasCamera()) openCamera() else if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
             cameraPermission.launch(Manifest.permission.CAMERA)
         } else startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
@@ -328,11 +333,21 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun selectMode(next: ShootingMode) {
         if (busy || mode == next) return
+        val wasLocked = locked
+        val previousZoom = displayZoom
+        val previousKey = lens?.key
         displayZoom /= extraCrop
         targetZoom = displayZoom
         extraCrop = 1f
         distantFocus = false
         mode = next
+        if (wasLocked && !locked) restoreLockLens()
+        else if (!wasLocked && locked) {
+            lockReturnKey = previousKey
+            lockReturnZoom = previousZoom
+            lockLensConfigured = false
+            lockLensExplicit = false
+        }
         burstDetail = false
         hdrRequested = false
         photoSettings = AdvancedPhotoSettings()
@@ -345,16 +360,22 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun releaseSession() {
         reopen?.let(ui.root::removeCallbacks)
         openingTimeout?.let(ui.root::removeCallbacks)
+        physicalVerification?.let(ui.root::removeCallbacks)
         lensSwitch?.let(ui.root::removeCallbacks)
         lensSwitch = null
         reopen = null
         openingTimeout = null
+        physicalVerification = null
+        physicalConfirmed = false
+        physicalCropZoom = 1f
+        ui.previewView.watchFirstFrame(null)
         cameraOpen = false
         previewStreaming = false
         firstFrameAt = 0L
         session++
         zoomPending = false
         zoomCommand++
+        focusCommand++
         applyingManual = false
         camera?.cameraInfo?.apply {
             cameraState.removeObservers(this@MainActivity)
@@ -383,22 +404,21 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val token = session
         try {
             val manager = lenses ?: RearLensManager.discover(this, owner).also { lenses = it }
-            if (lens == null && locked) {
-                val primary = manager.defaultOption
-                val wide = manager.route(0.6f, primary.key, primary.minCameraZoom, primary.maxCameraZoom, false)
-                if (abs(wide.displayZoom - 0.6f) <= 0.08f) {
-                    lens = manager.option(wide.targetKey)
-                    displayZoom = wide.displayZoom
-                    targetZoom = displayZoom
-                }
+            if (locked && !lockLensExplicit && (!lockLensConfigured || lens?.let { manager.isRejected(it.key, lensProfile) } == true)) {
+                if (lockReturnKey == null) { lockReturnKey = lens?.key; lockReturnZoom = targetZoom }
+                val wide = manager.horizonLockRoute(lens?.key ?: manager.defaultOption.key, lensProfile)
+                lens = manager.option(wide.targetKey)
+                targetZoom = wide.displayZoom
+                displayZoom = wide.displayZoom
+                lockLensConfigured = true
             }
             val choice = lens ?: manager.defaultOption
             lens = choice
             zoomPending = true
-            pendingExtraCrop = 1f
             focusMessage = null
             val builder = Preview.Builder()
-            manager.attachCaptureDiagnostics(builder, choice)
+            val halEis = java.util.concurrent.atomic.AtomicBoolean(false)
+            manager.attachCaptureDiagnostics(builder, choice) { enabled -> if (enabled) halEis.set(true) }
             boundRotation = ui.root.display?.rotation ?: Surface.ROTATION_0
             val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
             val info = owner.availableCameraInfos.firstOrNull { Camera2CameraInfo.from(it).cameraId == choice.cameraId }
@@ -414,7 +434,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 selected.selector
             } else choice.selector
             val bound = if (photoMode) {
-                val engine = PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider, photoSettings, photoCaps, hdrRequested)
+                val engine = PhotoEngine(boundRotation, portrait, builder, ui.photoPreview.surfaceProvider,
+                    photoSettings, photoCaps, hdrRequested, choice.physicalCameraId)
                 photo = engine
                 owner.bindToLifecycle(this, captureSelector, engine.group)
             } else {
@@ -424,9 +445,15 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 }
                 val rotation = if (locked) Surface.ROTATION_90 else boundRotation
                 val aspect = if (locked || !portrait) Rational(16, 9) else Rational(9, 16)
-                val surface = if (locked) ui.previewView else ui.photoPreview.surfaceProvider
+                val surface = if (locked) ui.previewView.sessionSurfaceProvider {
+                    if (session == token) {
+                        previewStreaming = true
+                        updateCameraReady()
+                    }
+                } else ui.photoPreview.surfaceProvider
                 val eis = allowEis && eisSupported && horizon.mode() == StabilizationMode.STEADY && fps == 30 && requestedQuality == Quality.FHD
-                val engine = VideoEngine(horizon, builder, surface, rotation, aspect, requestedQuality, fps, eis, info) { error ->
+                val engine = VideoEngine(horizon, builder, surface, rotation, aspect, requestedQuality, fps,
+                    eis, info, choice.physicalCameraId, halEis::get) { error ->
                     main.execute { if (session == token && !isDestroyed) {
                         if (recording != null) stopVideo()
                         fail("Falha no processamento de vídeo", error)
@@ -445,29 +472,21 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME)
             val resolution = photo?.capture?.resolutionInfo ?: video?.capture?.resolutionInfo
             Log.i(TAG, "session=$token mode=${if (photoMode) "foto" else "vídeo"} camera=${choice.cameraId} requestedPhysical=${choice.physicalCameraId} output=${resolution?.resolution} crop=${resolution?.cropRect} rotation=${resolution?.rotationDegrees} targetFps=$fps")
-            if (!choice.isPhysicalOnly) {
-                val state = bound.cameraInfo.zoomState.value
-                val initial = (targetZoom / choice.relativeZoom).coerceIn(state?.minZoomRatio ?: choice.minCameraZoom,
-                    state?.maxZoomRatio ?: choice.maxCameraZoom)
-                pendingExtraCrop = if (autoJpeg) StillFraming.digitalRatio(targetZoom, initial * choice.relativeZoom) else 1f
-                bound.cameraInfo.zoomState.observe(this) { zoom ->
-                    if (token == session && zoom != null && !zoomPending) {
-                        val supplied = zoom.zoomRatio * choice.relativeZoom
-                        displayZoom = supplied * extraCrop
-                        renderZoom()
-                    }
-                }
-                applyCameraZoom(bound, initial)
-            } else {
-                pendingExtraCrop = if (autoJpeg) StillFraming.digitalRatio(targetZoom, choice.relativeZoom) else 1f
-                commitZoom(choice.relativeZoom, pendingExtraCrop)
-            }
-            if (autoJpeg && distantFocus && !hdrRequested) applyDistantFocus(bound, true)
+            var initialZoomPending = !choice.isPhysicalOnly
             bound.cameraInfo.torchState.observe(this) { if (session == token) ui.flashButton.isSelected = it == 1 }
             bound.cameraInfo.cameraState.observe(this) { state ->
                 if (session != token) return@observe
                 val code = state.error?.code
                 cameraOpen = state.type == CameraState.Type.OPEN && code == null
+                if (!cameraOpen && code != null) previewStreaming = false
+                if (cameraOpen && initialZoomPending) {
+                    initialZoomPending = false
+                    val limits = bound.cameraInfo.zoomState.value
+                    val initial = (targetZoom / choice.relativeZoom).coerceIn(limits?.minZoomRatio ?: choice.minCameraZoom,
+                        limits?.maxZoomRatio ?: choice.maxCameraZoom)
+                    applyCameraZoom(bound, initial)
+                    if (softwareStillZoom && distantFocus) applyDistantFocus(bound, true)
+                }
                 if (code != null) {
                     Log.w(TAG, "session=$token cameraError=$code type=${state.type}", state.error?.cause)
                     when (code) {
@@ -479,7 +498,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                         }
                         CameraState.ERROR_STREAM_CONFIG -> {
                             if (!busy) ui.root.post {
-                                if (session == token) fallback(allowEis, IllegalStateException("Configuração recusada ($code)"))
+                                if (session == token && !busy) fallback(allowEis, IllegalStateException("Configuração recusada ($code)"))
                             }
                         }
                         else -> failure = "Câmera indisponível · $code"
@@ -489,18 +508,47 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 render()
             }
             val deadline = Runnable {
-                if (session == token && !ready && !busy) {
+            if (session == token && !ready && !busy) {
                     if (choice.isPhysicalOnly && recoveryMessage == null) fallback(allowEis, IllegalStateException("A lente não entregou a prévia em 5 s"))
                     else scheduleRecovery(token, allowEis, -1, 0L)
                 }
             }
             openingTimeout = deadline
-            ui.root.postDelayed(deadline, 5000)
+            if (!ready) ui.root.postDelayed(deadline, 5000)
         } catch (error: Exception) { fallback(allowEis, error) }
     }
 
     private fun updateCameraReady() {
-        ready = cameraOpen && (locked || previewStreaming)
+        val previewReady = cameraOpen && previewStreaming
+        val choice = lens
+        if (previewReady && firstFrameAt == 0L) {
+            firstFrameAt = SystemClock.elapsedRealtime()
+            logTransition("first-preview-frame")
+        }
+        if (previewReady && choice?.isPhysicalOnly == true && !physicalConfirmed) {
+            val evidence = lenses?.diagnostics(lensProfile)
+            if (evidence != null && evidence.outputPhysicalCameraId == choice.physicalCameraId) {
+                physicalVerification?.let(ui.root::removeCallbacks)
+                physicalVerification = null
+                physicalConfirmed = true
+                physicalCropZoom = evidence.capture?.physicalCropZoom ?: 1f
+                commitZoom(choice.relativeZoom * physicalCropZoom)
+                if (softwareStillZoom && distantFocus) camera?.let { applyDistantFocus(it, true) }
+            } else if (physicalVerification == null) {
+                val token = session
+                val check = Runnable {
+                    physicalVerification = null
+                    if (session != token || !cameraOpen || !previewStreaming || busy) return@Runnable
+                    if (SystemClock.elapsedRealtime() - firstFrameAt >= 1000L &&
+                        lenses?.diagnostics(lensProfile)?.outputPhysicalCameraId != choice.physicalCameraId) {
+                        fallback(true, IllegalStateException("A prévia não confirmou o sensor físico ${choice.physicalCameraId}"))
+                    } else updateCameraReady()
+                }
+                physicalVerification = check
+                ui.root.postDelayed(check, 100L)
+            }
+        }
+        ready = previewReady && (choice?.isPhysicalOnly != true || physicalConfirmed)
         if (ready) {
             failure = null
             recoveryMessage = null
@@ -509,10 +557,6 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             openingTimeout?.let(ui.root::removeCallbacks)
             reopen = null
             openingTimeout = null
-            if (firstFrameAt == 0L) {
-                firstFrameAt = SystemClock.elapsedRealtime()
-                logTransition(if (locked) "camera-open" else "first-preview-frame")
-            }
         }
         if (::ui.isInitialized) render()
     }
@@ -521,6 +565,16 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         if (reopen != null || isDestroyed || isFinishing || busy) return
         val backoff = StillPreviewGeometry.retryDelay(recoveryAttempt)
         if (backoff == null) {
+            if (lens?.isPhysicalOnly == true) {
+                ui.root.post {
+                    if (session == token && !busy && !ready) {
+                        recoveryAttempt = 0
+                        recoveryMessage = null
+                        fallback(allowEis, IllegalStateException("A lente física não reabriu ($code)"))
+                    }
+                }
+                return
+            }
             failure = "Câmera ocupada ou sem resposta · toque para tentar"
             recoveryMessage = null
             return
@@ -540,6 +594,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val manager = lenses
         val choice = lens
         Log.w(TAG, "Configuração recusada ${choice?.key}", error)
+        recoveryMessage = null
         when {
             photoMode && (photoSettings != AdvancedPhotoSettings() || hdrRequested) -> {
                 if (hdrRequested && choice != null) hdr?.onBindRejected(choice, error.message ?: "Sessão HDR recusada")
@@ -549,9 +604,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 rebind()
             }
             manager != null && choice != null && choice != manager.defaultOption -> {
-                manager.onBindRejected(choice, error.message ?: "configuração")
-                lens = manager.defaultOption
-                toast("A lente recusou este modo. Usando a câmera automática.")
+                manager.onBindRejected(choice, lensProfile, error.message ?: "configuração")
+                val alternative = if (locked && !lockLensExplicit && targetZoom < 1f) {
+                    manager.horizonLockRoute(choice.key, lensProfile)
+                } else route(targetZoom)
+                lens = alternative?.let { manager.option(it.targetKey) } ?: manager.defaultOption
+                toast(if (lens == manager.defaultOption) "Usando a câmera automática neste modo."
+                    else "Tentando outra câmera para este enquadramento.")
                 rebind()
             }
             !photoMode && allowEis && horizon.mode() == StabilizationMode.STEADY -> rebind(false)
@@ -567,18 +626,16 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val choice = lens ?: return null
         val state = if (choice.isPhysicalOnly) null else camera?.cameraInfo?.zoomState?.value
         return lenses?.route(requested, choice.key, state?.minZoomRatio ?: choice.minCameraZoom,
-            state?.maxZoomRatio ?: choice.maxCameraZoom, recording != null, preferred, stillPhoto = autoJpeg && !hdrRequested)
+            state?.maxZoomRatio ?: choice.maxCameraZoom, recording != null, preferred,
+            stillPhoto = softwareStillZoom, profile = lensProfile)
     }
 
     private fun zoomTo(requested: Float, preferred: String? = null) {
         if (!ready || takingPhoto || awaitingMic || stopping) return
-        val desired = if (autoJpeg && preferred == null) requested.coerceIn(0.6f, StillFraming.MAX_ZOOM) else requested
+        val desired = if (softwareStillZoom && preferred == null) requested.coerceIn(0.6f, StillFraming.MAX_ZOOM) else requested
         val route = route(desired, preferred) ?: return
-        val crop = if (autoJpeg && preferred == null)
-            StillFraming.digitalRatio(desired, route.displayZoom) else 1f
         if (route.requiresRebind && busy) return
         targetZoom = desired
-        pendingExtraCrop = crop
         lensSwitch?.let(ui.root::removeCallbacks)
         lensSwitch = null
         if (route.requiresRebind) {
@@ -599,12 +656,12 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         } else if (lens?.isPhysicalOnly != true) {
             camera?.let { applyCameraZoom(it, route.cameraZoomRatio) }
             renderZoom()
-        } else commitZoom(route.displayZoom, crop)
+        } else commitZoom(route.displayZoom * physicalCropZoom)
     }
 
-    private fun commitZoom(suppliedZoom: Float, crop: Float) {
-        extraCrop = crop
-        displayZoom = StillPreviewGeometry.confirmed(suppliedZoom * crop, suppliedZoom, 1f).first
+    private fun commitZoom(suppliedZoom: Float) {
+        extraCrop = if (softwareStillZoom) StillFraming.digitalRatio(targetZoom, suppliedZoom) else 1f
+        displayZoom = suppliedZoom * extraCrop
         zoomPending = false
         renderZoom()
         logTransition("zoom-confirmed")
@@ -612,13 +669,15 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     private fun logTransition(event: String) {
-        val details = lenses?.diagnostics()
+        val details = lenses?.diagnostics(lensProfile)
         val resolution = photo?.capture?.resolutionInfo ?: video?.capture?.resolutionInfo
         Log.i(TAG, "transition=$event t=${SystemClock.elapsedRealtime()} session=$session mode=$mode " +
             "camera=${details?.selectedCameraId} physicalRequested=${details?.selectedPhysicalCameraId} " +
-            "physicalActive=${details?.activePhysicalCameraId} requested=$targetZoom applied=$displayZoom " +
+            "physicalActive=${details?.activePhysicalCameraId} physicalOutput=${details?.outputPhysicalCameraId} " +
+            "requested=$targetZoom applied=$displayZoom " +
             "extraCrop=$extraCrop previewScale=${ui.photoPreview.scaleX} buffer=${resolution?.resolution} " +
-            "viewportCrop=${resolution?.cropRect} readyMs=${if(firstFrameAt>0) firstFrameAt-bindingStartedAt else null} evidence=${if(locked) "camera-open" else "preview-streaming"} capture=${details?.capture}")
+            "viewportCrop=${resolution?.cropRect} readyMs=${if(firstFrameAt>0) firstFrameAt-bindingStartedAt else null} " +
+            "previewStreaming=$previewStreaming capture=${details?.capture}")
     }
 
     private fun applyCameraZoom(cam: Camera, ratio: Float) {
@@ -626,28 +685,39 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val token = session
         val started = SystemClock.elapsedRealtime()
         zoomPending = true
-        val crop = pendingExtraCrop
-        val applied = cam.cameraControl.setZoomRatio(ratio)
+        val applied = runCatching { cam.cameraControl.setZoomRatio(ratio) }.getOrElse { error ->
+            zoomRejected(cam, error)
+            return
+        }
         renderZoom()
         if (autoJpeg) ui.recordButton.isEnabled = false
         applied.addListener({
             if (ticket != zoomCommand || token != session || isDestroyed) return@addListener
             runCatching { applied.get() }.onSuccess {
                 val actual = cam.cameraInfo.zoomState.value?.zoomRatio ?: ratio
-                commitZoom(actual * (lens?.relativeZoom ?: 1f), crop)
+                commitZoom(actual * (lens?.relativeZoom ?: 1f))
                 Log.i(TAG, "zoomCallback session=$token command=$ticket ratio=$ratio actual=$actual elapsedMs=${SystemClock.elapsedRealtime()-started}")
             }.onFailure {
-                zoomPending = false
-                targetZoom = displayZoom
-                toast("A câmera recusou a ampliação solicitada.")
+                zoomRejected(cam, it)
                 Log.w(TAG, "Zoom recusado session=$token command=$ticket", it)
             }
             render()
         }, main)
     }
 
+    private fun zoomRejected(cam: Camera, error: Throwable) {
+        val limits = cam.cameraInfo.zoomState.value
+        val scale = lens?.relativeZoom ?: 1f
+        val applied = limits?.zoomRatio?.takeIf { it.isFinite() && it > 0f } ?: 1f
+        // A failed command cannot leave the old view's zoom/crop on a newly bound sensor.
+        commitZoom(applied * scale)
+        if (error !is androidx.camera.core.CameraControl.OperationCanceledException) {
+            toast("A câmera recusou a ampliação solicitada.")
+        }
+    }
+
     private fun choosePhotoZoom() {
-        if (!autoJpeg || busy || !ready) return
+        if (!softwareStillZoom || busy || !ready) return
         val min = kotlin.math.ceil((route(0.01f)?.displayZoom ?: 1f) * 10 - 0.001f).toInt().coerceIn(6, 300)
         val slider = SeekBar(this).apply {
             max = 300 - min
@@ -712,7 +782,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     }
 
     private fun focusAt(x: Float, y: Float) {
-        if (takingPhoto) return
+        if (!ready || zoomPending || takingPhoto) return
         val cam = camera ?: return
         if (distantFocus && autoJpeg) {
             applyDistantFocus(cam, false) { focusAt(x,y) }
@@ -722,31 +792,44 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val h = ui.previewContainer.height.coerceAtLeast(1).toFloat()
         val manualFocus = mode == ShootingMode.PRO && photoSettings.manual.focusDistanceDiopters != null
         val manualExposure = mode == ShootingMode.PRO && photoSettings.manual.iso != null
-        val point = if (!locked) ui.photoPreview.meteringPointFactory.createPoint(x, y) else {
+        val point = if (!locked) ui.photoPreview.meteringPointFactory.createPoint(x, y,
+            StillPreviewGeometry.meteringSize(extraCrop, precise = photoMode && displayZoom >= 3f)) else {
             val g = horizon.frameGeometry(SystemClock.elapsedRealtimeNanos())
             val inv = AngleMath.correctionMatrix(g.rotationDegrees.toDouble(), g.cropScale.toDouble(), 16.0 / 9).inverse()
             val p = inv.apply(2.0 * x / w - 1, 1 - 2.0 * y / h)
             SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(
                 ((1 + p.first) / 2).toFloat().coerceIn(0f, 1f), ((1 - p.second) / 2).toFloat().coerceIn(0f, 1f))
         }
-        val flags = (if (manualFocus) 0 else FocusMeteringAction.FLAG_AF) or (if (manualExposure) 0 else FocusMeteringAction.FLAG_AE)
+        val af = if (manualFocus || lens?.autofocus == false) 0 else FocusMeteringAction.FLAG_AF
+        val ae = if (manualExposure) 0 else FocusMeteringAction.FLAG_AE
+        val flags = af or ae
         if (flags == 0) return
-        val action = FocusMeteringAction.Builder(point, flags)
-            .setAutoCancelDuration(if (autoJpeg && displayZoom >= 3f) 8 else 3, TimeUnit.SECONDS).build()
-        if (cam.cameraInfo.isFocusMeteringSupported(action)) {
+        fun action(regions: Int) = FocusMeteringAction.Builder(point, regions)
+            .setAutoCancelDuration(if (photoMode && displayZoom >= 3f) 8 else 3, TimeUnit.SECONDS).build()
+        val metering = listOf(flags, af, ae).distinct().filter { it != 0 }.firstNotNullOfOrNull { regions ->
+            action(regions).takeIf(cam.cameraInfo::isFocusMeteringSupported)?.let { regions to it }
+        }
+        if (metering != null) {
+            val (regions, request) = metering
+            val autofocus = regions and FocusMeteringAction.FLAG_AF != 0
             val token = session
+            val command = ++focusCommand
             val start = SystemClock.elapsedRealtime()
-            focusMessage = "Focando…"
-            val future = cam.cameraControl.startFocusAndMetering(action)
+            focusMessage = if (autofocus) "Focando…" else "Medindo exposição…"
+            val future = cam.cameraControl.startFocusAndMetering(request)
             future.addListener({
-                if (token != session || isDestroyed) return@addListener
+                if (token != session || command != focusCommand || isDestroyed) return@addListener
                 runCatching { future.get() }.fold(
-                    onSuccess = { focusMessage = if (it.isFocusSuccessful) "Foco confirmado" else "Foco não confirmado" },
-                    onFailure = { focusMessage = "Foco interrompido" })
-                Log.i(TAG, "focusCallback session=$token elapsedMs=${SystemClock.elapsedRealtime()-start} result=$focusMessage capture=${lenses?.diagnostics()?.capture}")
+                    onSuccess = { focusMessage = when {
+                        !autofocus -> "Exposição medida"
+                        it.isFocusSuccessful -> "Foco confirmado"
+                        else -> "Foco não confirmado"
+                    } },
+                    onFailure = { focusMessage = if (autofocus) "Foco interrompido" else null })
+                Log.i(TAG, "focusCallback session=$token elapsedMs=${SystemClock.elapsedRealtime()-start} result=$focusMessage capture=${lenses?.diagnostics(lensProfile)?.capture}")
                 renderStatus()
                 ui.focusIndicator.postDelayed({
-                    if (token == session && !distantFocus) { focusMessage = null; renderStatus() }
+                    if (token == session && command == focusCommand && !distantFocus) { focusMessage = null; renderStatus() }
                 }, 2200)
             }, main)
         }
@@ -772,7 +855,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun shutter() {
         if (recording != null) { stopVideo(); return }
-        if (!ready || busy || failure != null || (autoJpeg && zoomPending)) return
+        if (!ready || busy || failure != null || zoomPending) return
         if (mode == ShootingMode.NIGHT || (mode == ShootingMode.PHOTO && burstDetail && extraCrop == 1f)) {
             startBurst()
             return
@@ -783,7 +866,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             takingPhoto = true
             render()
             if (mode == ShootingMode.PHOTO && photoSettings.format == PhotoFormat.JPEG) {
-                val trace = lenses?.diagnostics()
+                val trace = lenses?.diagnostics(lensProfile)
                 Log.i(TAG, "Disparo zoom=$displayZoom recorte=$extraCrop camera=${trace?.selectedCameraId} fisicaSolicitada=${trace?.selectedPhysicalCameraId} ativaHAL=${trace?.activePhysicalCameraId}")
                 val captureEpoch = session
                 val captureCamera = camera
@@ -793,9 +876,9 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                 fun currentCaptureSensor(): String? {
                     if (session != captureEpoch || camera !== captureCamera || zoomPending ||
                         abs(displayZoom - captureZoom) > 0.0001f || abs(extraCrop - captureCrop) > 0.0001f) return null
-                    val current = lenses?.diagnostics() ?: return null
+                    val current = lenses?.diagnostics(lensProfile) ?: return null
                     if (current.selectedKey != captureKey || current.capture == null) return null
-                    return current.selectedPhysicalCameraId ?: current.activePhysicalCameraId
+                    return current.outputPhysicalCameraId
                 }
                 val physical = currentCaptureSensor()
                 AutoPhotos.capture(applicationContext, engine.capture, captureZoom, captureCrop, main,
@@ -834,14 +917,21 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         burstProgress = "Preparando sequência…"
         render()
         haptic()
-        val sequence = BurstCapture(cacheDir, cam, capture, main, mode == ShootingMode.NIGHT,
-            { lenses?.diagnostics()?.activePhysicalCameraId },
+        val reference = runCatching { AutoPhotos.beginBurst(applicationContext, burstZoom) }.getOrElse {
+            takingPhoto = false
+            toast("Espaço privado indisponível para a sequência.")
+            render()
+            return
+        }
+        val sequence = BurstCapture(cacheDir, reference, cam, capture, main, mode == ShootingMode.NIGHT,
+            { lenses?.diagnostics(lensProfile)?.outputPhysicalCameraId },
             { completed, total -> burstProgress = "Capturando · $completed/$total"; renderStatus() },
             { result ->
                 burst = null
                 takingPhoto = false
                 result.onSuccess { frames -> BurstJobs.process(applicationContext, frames, burstDetail, burstZoom) }
                     .onFailure { error ->
+                        AutoPhotos.releaseBurst(applicationContext, reference)
                         if (!isDestroyed && error !is java.util.concurrent.CancellationException) {
                             Log.w(TAG, "Sequência interrompida", error)
                             toast("A captura da sequência foi interrompida.")
@@ -963,7 +1053,14 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
                     3 -> StabilizationMode.HORIZONTAL_LOCK
                     else -> StabilizationMode.OFF
                 }
+                val wasLocked = locked
                 horizon.setMode(mode)
+                if (!wasLocked && locked) {
+                    lockReturnKey = lens?.key
+                    lockReturnZoom = displayZoom
+                    lockLensConfigured = false
+                    lockLensExplicit = false
+                } else if (wasLocked && !locked) restoreLockLens()
                 prefs.edit().putString("stabilization", mode.name).apply()
                 if (mode == StabilizationMode.STEADY) { fps = 30; requestedQuality = Quality.FHD }
                 syncSensor()
@@ -973,6 +1070,18 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             }
             show()
         }
+    }
+
+    private fun restoreLockLens() {
+        val manager = lenses
+        val previous = manager?.let { m -> lockReturnKey?.let { key -> m.option(key)?.takeUnless { m.isRejected(key, lensProfile) } } }
+        lens = previous ?: manager?.defaultOption
+        targetZoom = lockReturnZoom
+        displayZoom = targetZoom
+        extraCrop = 1f
+        lockLensConfigured = false
+        lockLensExplicit = false
+        lockReturnKey = null
     }
 
     private fun settings() {
@@ -1118,10 +1227,11 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         val manager = lenses ?: return
         PopupMenu(this, ui.quickControlsButton).apply {
             manager.options.forEachIndexed { i, option ->
-                menu.add(0, i + 1, i, option.label).isEnabled = !manager.isRejected(option.key)
+                menu.add(0, i + 1, i, option.label).isEnabled = !manager.isRejected(option.key, lensProfile)
             }
             setOnMenuItemClickListener {
                 val chosen = manager.options[it.itemId - 1]
+                if (locked) { lockLensExplicit = true; lockLensConfigured = true }
                 zoomTo(chosen.relativeZoom * chosen.initialCameraZoom, chosen.key)
                 true
             }
@@ -1131,7 +1241,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
 
     private fun showDiagnostics() {
         val manager = lenses
-        val info = manager?.diagnostics()
+        val info = manager?.diagnostics(lensProfile)
         val resolution = photo?.capture?.resolutionInfo ?: video?.capture?.resolutionInfo
         val ids = capabilities?.availableLenses?.joinToString("\n") { entry ->
             "ID ${entry.id}: ${entry.physicalIds.sorted().joinToString().ifBlank { "sem IDs físicos anunciados" }}"
@@ -1140,10 +1250,11 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
             "Câmera da sessão: ${info?.selectedCameraId ?: "—"}",
             "Saída física solicitada: ${info?.selectedPhysicalCameraId ?: "automática"}",
             "Sensor ativo informado pelo HAL: ${info?.activePhysicalCameraId ?: "não informado"}",
+            "Sensor da saída confirmado: ${info?.outputPhysicalCameraId ?: "não informado"}",
             "Zoom confirmado: ${formatZoom(displayZoom)} · solicitado: ${formatZoom(targetZoom)}",
             "Recorte adicional: $extraCrop · escala do visor: ${ui.photoPreview.scaleX}",
             "Resultado AF/AE: ${info?.capture ?: "aguardando"}",
-            "${if(locked) "Abertura da câmera" else "Primeira prévia"}: ${if (firstFrameAt>0) firstFrameAt-bindingStartedAt else null} ms · sessão $session",
+            "Primeira prévia: ${if (firstFrameAt>0) firstFrameAt-bindingStartedAt else null} ms · sessão $session",
             "Buffer: ${resolution?.resolution ?: "—"} · rotação ${resolution?.rotationDegrees ?: "—"}°",
             if (photoMode) "Foto: ${photoSettings.format} · alta resolução: ${photoSettings.highResolution} · HDR: $hdrRequested" else "Configuração da gravação: ${video?.diagnostics()}",
             if (locked) "Horizon Lock: ${sensor.sourceName} · ${video?.effect?.processor?.diagnostics() ?: "aguardando"}" else "",
@@ -1157,12 +1268,12 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private fun renderZoom() {
         ui.photoPreview.scaleX = extraCrop
         ui.photoPreview.scaleY = extraCrop
-        ui.zoomReadout.isClickable = autoJpeg && !busy
+        ui.zoomReadout.isClickable = softwareStillZoom && !busy
         ui.zoomReadout.text = if (zoomPending) "${formatZoom(displayZoom)} → ${formatZoom(targetZoom)}" else formatZoom(displayZoom)
         presets.forEach { (value, button) ->
             val candidate = route(value)
             button.isEnabled = ready && !takingPhoto && !awaitingMic && !stopping && candidate != null &&
-                ((autoJpeg && value >= candidate.displayZoom) ||
+                ((softwareStillZoom && value >= candidate.displayZoom) ||
                     abs(candidate.displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value))
             button.isSelected = abs(displayZoom - value) <= (if (value < 1f) 0.08f else 0.035f * value)
         }
@@ -1213,7 +1324,7 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         ui.pauseButton.text = if (paused) "▶" else "Ⅱ"
         ui.pauseButton.contentDescription = if (paused) "Retomar gravação" else "Pausar gravação"
         ui.timerText.isVisible = rec
-        ui.recordButton.isEnabled = (rec && !stopping) || (ready && failure == null && !busy && (!autoJpeg || !zoomPending))
+        ui.recordButton.isEnabled = (rec && !stopping) || (ready && failure == null && !busy && !zoomPending)
         ui.recordButton.alpha = if (ui.recordButton.isEnabled) 1f else 0.5f
         ui.recordButton.contentDescription = when { rec -> "Parar gravação"; photoMode -> "Tirar foto"; else -> "Iniciar gravação" }
         val inner = ui.recordInner
@@ -1258,13 +1369,13 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
     private val telemetry = object : Runnable {
         override fun run() {
             renderStatus()
-            val info = lenses?.diagnostics()
+            val info = lenses?.diagnostics(lensProfile)
             val focus = info?.capture?.let { "${it.afState}/${it.aeState}/${it.focusDistance}" }
             if (focus != lastFocusEvidence && focus != null) {
                 Log.i(TAG, "captureState session=$session zoom=$displayZoom $focus")
                 lastFocusEvidence = focus
             }
-            val actual = info?.activePhysicalCameraId
+            val actual = info?.outputPhysicalCameraId
             if (actual != physicalLog) { Log.i(TAG, "session=$session activePhysicalId=${actual ?: "unknown"}"); physicalLog = actual }
             ui.root.postDelayed(this, 400)
         }
@@ -1308,6 +1419,8 @@ class MainActivity : AppCompatActivity(), DisplayManager.DisplayListener {
         lensSwitch = null
         reopen?.let(ui.root::removeCallbacks)
         openingTimeout?.let(ui.root::removeCallbacks)
+        physicalVerification?.let(ui.root::removeCallbacks)
+        physicalVerification = null
         reopen = null
         openingTimeout = null
         super.onStop()

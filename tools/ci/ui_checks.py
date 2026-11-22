@@ -13,6 +13,15 @@ def immersive_confirmation(root):
     return None
 
 
+def pixel_launcher_anr_close(root):
+    # This first-boot overlay can cover a healthy, streaming camera on the CI emulator.
+    # A crash/ANR of HorizonCam (or any other process) must remain visible to the test.
+    title = root.find(".//node[@resource-id='android:id/alertTitle'][@package='android']")
+    if title is None or title.get("text") != "Pixel Launcher isn't responding":
+        return None
+    return root.find(".//node[@resource-id='android:id/aerr_close'][@package='android'][@enabled='true']")
+
+
 def wait_for(predicate, message, seconds=45):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:

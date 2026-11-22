@@ -68,6 +68,8 @@ internal class EglCore {
         }
     }
 
+    fun makeOffscreenCurrent() = makeCurrent(pbuffer)
+
     fun unregister(surface: Surface) {
         val egl = windows.remove(surface) ?: return
         if (egl != EGL14.EGL_NO_SURFACE) {

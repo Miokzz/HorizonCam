@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.provider.MediaStore
 import android.util.Range
 import android.util.Rational
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.DynamicRange
 import androidx.camera.core.Preview
@@ -37,6 +39,7 @@ data class VideoSessionDiagnostics(
     val nativeEisRequested: Boolean,
 )
 
+@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 class VideoEngine(
     state: HorizonState,
     previewBuilder: Preview.Builder,
@@ -47,6 +50,8 @@ class VideoEngine(
     private val fps: Int,
     val nativeEis: Boolean,
     cameraInfo: CameraInfo,
+    physicalCameraId: String? = null,
+    nativeEisActive: () -> Boolean = { false },
     onRenderError: (Throwable) -> Unit,
 ) : AutoCloseable {
     init {
@@ -61,7 +66,7 @@ class VideoEngine(
         previewBuilder
             .setTargetRotation(rotation)
             .setDynamicRange(DynamicRange.SDR)
-            .apply { if (nativeEis) setPreviewStabilizationEnabled(true) }
+            .setPreviewStabilizationEnabled(nativeEis)
             .build()
             .apply { setSurfaceProvider(surface) }
     // The explicit FHD -> HD -> SD compatibility ladder preserves cameras with
@@ -78,9 +83,10 @@ class VideoEngine(
         VideoCapture.Builder(recorder)
             .setTargetRotation(rotation)
             .setDynamicRange(DynamicRange.SDR)
-            .apply { if (nativeEis) setVideoStabilizationEnabled(true) }
+            .setVideoStabilizationEnabled(nativeEis)
+            .apply { physicalCameraId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) } }
             .build()
-    val effect = if (state.isEnabled()) HorizonGlEffect.create(state, onRenderError) else null
+    val effect = if (state.isEnabled()) HorizonGlEffect.create(state, nativeEisActive, onRenderError) else null
     private val viewport =
         ViewPort.Builder(aspect, rotation).setScaleType(ViewPort.FILL_CENTER).build()
 

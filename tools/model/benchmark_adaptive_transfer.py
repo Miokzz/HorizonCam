@@ -1,4 +1,4 @@
-"""Representative HOST end-to-end comparison of NativeRestorer V2 vs git6708aca.
+"""Representative host comparison of the native restorer and two earlier policies.
 Actual TFLite inference; PIL bilinear approximates Android's filtered bitmap operations.
 Not proof of Android/GPU parity. Private images/results must use external --private-out.
 """
@@ -94,7 +94,8 @@ def overlap_save(rgb,model,halo,scale):
     return output,calls
 
 
-def transfer(base,low,prediction,zoom,s,blind,native_sampling=False):
+def transfer(base,low,prediction,zoom,s,blind,native_sampling=False,envelope=None,
+             prior_mean=None,starting_policy=False):
     y=luminance(base);ly=luminance(low);py=luminance(prediction)
     padded=np.pad(y,1,mode='edge');left=padded[1:-1,:-2];right=padded[1:-1,2:];up=padded[:-2,1:-1];down=padded[2:,1:-1]
     contrast=np.maximum(np.abs(left-right),np.abs(up-down));lap=np.abs(4*y-left-right-up-down)
@@ -110,9 +111,51 @@ def transfer(base,low,prediction,zoom,s,blind,native_sampling=False):
     if native_sampling:
         strength=strength*.5
         remove=np.minimum(remove,.05)
-    correction=np.clip(delta,-cap,cap)*strength-high*remove
+    weak=np.zeros(y.shape,bool)
+    detail=delta
+    if not native_sampling and envelope is not None:
+        lower,upper=envelope
+        span=upper-lower
+        neutral=(base.max(axis=2).astype(int)-base.min(axis=2))<=24
+        weak=(~reliable)&(y>=128)&neutral&(span<=72)
+        if not starting_policy:
+            weak=weak|(span<=12)|(neutral&(span<=48))
+        if prior_mean is not None and not starting_policy:
+            anchor=np.where(skin|(neutral&(span<=48)),.30,.60)
+            detail=delta-anchor*(prior_mean-ly)
+    correction=np.clip(detail,-cap,cap)*strength-high*remove
+    if not native_sampling and envelope is not None:
+        tolerance=np.maximum(3,np.minimum(8,span*.10))
+        correction=np.where(weak,np.clip(correction,lower-tolerance-y,upper+tolerance-y),correction)
     chroma=np.clip(prediction.astype(np.int32)-low.astype(np.int32)-delta[...,None],-14,14)
-    return pack(base+correction[...,None]+strength[...,None]*.46*chroma)
+    chroma_weight=np.where(weak,0.,.46)
+    if not native_sampling and envelope is not None and not starting_policy:
+        chroma_weight=np.where(~weak&skin&(span<=24),.18,chroma_weight)
+    return pack(base+correction[...,None]+(strength*chroma_weight)[...,None]*chroma)
+
+
+def source_envelope(original,upscale):
+    y=luminance(original)
+    p=np.pad(y,1,mode='edge')
+    h,w=y.shape
+    neighbors=[p[dy:dy+h,dx:dx+w] for dy in range(3) for dx in range(3)]
+    lower=np.minimum.reduce(neighbors);upper=np.maximum.reduce(neighbors)
+    return tuple(np.repeat(np.repeat(a,upscale,axis=0),upscale,axis=1) for a in (lower,upper))
+
+
+def unsupported_contrast(original,output,upscale):
+    lower,upper=source_envelope(original,upscale)
+    base=resize(original,output.shape[1],output.shape[0]);y=luminance(base)
+    span=upper-lower
+    neutral=(base.max(axis=2).astype(int)-base.min(axis=2))<=24
+    eligible=neutral&((span<=48)|((y>=128)&(span<=72)))
+    darkness=np.maximum(0,lower-luminance(output))
+    brightness=np.maximum(0,luminance(output)-upper)
+    overshoot=np.maximum(darkness,brightness)
+    return {'eligible_fraction':float(eligible.mean()),'mean_below_measured_min':float(darkness[eligible].mean()) if eligible.any() else 0,
+            'p99_below_measured_min':float(np.quantile(darkness[eligible],.99)) if eligible.any() else 0,
+            'p99_outside_measured_span':float(np.quantile(overshoot[eligible],.99)) if eligible.any() else 0,
+            'fraction_over_12levels':float((overshoot[eligible]>12).mean()) if eligible.any() else 0}
 
 
 def restore_v2(original,zoom,iso,upscale,seconds,models):
@@ -120,9 +163,23 @@ def restore_v2(original,zoom,iso,upscale,seconds,models):
     s=scene(original,iso,seconds);prior,gw,gh,scale=plan(w,h,ow,oh,zoom,s)
     guide=original if (gw,gh)==(w,h) else resize(original,gw,gh)
     then=time.perf_counter();neural,calls=overlap_save(guide,models[prior],4 if prior=='fast' else 34,scale)
+    inference_ms=(time.perf_counter()-then)*1000
     prediction=resize(neural,ow,oh);low=resize(guide,ow,oh);base=resize(original,ow,oh)
-    output=transfer(base,low,prediction,zoom,s,prior=='max',native_sampling=upscale==1)
-    return output,{'prior':prior,'guide':[gw,gh],'neural_scale':scale,'tiles':calls,'elapsed_ms':(time.perf_counter()-then)*1000,'scene':s}
+    envelope=source_envelope(original,upscale) if upscale>1 else None
+    starting=transfer(base,low,prediction,zoom,s,prior=='max',native_sampling=upscale==1,
+                      envelope=envelope,starting_policy=True)
+    preserve=(upscale==1 and zoom<4 and iso<=400 and s['meanY']>=65 and seconds<1/40
+              and s['texture']>=.8 and s['sharpFraction']>=.58)
+    mean=None
+    if upscale>1 and (gw,gh)==(w,h):
+        native_mean=pack(luminance(neural).reshape(h,scale,w,scale).mean(axis=(1,3)))
+        mean=np.asarray(Image.fromarray(native_mean).resize((ow,oh),Image.Resampling.BILINEAR)).astype(np.int32)
+    output=base if preserve else transfer(base,low,prediction,zoom,s,prior=='max',native_sampling=upscale==1,
+                                          envelope=envelope,prior_mean=mean)
+    details={'prior':'native' if preserve else prior,'guide':[gw,gh],'neural_scale':scale,
+             'tiles':0 if preserve else calls,'host_tiles_ms':0 if preserve else inference_ms,
+             'anchored':mean is not None,'scene':s}
+    return output,details,starting
 
 
 def old_protect(base,prediction,neighbour,amount):
@@ -185,6 +242,7 @@ def main():
     parser.add_argument('--private-input',type=Path,action='append',default=[])
     parser.add_argument('--private-out',type=Path)
     parser.add_argument('--large',action='store_true')
+    parser.add_argument('--holdout',action='store_true',help='Run additional crops from the same source photos')
     args=parser.parse_args();args.out.mkdir(parents=True,exist_ok=True)
     torch.set_num_threads(2);metric=lpips.LPIPS(net='alex',verbose=False).eval()
     def tensor(a):return torch.from_numpy(a.transpose(2,0,1).copy()).float()[None]/127.5-1
@@ -206,32 +264,47 @@ def main():
     chart=Image.fromarray(resize(fixtures['buildings_brick'],192,192));draw=ImageDraw.Draw(chart)
     draw.rectangle((10,80,182,114),fill='white');draw.text((13,87),'HORIZON A0123 / 456',fill='black',stroke_width=0)
     fixtures['text']=np.asarray(chart)
+    chart=Image.new('RGB',(192,192))
+    draw=ImageDraw.Draw(chart)
+    for row,(background,foreground) in enumerate(((32,52),(60,85),(115,140),(200,170),(225,209))):
+        draw.rectangle((0,row*38,191,row*38+37),fill=(background,)*3)
+        draw.text((30,row*38+10),'HORIZON A0123 / 456',fill=(foreground,)*3,stroke_width=1)
+    fixtures['weak_text']=np.asarray(chart)
+    if args.holdout:
+        for name in ['foliage','buildings_brick','fur','face']:
+            array=fixtures[name]
+            h,w=array.shape[:2]
+            fixtures[name+'_holdout']=array[h//3:,:w*2//3]
     def execute(name,truth,observed,zoom,iso,upscale,seconds,outdir,no_ref=False):
         before=resize(observed,observed.shape[1]*upscale,observed.shape[0]*upscale)
         old,old_plan=restore_old(observed,zoom,iso,upscale,models['old'])
-        new,new_plan=restore_v2(observed,zoom,iso,upscale,seconds,models)
+        new,new_plan,starting=restore_v2(observed,zoom,iso,upscale,seconds,models)
         reference=before if no_ref else truth
         case={'name':name,'zoom':zoom,'iso':iso,'upscale':upscale,'input':[observed.shape[1],observed.shape[0]],'output':[new.shape[1],new.shape[0]],
               'reference_scope':'NO_GROUND_TRUTH_camera_conservation_only' if no_ref else 'controlled_reference_samefield_samesampling',
               'old_plan':old_plan,'v2_plan':new_plan,
-              'metrics':{'input':scores(reference,before),'baseline6708aca':scores(reference,old),'adaptive_v2':scores(reference,new)},
-              'v2_change_from_baseline':scores(old,new)}
+              'metrics':{'input':scores(reference,before),'baseline6708aca':scores(reference,old),
+                         'starting_v3':scores(reference,starting),'candidate':scores(reference,new)},
+              'unmeasured_contrast':{label:unsupported_contrast(observed,image,upscale) for label,image in
+                                     [('input',before),('starting_v3',starting),('candidate',new)]}}
         # A true100%-pixel-center crop avoids a resized collage hiding texture loss.
         h,w=new.shape[:2];crop_w=min(w,192);crop_h=min(h,192);x=(w-crop_w)//2;y=(h-crop_h)//2
-        strip=Image.new('RGB',(crop_w*4,crop_h+24))
-        for i,(label,array) in enumerate([('reference' if not no_ref else 'camera',reference),('input',before),('baseline6708aca',old),('adaptiveV2',new)]):
+        strip=Image.new('RGB',(crop_w*5,crop_h+24))
+        for i,(label,array) in enumerate([('reference' if not no_ref else 'camera',reference),('input',before),
+                                          ('baseline6708aca',old),('starting_v3',starting),('candidate',new)]):
             strip.paste(Image.fromarray(array[y:y+crop_h,x:x+crop_w]),(i*crop_w,24));ImageDraw.Draw(strip).text((i*crop_w+3,5),label,fill='white')
         strip.save(outdir/(name+'-100pct.png'))
-        print(name,'old',round(case['metrics']['baseline6708aca']['lpips_alex'],4),'v2',round(case['metrics']['adaptive_v2']['lpips_alex'],4),new_plan['prior'],flush=True)
+        print(name,'start',round(case['metrics']['starting_v3']['lpips_alex'],4),
+              'candidate',round(case['metrics']['candidate']['lpips_alex'],4),new_plan['prior'],flush=True)
         return case
     for name,array in fixtures.items():
         truth=resize(array,192,192)
         for level,zoom,iso in [('mild',1.,200),('strong',4.,1200)]:
             observed=degrade(truth,level)
             report['cases'].append(execute(name+'-'+level+'-native',truth,observed,zoom,iso,1,1/60,args.out))
-        # Matched4x enlargement task: all methods get exactly48px of the same field.
-        observed=degrade(resize(truth,48,48),'mild')
-        report['cases'].append(execute(name+'-mild-4x',truth,observed,2.3,200,4,1/120,args.out))
+        for upscale,zoom in [(2,10.),(4,30.)]:
+            observed=degrade(resize(truth,192//upscale,192//upscale),'mild')
+            report['cases'].append(execute(f'{name}-mild-{upscale}x',truth,observed,zoom,400,upscale,1/120,args.out))
     if args.large:
         # Triggers real V2guide560/oldguide512 from1024-long-edge input.
         truth=resize(fixtures['face'],1024,768);observed=degrade(truth,'strong')

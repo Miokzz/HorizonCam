@@ -11,11 +11,17 @@ import androidx.camera.core.SurfaceRequest
 import java.util.IdentityHashMap
 import java.util.concurrent.Executor
 import com.miokzz.horizoncam.stabilization.AngleMath
+import com.miokzz.horizoncam.stabilization.FrameMotion
+import com.miokzz.horizoncam.stabilization.FrameShift
+import com.miokzz.horizoncam.stabilization.MotionViewport
+import com.miokzz.horizoncam.stabilization.safeShiftFactor
+import kotlin.math.abs
 
 class HorizonSurfaceProcessor(
     private val state: HorizonState,
     private val glHandler: Handler,
     private val glExecutor: Executor,
+    private val nativeEisActive: () -> Boolean,
     private val onRenderError: (Throwable) -> Unit
 ) : SurfaceProcessor, SurfaceTexture.OnFrameAvailableListener {
 
@@ -25,11 +31,25 @@ class HorizonSurfaceProcessor(
         val transform: FloatArray = FloatArray(16),
         val sensorToBufferGlDegrees: Float,
         val aspect: Float = info.size.width.toFloat() / info.size.height.coerceAtLeast(1),
-        val crop: Float = AngleMath.safeFixedCrop(aspect.toDouble()).toFloat()
+        val crop: Float = AngleMath.safeFixedCrop(aspect.toDouble()).toFloat(),
+        val motionViewport: MotionViewport?,
+        var shift: FrameShift = FrameShift.ZERO
     )
+
+    internal data class PreviewCorrection(val degrees: Float, val zoom: Float, val aspect: Float, val shift: FrameShift) {
+        fun undo(x: Double, y: Double): Pair<Double, Double> =
+            AngleMath.correctionMatrix(degrees.toDouble(), zoom.toDouble(), aspect.toDouble())
+                .inverse().apply(x - shift.x, y - shift.y)
+    }
 
     private val egl = EglCore()
     private val renderer = OesRenderer()
+    private val motion = FrameMotion(LumaFrameSampler.WIDTH, LumaFrameSampler.HEIGHT)
+    private val luma = LumaFrameSampler()
+    private var motionReference: OutputTarget? = null
+    private var motionUnavailable = false
+    @Volatile internal var previewCorrection: PreviewCorrection? = null
+        private set
     private var initialized = false
     private var released = false
 
@@ -64,15 +84,24 @@ class HorizonSurfaceProcessor(
     @Volatile private var renderedFrames = 0L
     @Volatile private var synchronizedFrames = 0L
     @Volatile private var orientationFrames = 0L
+    @Volatile private var motionPairs = 0L
+    @Volatile private var visualEisFrames = 0L
+    @Volatile private var motionSampleMicros = 0L
 
     fun diagnostics(): String {
         val mask = registeredTargets
         val p = if (mask and CameraEffect.PREVIEW != 0) 1 else 0
         val v = if (mask and CameraEffect.VIDEO_CAPTURE != 0) 1 else 0
         val sync = if (timestampsMatched) "SYNC" else "LATEST"
+        val translation = when {
+            nativeEisActive() -> "HAL"
+            motionUnavailable -> "indisponível"
+            else -> "visual=$visualEisFrames/$motionPairs scan=${motionSampleMicros / 1000.0}ms"
+        }
         return "P" + p + " V" + v + " F" + renderedFrames +
             " E" + errorCount + " " + sync + " " + sensorFrameAgeMs.toInt() + "ms " +
-            "matched=" + synchronizedFrames + "/" + orientationFrames + " " + inputShape + ">" + outputShapes
+            "matched=" + synchronizedFrames + "/" + orientationFrames + " " + inputShape + ">" + outputShapes +
+            " EIS=$translation"
     }
 
     override fun onInputSurface(request: SurfaceRequest) {
@@ -90,6 +119,9 @@ class HorizonSurfaceProcessor(
             inputShape = "${request.resolution.width}x${request.resolution.height}"
             synchronizedFrames = 0L
             orientationFrames = 0L
+            motion.reset()
+            motionReference = null
+            previewCorrection = null
             android.util.Log.i("HorizonCamGL", "Input $inputShape")
             val surfaceTexture = SurfaceTexture(rendererTextureId()).apply {
                 setDefaultBufferSize(request.resolution.width, request.resolution.height)
@@ -144,8 +176,15 @@ class HorizonSurfaceProcessor(
             // Android pixel matrices use Y-down; GL uses Y-up. The first
             // column yields the static native-sensor -> output rotation.
             val bufferRotation = AngleMath.sensorToBufferGlRotation(sensorToBuffer)
+            val linear = AngleMath.Matrix2(sensorToBuffer[0].toDouble(), -sensorToBuffer[1].toDouble(),
+                -sensorToBuffer[3].toDouble(), sensorToBuffer[4].toDouble())
+            val width = surfaceOutput.size.width
+            val height = surfaceOutput.size.height
+            val usableTransform = abs(linear.m00 * linear.m11 - linear.m01 * linear.m10) > 1e-12
+            val motionViewport = if (usableTransform && width > 0 && height > 0) MotionViewport(width, height,
+                linear, AngleMath.safeFixedCrop(width.toDouble() / height)) else null
             outputs[surfaceOutput] = OutputTarget(surfaceOutput, surface,
-                sensorToBufferGlDegrees = bufferRotation)
+                sensorToBufferGlDegrees = bufferRotation, motionViewport = motionViewport)
             outputShapes = outputs.values.joinToString(",") {
                 "${it.info.size.width}x${it.info.size.height}@${it.sensorToBufferGlDegrees.toInt()}"
             }
@@ -179,6 +218,8 @@ class HorizonSurfaceProcessor(
                 if (frame.timestampValid) synchronizedFrames++
             }
 
+            val shiftFactor = measureSharedTranslation(frame, timestamp)
+
             for (target in drawTargets) {
 
                 target.info.updateTransformMatrix(target.transform, cameraTextureMatrix)
@@ -191,9 +232,15 @@ class HorizonSurfaceProcessor(
                 // correction has the SAME sign in native and target axes.
                 // Adding a sensor-mount offset here would double-correct it.
                 buildVertexMatrix(frame.rotationDegrees, zoom, aspect, vertexMatrix)
+                val shift = target.shift * shiftFactor
+                vertexMatrix[12] = shift.x.toFloat()
+                vertexMatrix[13] = shift.y.toFloat()
                 try {
                     egl.draw(target.surface, size.width, size.height, timestamp) {
                         renderer.draw(target.transform, vertexMatrix)
+                    }
+                    if (target.info.targets and CameraEffect.PREVIEW != 0) {
+                        previewCorrection = PreviewCorrection(frame.rotationDegrees, zoom, aspect, shift)
                     }
                 } catch (surfaceError: Throwable) {
                     // A video encoder can close its Surface while the preview
@@ -214,6 +261,42 @@ class HorizonSurfaceProcessor(
             // Log and expose an explicit error; do not crash the GL looper.
             reportRenderError(t)
         }
+    }
+
+    private fun measureSharedTranslation(frame: FrameGeometry, timestamp: Long): Double {
+        if (!state.isEnabled() || motionUnavailable || nativeEisActive() || !frame.orientationAvailable ||
+            frame.sensorAgeMs > 100f || drawTargets.any { it.motionViewport == null }) {
+            motion.reset()
+            return 0.0
+        }
+        val reference = motionReference?.takeIf { outputs[it.info] === it }
+            ?: (drawTargets.firstOrNull { it.info.targets and CameraEffect.PREVIEW != 0 } ?: drawTargets.first()).also {
+                motion.reset()
+                motionReference = it
+            }
+        val started = android.os.SystemClock.elapsedRealtimeNanos()
+        val correction = try {
+            egl.makeOffscreenCurrent()
+            reference.info.updateTransformMatrix(reference.transform, cameraTextureMatrix)
+            buildVertexMatrix(frame.rotationDegrees, reference.crop, reference.aspect, vertexMatrix)
+            luma.read(renderer, reference.transform, vertexMatrix, motion.input)
+            motion.advance(timestamp)
+        } catch (error: Exception) {
+            motionUnavailable = true
+            android.util.Log.w("HorizonCamGL", "EIS visual indisponível; roll mantido", error)
+            return 0.0
+        }
+        motionSampleMicros = (android.os.SystemClock.elapsedRealtimeNanos() - started) / 1000
+        motionPairs++
+        if (motion.matchedPatches >= 4) visualEisFrames++
+        val viewport = checkNotNull(reference.motionViewport)
+        var factor = 1.0
+        drawTargets.forEach { target ->
+            target.shift = checkNotNull(target.motionViewport).shiftFrom(viewport, correction)
+            factor = minOf(factor, safeShiftFactor(frame.rotationDegrees.toDouble(), target.crop.toDouble(),
+                target.aspect.toDouble(), target.shift))
+        }
+        return factor
     }
 
     private fun reportRenderError(error: Throwable) {
@@ -255,6 +338,8 @@ class HorizonSurfaceProcessor(
         inputTexture = null
         inputSurface = null
         if (initialized) {
+            egl.makeOffscreenCurrent()
+            luma.release()
             renderer.release()
             egl.release()
             initialized = false

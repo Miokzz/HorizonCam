@@ -1,7 +1,7 @@
 import unittest
 import xml.etree.ElementTree as ET
 
-from ui_checks import wait_for, immersive_confirmation
+from ui_checks import wait_for, immersive_confirmation, pixel_launcher_anr_close
 
 
 class UiReadinessTest(unittest.TestCase):
@@ -30,6 +30,14 @@ class UiReadinessTest(unittest.TestCase):
             text="Unexpected error"/><node package="android" resource-id="android:id/ok"
             text="OK" enabled="true"/></hierarchy>''')
         self.assertIsNone(immersive_confirmation(root))
+
+    def test_only_pixel_launcher_anr_can_be_closed(self):
+        root = ET.fromstring('''<hierarchy><node package="android" resource-id="android:id/alertTitle"
+            text="Pixel Launcher isn't responding"/><node package="android" resource-id="android:id/aerr_close"
+            text="Close app" enabled="true"/></hierarchy>''')
+        self.assertIsNotNone(pixel_launcher_anr_close(root))
+        root[0].set("text", "HorizonCam isn't responding")
+        self.assertIsNone(pixel_launcher_anr_close(root))
 
 
 if __name__ == "__main__":

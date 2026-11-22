@@ -19,9 +19,9 @@ Em **Foto → Ajustes → Formato e resolução**, escolha JPEG rápido, a resol
 
 ## Foto automática · 0,6× a 30×
 
-Escolha o enquadramento com a pinça ou toque no indicador de zoom para escolher em décimos. Em **Foto / JPEG**, o disparador guarda a captura em armazenamento privado, libera a câmera e enfileira a revelação local com Real-ESRGAN general-x4v3. A galeria recebe um JPEG. A interface informa quando a inferência é interrompida e o app precisa preservar o JPEG da câmera. A câmera pública determina a menor ampliação disponível. Acima de seu limite o visor e o JPEG aplicam o mesmo recorte central. O metadado do JPEG identifica a estimativa neural.
+Escolha o enquadramento com a pinça ou toque no indicador de zoom para escolher em décimos. Em **Foto / JPEG**, o disparador guarda uma referência privada e enfileira a revelação local. A galeria recebe um JPEG. O Horizon AI 2 escolhe entre QuickSRNet-small e Real-ESRGAN general-x4v3 conforme a captura. O metadado identifica o modelo que executou. Em caso de falha, o app indica que salvou a captura sem restauração.
 
-O processamento trabalha com até 12,6 MP e um modelo que estima textura. Fotos normais preservam uma fração maior do sinal medido; zoom alto e ISO elevado recebem maior contribuição do modelo. Quando há recorte adicional por software, a reconstrução pode usar a saída de 2× ou 4× dentro do limite de memória. Também é possível escolher explicitamente JPEG do sensor ou DNG em **Pro**. Consulte a [origem dos pesos, conversão e métricas](tools/model/README.md).
+O orçamento de 12,6 MP se aplica ao enquadramento escolhido. Em Foto automática, o visor e a captura usam o mesmo recorte central adicional. A prévia sinaliza a troca pendente. No S24, a câmera lógica anuncia até 10× ao app. A política tenta as saídas físicas e calcula a ampliação adicional a partir do campo de visão do sensor. A confirmação óptica depende dos metadados e da sessão. Em **Pro** também é possível escolher JPEG do sensor ou DNG. Consulte as [medições e o estado da V3](docs/V3_FIELD.md) e a [origem dos pesos](tools/model/README.md).
 
 ## Fase 4 · Noturno e multiframe
 

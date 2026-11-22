@@ -1,0 +1,25 @@
+
+model = "gpt-6.2-astra"
+model_reasoning_effort = "xhigh"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 2
+default_subagent_model = "gpt-6.2-sol"
+default_subagent_reasoning_effort = "xhigh"
+
+[agents."hc_optics_video_sol"]
+description = "HorizonCam: cameras fisicas, zoom, AF, Camera2, EIS, OpenGL e Horizon Lock. Sol xhigh, implementador completo sob delegacao Astra."
+config_file = "agents/hc_optics_video_sol.toml"
+[agents."hc_neural_qa_sol"]
+description = "HorizonCam: modelos neurais, GPU, JPEG final, benchmarks e testes S24. Sol xhigh, implementador completo."
+config_file = "agents/hc_neural_qa_sol.toml"
+[agents."hc_android_ui_sol"]
+description = "HorizonCam Android Views e UX; Sol medium, owner de features de interface completas."
+config_file = "agents/hc_android_ui_sol.toml"
+[agents."hc_qa_ci_sol"]
+description = "HorizonCam QA, Gradle, EXIF e GitHub Actions; Sol medium, owner de testes e CI."
+config_file = "agents/hc_qa_ci_sol.toml"
+[agents."hc_kotlin_maint_sol"]
+description = "HorizonCam lifecycle, callbacks, Worker e manutencao Kotlin; Sol medium, implementacao completa."
+config_file = "agents/hc_kotlin_maint_sol.toml"

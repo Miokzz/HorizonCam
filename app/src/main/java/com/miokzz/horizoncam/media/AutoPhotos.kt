@@ -72,6 +72,25 @@ object AutoPhotos {
 
     // The reference is committed first. Extras may be dropped when time, sensor or lifecycle changes.
     private val acquiring = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Reserve a private reference shared by night/fusion and the durable publication queue. */
+    fun beginBurst(context: Context, zoom: Float): File {
+        val dir = directory(context)
+        check(dir.isDirectory || dir.mkdirs()) { "Armazenamento da foto indisponível." }
+        val file = File(dir, "${System.currentTimeMillis()}_${zoom.toRawBits()}_${1f.toRawBits()}_${UUID.randomUUID()}.jpg")
+        acquiring.add(file.name)
+        return file
+    }
+
+    internal fun encodedFor(source: File) = File(source.parentFile, "${source.nameWithoutExtension}.result")
+
+    fun releaseBurst(context: Context, reference: File, useCaptured: Boolean = false) {
+        if (useCaptured && reference.isFile) runCatching { capturedFlag(reference).createNewFile() }
+        acquiring.remove(reference.name)
+        if (reference.isFile) enqueue(context, reference)
+    }
+
+    internal fun capturedFlag(source: File) = File(source.parentFile, "${source.nameWithoutExtension}.captured")
     private fun extraFrames(capture: ImageCapture, reference: File, executor: Executor, sensor: String,
                             activeSensor: () -> String?, ready: () -> Unit) {
         acquiring.add(reference.name)
@@ -127,7 +146,7 @@ object AutoPhotos {
 class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
     private val app = applicationContext
     private val resolver = app.contentResolver
-
+    private val images = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
     override fun doWork(): Result {
         val name = inputData.getString("source") ?: return Result.success()
@@ -138,19 +157,23 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
         val parts = name.split('_')
         val crop = if (parts.size == 4) Float.fromBits(parts[2].toInt()) else 1f
         val marker = File(file.parentFile, "${file.nameWithoutExtension}.uri")
-        val thermal = app.getSystemService(PowerManager::class.java)?.currentThermalStatus ?: 0
-        if (thermal >= PowerManager.THERMAL_STATUS_SEVERE) {
-            AutoPhotos.post(AutoPhotos.State(true, "Restauração aguardando resfriamento"))
-            return Result.retry()
-        }
         return try {
-            val encoded = File(file.parentFile, "${file.nameWithoutExtension}.result")
-            val previous = if (marker.isFile) Uri.parse(marker.readText()) else null
+            val encoded = AutoPhotos.encodedFor(file)
+            val previous = findReservation(file, marker)
             val saved = if (previous != null && published(previous)) previous else {
                 if (!encoded.isFile) {
+                    val useCaptured = AutoPhotos.capturedFlag(file).isFile
+                    val thermal = app.getSystemService(PowerManager::class.java)?.currentThermalStatus ?: 0
+                    if (!useCaptured && thermal >= PowerManager.THERMAL_STATUS_SEVERE) {
+                        AutoPhotos.post(AutoPhotos.State(true, "Restauração aguardando resfriamento"))
+                        return Result.retry()
+                    }
                     val temp = File(file.parentFile, "${file.nameWithoutExtension}.rendering")
                     try {
-                        try { restore(file, temp, zoom, crop) }
+                        try {
+                            if (useCaptured) file.copyTo(temp, overwrite = true)
+                            else restore(file, temp, zoom, crop)
+                        }
                         catch (e: CancellationException) { throw e }
                         catch (e: Exception) { preserve(file, temp, crop, zoom, e) }
                         catch (e: OutOfMemoryError) { preserve(file, temp, crop, zoom, e) }
@@ -158,19 +181,31 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                     } finally { temp.delete() }
                 }
                 if (isStopped) throw CancellationException()
-                val target = reserve(file, marker)
+                val target = previous ?: reserve(file, marker)
                 // Only open the public row after the final JPEG (including EXIF) is durable.
                 // A transient MediaStore failure retries publication, never discards the inference.
-                if (!published(target)) AiPhotoFiles.copyAndPublish(app, encoded, target)
+                AiPhotoFiles.copyAndPublish(app, encoded, target)
                 target
             }
-            val neural = encoded.isFile && runCatching { ExifInterface(encoded)
-                .getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION)?.contains("Horizon AI") == true }.getOrDefault(false)
-            val message = if (neural) "Foto restaurada" else "JPEG da câmera salvo · restauração indisponível"
+            val description = runCatching {
+                if (encoded.isFile) ExifInterface(encoded).getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION)
+                else resolver.openInputStream(saved)?.use { ExifInterface(it).getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION) }
+            }.getOrNull().orEmpty()
+            val neural = "Horizon AI" in description
+            val message = when {
+                neural -> "Foto restaurada"
+                "quadros" in description -> "Fusão salva · sem restauração neural"
+                else -> "JPEG da câmera salvo · sem restauração neural"
+            }
             check(app.getSharedPreferences("horizoncam", Context.MODE_PRIVATE).edit()
                 .putString("autoFinalUri", saved.toString()).putString("autoFinalMessage", message)
                 .putFloat("autoFinalZoom", zoom).commit())
-            if (file.delete()) { marker.delete(); encoded.delete(); extras(file).forEach { it.delete() } }
+            if (file.delete()) {
+                marker.delete()
+                encoded.delete()
+                AutoPhotos.capturedFlag(file).delete()
+                extras(file).forEach { it.delete() }
+            }
             Log.i("HorizonAuto", "published zoom=$zoom neural=$neural shutterToGalleryMs=${System.currentTimeMillis()-name.substringBefore('_').toLong()}")
             AutoPhotos.post(AutoPhotos.State(false, message, saved, zoom))
             Result.success()
@@ -245,7 +280,8 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             try {
                 if (isStopped) throw CancellationException()
                 AiPhotoFiles.encode(app, Uri.fromFile(file), result.bitmap, target,
-                    "Horizon AI 2 | ${result.model} | textura estimada | zoom ${zoom}x | frames=$usedFrames")
+                    "Horizon AI 2 | ${result.model} | textura estimada | zoom ${zoom}x | frames=$usedFrames | " +
+                        "input/output ${source.width}x${source.height} -> ${result.bitmap.width}x${result.bitmap.height}")
                 Log.i("HorizonAuto", "AI2 source=${source.width}x${source.height} output=${result.bitmap.width}x${result.bitmap.height} zoom=$zoom crop=$crop grid=${result.modelWidth}x${result.modelHeight} model=${result.model} backend=${result.backend} tiles=${result.tiles} frames=$usedFrames neuralMs=${result.inferenceMs} restoreMs=${result.elapsedMs} pssKiB=${android.os.Debug.getPss()} scene=${result.scene}")
             } finally { result.bitmap.recycle() }
         } finally { source.recycle() }
@@ -269,41 +305,41 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             decoder.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB))
         }
 
-    private fun pendingStatus(uri: Uri): Int? = resolver.query(uri, arrayOf(MediaStore.Images.Media.IS_PENDING),
-        null, null, null)?.use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else null }
+    private fun pendingStatus(uri: Uri): Int? = checkNotNull(resolver.query(uri,
+        arrayOf(MediaStore.Images.Media.IS_PENDING), null, null, null)).use { cursor ->
+        if (cursor.moveToFirst()) cursor.getInt(0) else null
+    }
 
     private fun published(uri: Uri) = pendingStatus(uri) == 0
 
-    private fun reserve(file: File, marker: File): Uri {
+    private fun findReservation(file: File, marker: File): Uri? {
         if (marker.isFile) {
             val uri = Uri.parse(marker.readText())
             if (pendingStatus(uri) != null) return uri
         }
+        // A process can die after insert and before the local marker rename. The UUID
+        // belongs to the private capture and is stable across WorkManager retries.
+        @Suppress("DEPRECATION")
+        val lookup = MediaStore.setIncludePending(images)
+        val idColumn = MediaStore.MediaColumns._ID
+        return checkNotNull(resolver.query(lookup, arrayOf(idColumn),
+            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+            arrayOf("HC_${file.name}", "Pictures/HorizonCam/"), null)).use { cursor ->
+            if (cursor.moveToFirst()) ContentUris.withAppendedId(images, cursor.getLong(0)) else null
+        }
+    }
+
+    private fun reserve(file: File, marker: File): Uri {
         val values = CaptureLibrary.values(photo = true).apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "HC_${file.name}")
             put(MediaStore.Images.Media.DATE_TAKEN, file.name.substringBefore('_').toLong())
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
-        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        // A process can die after insert and before the local marker rename. The UUID
-        // belongs to the private capture and is stable across WorkManager retries.
-        @Suppress("DEPRECATION")
-        val lookup = MediaStore.setIncludePending(collection)
-        val idColumn = MediaStore.MediaColumns._ID
-        val existing = resolver.query(lookup, arrayOf(idColumn),
-            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
-            arrayOf("HC_${file.name}", "Pictures/HorizonCam/"), null)?.use { cursor ->
-            if (cursor.moveToFirst()) ContentUris.withAppendedId(collection, cursor.getLong(0)) else null
-        }
-        val uri = existing ?: requireNotNull(resolver.insert(collection, values))
-        try {
-            val temp = File(marker.parentFile, "${marker.name}.tmp")
-            temp.writeText(uri.toString())
-            check(temp.renameTo(marker))
-        } catch (e: Exception) {
-            if (existing == null) resolver.delete(uri, null, null)
-            throw e
-        }
+        val uri = requireNotNull(resolver.insert(images, values))
+        // If recording the URI fails, the pending row remains discoverable by capture UUID.
+        val temp = File(marker.parentFile, "${marker.name}.tmp")
+        temp.writeText(uri.toString())
+        check(temp.renameTo(marker))
         return uri
     }
 }

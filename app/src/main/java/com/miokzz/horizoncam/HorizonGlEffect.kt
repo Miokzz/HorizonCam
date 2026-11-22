@@ -32,12 +32,13 @@ class HorizonGlEffect private constructor(
     companion object {
         fun create(
             state: HorizonState,
+            nativeEisActive: () -> Boolean,
             onError: (Throwable) -> Unit
         ): HorizonGlEffect {
             val thread = HandlerThread("HorizonCam-GL").apply { start() }
             val handler = Handler(thread.looper)
             val executor = Executor { command -> handler.post(command) }
-            val processor = HorizonSurfaceProcessor(state, handler, executor, onError)
+            val processor = HorizonSurfaceProcessor(state, handler, executor, nativeEisActive, onError)
             return HorizonGlEffect(
                 processor,
                 thread,
