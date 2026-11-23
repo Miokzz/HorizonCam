@@ -322,9 +322,11 @@ class RestorationDeviceTest {
                     try { save(resize, "bilinear") } finally { if (resize !== source) resize.recycle() }
                     denoiser.restore(source).use { filtered ->
                         save(filtered.bitmap, "denoise-native")
-                        for ((name, input) in mapOf("current" to source, "denoise-sr" to filtered.bitmap)) {
+                        val variants = listOf(Triple("current", source, false), Triple("structure", source, true),
+                            Triple("denoise-sr", filtered.bitmap, false))
+                        for ((name, input, guard) in variants) {
                             NativeRestorer.restore(runner.targetContext, input, zoom, iso.toInt(), scale,
-                                {}, { false }, exposureSeconds = exposure / 1e9).use { result ->
+                                {}, { false }, exposureSeconds = exposure / 1e9, protectLocalStructure = guard).use { result ->
                                 assertEquals(source.width * scale, result.bitmap.width)
                                 assertEquals(source.height * scale, result.bitmap.height)
                                 save(result.bitmap, name)

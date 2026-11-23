@@ -127,3 +127,16 @@ Uma segunda captura pareada real em `0/6`, feita com a cena de teste preparada, 
 As diferenças da cena real foram desprezíveis. O ensaio real não incluiu uma referência limpa ou comparação com a câmera Samsung, por isso os números descrevem mudanças e não fidelidade absoluta. O candidato permanece na instrumentação. O conjunto deve crescer com RAW calibrado, múltiplas cenas e referências de menor ruído para reduzir a diferença entre a distribuição sintética e a câmera real.
 
 Build, lint, 111 testes JVM, captura RAW/JPEG e os dois ensaios instrumentados de denoising passaram. O estado térmico foi `NONE` no início e no fim do ensaio. Para reproduzir o treino, execute `train_experimental_denoiser.py --leaky --evaluation-seed 61260617 --holdout 16 --out <pasta-privada-nova>` com Python 3.12, TensorFlow 2.20 e NumPy 2.5.5. O replay usa `quality-denoiser-f32.tflite` no diretório privado com o SHA de `denoiserSha`. `rawPair=yes` e `retainPair=yes` produzem o par privado. `realCalibration` seleciona o identificador retornado ao executar `compareDenoiserOnTeleCalibration`.
+
+### Comparação com a câmera Samsung na mesma cena
+
+A câmera Samsung salvou dois JPEGs de teste, um por disparo, com teleobjetiva de 7,0 mm e razão digital declarada de 20× ou 30×. A exposição foi 30,0 ms em todos os pares. O ISO da Samsung foi 500 e 400, respectivamente, e a fonte HorizonCam foi ISO 709. As saídas Samsung tinham 3000 × 4000 após a orientação. O comparador HorizonCam é o JPEG Camera2 da calibração física, com a restauração atual em replay de um quadro. O ensaio compara as imagens naquele cenário, sem isolar o efeito de ISO, fusão, ISP ou modelo.
+
+| Zoom | Pontos alinhados / erro mediano | Ruído residual HorizonCam / Samsung | Gradiente de bordas HorizonCam / Samsung |
+| --- | --- | --- | --- |
+| 20× | 107 / 1,01 px | 0,518 / 0,287 | 14,17 / 16,16 |
+| 30× | 52 / 1,22 px | 0,368 / 0,233 | 13,68 / 15,83 |
+
+As imagens foram orientadas e registradas por SIFT e RANSAC, com o lado longo normalizado para 1000 px. A escala Samsung → HorizonCam após registro foi 0,953 e 0,947. O ruído residual usa seis regiões planas da interseção registrada. O gradiente mede a mesma região de bordas fortes nos dois resultados. A inspeção a 30× mostrou contornos de letras fragmentados na restauração atual e traços mais contíguos na imagem Samsung. A comparação estabelece um alvo real para a ablação de restauração de traços. As fotos de calibração e montagens ficaram privadas e a comparação ainda requer referência limpa e repetições em outros alvos.
+
+O replay do JPEG real colocou a proteção local e a produção lado a lado, mantendo sensor, ISO, enquadramento, tiles e modelo. A proteção reduziu a fração de luminâncias que ultrapassaram em mais de três níveis o intervalo observado na vizinhança nativa de 3 × 3, de **0,483% a 0,137% em 20×** e de **0,744% a 0,209% em 30×**. Nos 7% de gradientes mais fortes da referência bilinear, as direções opostas passaram de 2,94% a 1,00% e de 4,61% a 1,63%. Essas métricas medem a aderência aos pixels capturados. A aparência fragmentada de alguns traços a 30× ainda é visível, e a diferença em relação à Samsung continua. O Real-ESRGAN permaneceu na GPU e o teste instrumentado passou nos dois níveis.
