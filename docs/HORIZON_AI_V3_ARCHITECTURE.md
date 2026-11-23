@@ -140,3 +140,16 @@ A câmera Samsung salvou dois JPEGs de teste, um por disparo, com teleobjetiva d
 As imagens foram orientadas e registradas por SIFT e RANSAC, com o lado longo normalizado para 1000 px. A escala Samsung → HorizonCam após registro foi 0,953 e 0,947. O ruído residual usa seis regiões planas da interseção registrada. O gradiente mede a mesma região de bordas fortes nos dois resultados. A inspeção a 30× mostrou contornos de letras fragmentados na restauração atual e traços mais contíguos na imagem Samsung. A comparação estabelece um alvo real para a ablação de restauração de traços. As fotos de calibração e montagens ficaram privadas e a comparação ainda requer referência limpa e repetições em outros alvos.
 
 O replay do JPEG real colocou a proteção local e a produção lado a lado, mantendo sensor, ISO, enquadramento, tiles e modelo. A proteção reduziu a fração de luminâncias que ultrapassaram em mais de três níveis o intervalo observado na vizinhança nativa de 3 × 3, de **0,483% a 0,137% em 20×** e de **0,744% a 0,209% em 30×**. Nos 7% de gradientes mais fortes da referência bilinear, as direções opostas passaram de 2,94% a 1,00% e de 4,61% a 1,63%. Essas métricas medem a aderência aos pixels capturados. A aparência fragmentada de alguns traços a 30× ainda é visível, e a diferença em relação à Samsung continua. O Real-ESRGAN permaneceu na GPU e o teste instrumentado passou nos dois níveis.
+
+### Integração na Foto automática
+
+O `AutoPhotoWorker` aplica a proteção local a partir de 20× quando há ampliação. A carta a 10× havia perdido PSNR no A/B, o que delimita o uso a 20×–30×. O denoiser treinado e a segmentação DeepLab seguem em instrumentação. O pipeline usa a mesma aquisição e o mesmo recorte, a política anterior de publicação e o fallback convencional em caso de falha.
+
+O APK de campo `06582fafd7d712cf42aed505d97827fd6697d25258704da3fb67a8b9fc0b0a92` confirmou sensor 6 e EXIF de 7,0 mm em 20× e 30× numa sessão lógica, com um JPEG por disparo. O log confirmou proteção local, Real-ESRGAN na GPU com FP16 permitido e dois quadros contribuintes nos dois casos.
+
+| Zoom pedido e aplicado | JPEG | Disparo → galeria | Tempo de fusão | Invocação neural | Geometria por imagem |
+| --- | --- | --- | --- | --- | --- |
+| 20× | 1836 × 2448 | 12,73 s | 4,01 s | 2,06 s | 37 pontos, erro mediano 1,40 px |
+| 30× | 1224 × 1632 | 9,23 s | 4,65 s | 0,98 s | Correspondências insuficientes nesta cena |
+
+Build de campo, lint e 111 testes JVM passaram. O ensaio integrado confirmou o uso da proteção e a publicação final. Os números de tempo são uma medição de campo, sem comparação A/B de desempenho sob as mesmas condições.

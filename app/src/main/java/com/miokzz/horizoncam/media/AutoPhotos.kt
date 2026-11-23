@@ -374,6 +374,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
             val power = app.getSystemService(PowerManager::class.java)
             var tooHot = false
             val upscale = com.miokzz.horizoncam.camera.StillFraming.reconstructionScale(source.width, source.height, crop, NativeRestorer.MAX_PIXELS)
+            val protectLocalStructure = zoom >= 20f && upscale > 1
             NativeRestorer.restore(app, source, zoom, iso, upscale, { progress ->
                 val percent = 100 * progress.completedTiles / progress.totalTiles
                 if (lastPercent != percent) {
@@ -382,7 +383,8 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                     tooHot = (power?.currentThermalStatus ?: 0) >= PowerManager.THERMAL_STATUS_SEVERE
                     if (tooHot) AutoPhotos.post(AutoPhotos.State(true, "Restauração aguardando resfriamento"))
                 }
-            }, { isStopped || tooHot }, exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0)).use { result ->
+            }, { isStopped || tooHot }, exposureSeconds = exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0),
+                protectLocalStructure = protectLocalStructure).use { result ->
                 if (isStopped) throw CancellationException()
                 val output = result.bitmap
                 val description = PhotoProvenance.describe(result.model.takeIf { result.usedNeuralModel }, usedFrames,
@@ -403,7 +405,7 @@ class AutoPhotoWorker(context: Context, params: WorkerParameters) : Worker(conte
                 Log.i("HorizonAuto", "render capture=${file.name} source=${source.width}x${source.height} " +
                     "output=${output.width}x${output.height} zoom=$zoom crop=$crop " +
                     "grid=${result.modelWidth}x${result.modelHeight} model=${result.model} backend=${result.backend} " +
-                    "tiles=${result.tiles} frames=$usedFrames originalScan=$copyOriginal " +
+                    "tiles=${result.tiles} frames=$usedFrames originalScan=$copyOriginal structureProtection=$protectLocalStructure " +
                     "invokeMs=${result.nativeInferenceMs} neuralMs=${result.inferenceMs} restoreMs=${result.elapsedMs} " +
                     "decodeMs=${decodedAt - started} fusionMs=${fusedAt - decodedAt} " +
                     "encodeMs=$encodeMs pssKiB=${android.os.Debug.getPss()} scene=${result.scene}")
