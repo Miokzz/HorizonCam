@@ -4,20 +4,26 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.os.Bundle
 import androidx.test.platform.app.InstrumentationRegistry
 import com.miokzz.horizoncam.ai.InferenceRuntime
 import com.miokzz.horizoncam.ai.NativeRestorer
 import com.miokzz.horizoncam.ai.PhotoPrior
+import com.miokzz.horizoncam.bench.ExperimentalDenoiser
 import com.miokzz.horizoncam.bench.ExperimentalSegmentation
+import com.miokzz.horizoncam.camera.StillFraming
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.Random
 import kotlin.math.log10
+import kotlin.math.roundToInt
 
 /** Matched public-domain crops with fixed blur, noise and JPEG degradation.
  * Runs the production engine without writing to the gallery.
@@ -226,6 +232,128 @@ class RestorationDeviceTest {
                 }
             }
         }
+    }
+
+    @Test fun compareNeuralDenoisingOnMatchedInputs() {
+        val runner = InstrumentationRegistry.getInstrumentation()
+        val args = InstrumentationRegistry.getArguments()
+        assumeTrue(args.getString("horizonDenoise") == "yes")
+        val model = File(runner.targetContext.filesDir, "quality-denoiser-f32.tflite")
+        val sha = requireNotNull(args.getString("denoiserSha"))
+        assertTrue(model.isFile)
+        ExperimentalDenoiser(model, sha, false).use { cpu ->
+            val gpu = runCatching { ExperimentalDenoiser(model, sha, true) }.getOrElse {
+                sendEvidence(runner, "HC_DENOISE gpuUnavailable=${it.javaClass.simpleName}")
+                null
+            }
+            try {
+                for (fixture in listOf("chart", "face", "detail", "cat", "grass", "brick")) {
+                    val truth = if (fixture in listOf("cat", "grass", "brick")) {
+                        requireNotNull(BitmapFactory.decodeFile(File(runner.targetContext.filesDir,
+                            "quality-matched-$fixture.png").path))
+                    } else matchedTruth(runner, fixture)
+                    try {
+                        for ((zoom, scale) in listOf(10f to 2, 20f to 4, 30f to 4)) {
+                            val encoded = degradedInput(truth, scale, if (zoom == 30f) 74 else 86)
+                            val source = withNoise(encoded, seed = fixture.hashCode().toLong() + zoom.toLong(),
+                                sigma = if (zoom == 30f) 13.0 else 8.0)
+                            encoded.recycle()
+                            try {
+                                cpu.restore(source).use { denoised ->
+                                    gpu?.restore(source)?.use { accelerated ->
+                                        sendEvidence(runner, "HC_DENOISE_PARITY fixture=$fixture zoom=$zoom " +
+                                            "cpuGpuPsnr=${psnr(denoised.bitmap, accelerated.bitmap)} " +
+                                            "cpuMs=${denoised.wallMs} gpuMs=${accelerated.wallMs} tiles=${denoised.tiles}")
+                                    }
+                                    val variants = mapOf("source" to source, "denoise" to denoised.bitmap)
+                                    for ((name, input) in variants) {
+                                        val resize = Bitmap.createScaledBitmap(input, truth.width, truth.height, true)
+                                        try {
+                                            NativeRestorer.restore(runner.targetContext, input, zoom, 1000, scale,
+                                                {}, { false }).use { result ->
+                                                assertEquals(truth.width, result.bitmap.width)
+                                                assertEquals(truth.height, result.bitmap.height)
+                                                sendEvidence(runner, "HC_DENOISE fixture=$fixture zoom=$zoom variant=$name " +
+                                                    "bilinear=${psnr(resize, truth)} neural=${psnr(result.bitmap, truth)} " +
+                                                    "srMs=${result.elapsedMs} denoiseMs=${if (name == "denoise") denoised.wallMs else 0.0} " +
+                                                    "backend=${result.backend} pssKiB=${android.os.Debug.getPss()}")
+                                            }
+                                        } finally { if (resize !== input) resize.recycle() }
+                                    }
+                                }
+                            } finally { source.recycle() }
+                        }
+                    } finally { truth.recycle() }
+                }
+            } finally { gpu?.close() }
+        }
+    }
+
+    @Test fun compareDenoiserOnTeleCalibration() {
+        val runner = InstrumentationRegistry.getInstrumentation()
+        val args = InstrumentationRegistry.getArguments()
+        val token = args.getString("realCalibration")
+        assumeTrue(token != null)
+        require(checkNotNull(token).matches(Regex("[0-9a-f-]{36}")))
+        val directory = File(runner.targetContext.cacheDir, "quality-pair-$token")
+        val raw = File(directory, "source.dng")
+        val jpeg = File(directory, "source.jpg")
+        check(raw.isFile && jpeg.isFile)
+        val (iso, exposure) = File(directory, "exposure.txt").readLines().take(2).map(String::toLong)
+        val model = File(runner.targetContext.filesDir, "quality-denoiser-f32.tflite")
+        val sha = requireNotNull(args.getString("denoiserSha"))
+        ExperimentalDenoiser(model, sha, false).use { denoiser ->
+            for (zoom in listOf(20f, 30f)) {
+                val crop = StillFraming.digitalRatio(zoom, 3f)
+                val source = ImageDecoder.decodeBitmap(ImageDecoder.createSource(jpeg)) { decoder, info, _ ->
+                    val rect = StillFraming.centerCrop(info.size.width, info.size.height, crop)
+                    decoder.crop = Rect(rect.left, rect.top, rect.left + rect.width, rect.top + rect.height)
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    decoder.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB))
+                }
+                try {
+                    val scale = StillFraming.reconstructionScale(source.width, source.height, crop, NativeRestorer.MAX_PIXELS)
+                    fun save(bitmap: Bitmap, tag: String) {
+                        File(directory, "${zoom.toInt()}-$tag.png").outputStream().use {
+                            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
+                        }
+                    }
+                    val resize = Bitmap.createScaledBitmap(source, source.width * scale, source.height * scale, true)
+                    try { save(resize, "bilinear") } finally { if (resize !== source) resize.recycle() }
+                    denoiser.restore(source).use { filtered ->
+                        save(filtered.bitmap, "denoise-native")
+                        for ((name, input) in mapOf("current" to source, "denoise-sr" to filtered.bitmap)) {
+                            NativeRestorer.restore(runner.targetContext, input, zoom, iso.toInt(), scale,
+                                {}, { false }, exposureSeconds = exposure / 1e9).use { result ->
+                                assertEquals(source.width * scale, result.bitmap.width)
+                                assertEquals(source.height * scale, result.bitmap.height)
+                                save(result.bitmap, name)
+                                sendEvidence(runner, "HC_DENOISE_REAL zoom=$zoom source=${source.width}x${source.height} " +
+                                    "iso=$iso exposureNs=$exposure scale=$scale variant=$name " +
+                                    "denoiseMs=${if (name == "denoise-sr") filtered.wallMs else 0.0} " +
+                                    "srMs=${result.elapsedMs} backend=${result.backend} pssKiB=${android.os.Debug.getPss()}")
+                            }
+                        }
+                    }
+                } finally { source.recycle() }
+            }
+        }
+    }
+
+    private fun withNoise(source: Bitmap, seed: Long, sigma: Double): Bitmap {
+        val width = source.width
+        val height = source.height
+        val pixels = IntArray(width * height)
+        source.getPixels(pixels, 0, width, 0, 0, width, height)
+        val random = Random(seed)
+        for (index in pixels.indices) {
+            val color = pixels[index]
+            val correlated = random.nextGaussian() * sigma
+            fun channel(shift: Int): Int = (((color ushr shift) and 255) + correlated +
+                random.nextGaussian() * sigma * 0.30).roundToInt().coerceIn(0, 255)
+            pixels[index] = (255 shl 24) or (channel(16) shl 16) or (channel(8) shl 8) or channel(0)
+        }
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
     }
 
     private fun sendEvidence(runner: android.app.Instrumentation, line: String) =

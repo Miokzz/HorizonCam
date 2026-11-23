@@ -22,28 +22,32 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
 import java.io.OutputStream
+import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
-/** Tests paired tele RAW and JPEG without publishing or storing any photograph. */
+/** Tests paired tele RAW and JPEG. Optional calibration pairs remain in the field app's private cache. */
 class TeleRawPairFieldTest {
     @Test fun capturePairedTeleOutputs() {
-        assumeTrue(InstrumentationRegistry.getArguments().getString("rawPair") == "yes")
+        val args = InstrumentationRegistry.getArguments()
+        assumeTrue(args.getString("rawPair") == "yes")
         assumeTrue(Build.MODEL == "SM-S9210" && Build.VERSION.SDK_INT >= 33)
         val runner = InstrumentationRegistry.getInstrumentation()
         val manager = runner.targetContext.getSystemService(CameraManager::class.java)
         fun report(line: String) = runner.sendStatus(0, Bundle().apply {
             putString("stream", "\nHC_RAW_PAIR $line\n")
         })
-        if (!attempt(manager, true, ::report)) attempt(manager, false, ::report)
+        val cache = runner.targetContext.cacheDir.takeIf { args.getString("retainPair") == "yes" }
+        if (!attempt(manager, true, cache, ::report)) attempt(manager, false, cache, ::report)
     }
 
     @SuppressLint("MissingPermission")
-    private fun attempt(manager: CameraManager, withPreview: Boolean, report: (String) -> Unit): Boolean {
+    private fun attempt(manager: CameraManager, withPreview: Boolean, cache: File?, report: (String) -> Unit): Boolean {
         val thread = HandlerThread("hc-paired-tele").apply { start() }
         val handler = Handler(thread.looper)
         val opened = CompletableFuture<CameraDevice>()
@@ -83,8 +87,11 @@ class TeleRawPairFieldTest {
                 runCatching {
                     val buffer = image.planes.single().buffer
                     val bytes = ByteArray(buffer.remaining()).also(buffer::get)
-                    val focal = ExifInterface(bytes.inputStream()).getAttributeDouble(ExifInterface.TAG_FOCAL_LENGTH, -1.0)
-                    Jpeg(image.timestamp, image.width, image.height, focal)
+                    val exif = ExifInterface(bytes.inputStream())
+                    val focal = exif.getAttributeDouble(ExifInterface.TAG_FOCAL_LENGTH, -1.0)
+                    val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                        .takeIf { it in 1..8 } ?: ExifInterface.ORIENTATION_NORMAL
+                    Jpeg(image.timestamp, image.width, image.height, focal, orientation, bytes.takeIf { cache != null })
                 }.fold(jpeg::complete, jpeg::completeExceptionally)
             } }, handler)
 
@@ -138,8 +145,21 @@ class TeleRawPairFieldTest {
                 focal != null && abs(focal - 7f) <= 0.05f && abs(still.focalMm - 7.0) <= 0.05 &&
                 image.width == still.width && image.height == still.height && image.format == ImageFormat.RAW_SENSOR
             val output = ByteCount()
-            DngCreator(manager.getCameraCharacteristics("6"), physical).use { it.writeImage(output, image) }
+            val info = manager.getCameraCharacteristics("6")
+            DngCreator(info, physical).use { it.setOrientation(still.orientation).writeImage(output, image) }
             val dngVerified = output.bytes >= 2L * image.width * image.height
+            if (verified && dngVerified && cache != null) {
+                val token = UUID.randomUUID().toString()
+                val directory = File(cache, "quality-pair-$token")
+                check(directory.mkdir())
+                File(directory, "source.dng").outputStream().use { rawFile ->
+                    DngCreator(info, physical).use { it.setOrientation(still.orientation).writeImage(rawFile, image) }
+                }
+                File(directory, "source.jpg").writeBytes(checkNotNull(still.bytes))
+                File(directory, "exposure.txt").writeText("${physical[CaptureResult.SENSOR_SENSITIVITY] ?: 0}\n" +
+                    "${physical[CaptureResult.SENSOR_EXPOSURE_TIME] ?: 0L}\n")
+                report("privateCalibration=$token")
+            }
             report("preview=$withPreview status=${if (verified && dngVerified) "verified" else "unverified"} " +
                 "raw=${image.width}x${image.height} jpeg=${still.width}x${still.height} focalRaw=$focal " +
                 "focalJpeg=${still.focalMm} equalTimestamps=${exposureStart == image.timestamp && image.timestamp == still.timestamp} " +
@@ -159,7 +179,8 @@ class TeleRawPairFieldTest {
         }
     }
 
-    private data class Jpeg(val timestamp: Long, val width: Int, val height: Int, val focalMm: Double)
+    private data class Jpeg(val timestamp: Long, val width: Int, val height: Int, val focalMm: Double,
+                            val orientation: Int, val bytes: ByteArray?)
 
     private class ByteCount : OutputStream() {
         var bytes = 0L
