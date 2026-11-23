@@ -62,7 +62,7 @@ object DetailTransfer {
     fun pixel(base: Int, low: Int, prediction: Int, leftY: Int, rightY: Int, upY: Int, downY: Int,
               zoom: Float, scene: SceneEvidence, blind: Boolean, nativeSampling: Boolean,
               measuredMinY: Int = 0, measuredMaxY: Int = 255, priorMeanY: Int = -1,
-              structure: LocalStructure = LocalStructure.UNKNOWN): Int {
+              structure: LocalStructure = LocalStructure.UNKNOWN, semanticProtection: Float = 0f): Int {
         val y = y(base)
         val lx = abs(leftY-rightY)
         val ly = abs(upY-downY)
@@ -104,7 +104,8 @@ object DetailTransfer {
             LocalStructure.COHERENT_EDGE -> 0.60f
             LocalStructure.UNKNOWN -> 1f
         }
-        val injection = if (nativeSampling) strength * 0.5f else strength * structureWeight
+        val injection = if (nativeSampling) strength * 0.5f
+            else strength * structureWeight * (1f - 0.5f * semanticProtection)
         val loss = if (nativeSampling) min(remove, 0.05f) else remove
         // Anchor the learned subpixel detail in the local measured tone. The prior mean is
         // measured after reducing the neural output to the native grid once.

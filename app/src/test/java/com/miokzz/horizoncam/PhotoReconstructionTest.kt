@@ -79,6 +79,14 @@ class PhotoReconstructionTest {
         }
     }
 
+    @Test fun semanticMaskOnlyAttenuatesTheNeuralContribution() {
+        fun render(confidence: Float, native: Boolean) = DetailTransfer.y(DetailTransfer.pixel(
+            gray(126), gray(126), gray(150), 91, 152, 91, 152, 30f, daylight, true, native,
+            91, 152, semanticProtection = confidence))
+        assertTrue(render(1f, false) in 127 until render(0f, false))
+        assertEquals(render(0f, true), render(1f, true))
+    }
+
     @Test fun provenanceDescribesOnlyProcessingThatOccurred() {
         fun description(model: String?, frames: Int, scale: Int) =
             PhotoProvenance.describe(model, frames, 30f, 296, 394, 296 * scale, 394 * scale)

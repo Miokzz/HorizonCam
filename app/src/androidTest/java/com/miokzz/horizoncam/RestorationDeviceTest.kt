@@ -11,10 +11,12 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.miokzz.horizoncam.ai.InferenceRuntime
 import com.miokzz.horizoncam.ai.NativeRestorer
 import com.miokzz.horizoncam.ai.PhotoPrior
+import com.miokzz.horizoncam.bench.ExperimentalSegmentation
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.io.File
 import kotlin.math.log10
 
 /** Matched public-domain crops with fixed blur, noise and JPEG degradation.
@@ -129,13 +131,7 @@ class RestorationDeviceTest {
         val levels = listOf(0.6f to 1, 1f to 1, 3f to 1, 10f to 2, 20f to 4, 30f to 4)
         val fixtures = listOf("chart", "face", "detail")
         for (fixture in fixtures) {
-            val dimensions = 192 to 256
-            val truth = if (fixture == "chart") mixedContrastChart(dimensions.first, dimensions.second) else {
-                val asset = runner.context.assets.open("quality/astronaut_$fixture-truth.png").use(BitmapFactory::decodeStream)
-                val resized = Bitmap.createScaledBitmap(asset, dimensions.first, dimensions.second, true)
-                if (asset !== resized) asset.recycle()
-                resized
-            }
+            val truth = matchedTruth(runner, fixture)
             try {
                 for ((zoom, scale) in levels) {
                     val source = degradedInput(truth, scale, if (zoom == 30f) 74 else 86)
@@ -162,6 +158,85 @@ class RestorationDeviceTest {
                 }
             } finally { truth.recycle() }
         }
+    }
+
+    @Test fun compareSemanticProtectionOnMatchedInputs() {
+        val runner = InstrumentationRegistry.getInstrumentation()
+        val args = InstrumentationRegistry.getArguments()
+        assumeTrue(args.getString("horizonSemantic") == "yes")
+        val model = File(runner.targetContext.filesDir, "quality-deeplab-v3.tflite")
+        assertTrue("O modelo de teste precisa ser colocado no diretório privado de campo.", model.isFile)
+        val optionalFixtures = if (args.getString("semanticFixtures") == "yes") listOf("cat", "grass", "brick") else emptyList()
+        ExperimentalSegmentation(model).use { cpu ->
+            ExperimentalSegmentation(model, ExperimentalSegmentation.Backend.GPU).use { gpu ->
+                sendEvidence(runner, "HC_SEMANTIC_INIT cpuMs=${cpu.initializationMs} gpuMs=${gpu.initializationMs}")
+                for (fixture in listOf("chart", "face", "detail") + optionalFixtures) {
+                    val truth = if (fixture in optionalFixtures) {
+                        val file = File(runner.targetContext.filesDir, "quality-matched-$fixture.png")
+                        requireNotNull(BitmapFactory.decodeFile(file.path)) { "Fixture privada ausente: $fixture" }
+                    } else matchedTruth(runner, fixture)
+                    try {
+                        for ((zoom, scale) in listOf(10f to 2, 20f to 4, 30f to 4)) {
+                            val source = degradedInput(truth, scale, if (zoom == 30f) 74 else 86)
+                            try {
+                                val onCpu = cpu.segment(source)
+                                val onGpu = gpu.segment(source)
+                                assertEquals(onCpu.fallbackReason, ExperimentalSegmentation.Backend.CPU, onCpu.backend)
+                                var disagreement = 0
+                                var compared = 0
+                                for (y in 0 until 16) for (x in 0 until 16) {
+                                    val px = (x + 0.5f) / 16f
+                                    val py = (y + 0.5f) / 16f
+                                    val a = onCpu.protectionAt(px, py)
+                                    val b = onGpu.protectionAt(px, py)
+                                    assertTrue(a in 0f..1f && b in 0f..1f)
+                                    if (a > 0f || b > 0f) {
+                                        compared++
+                                        if (kotlin.math.abs(a - b) > 0.10f) disagreement++
+                                    }
+                                }
+                                sendEvidence(runner, "HC_SEMANTIC fixture=$fixture zoom=$zoom " +
+                                    "cpu=${onCpu.backend} coveredCpu=${onCpu.protectedFraction} " +
+                                    "cpuMs=${onCpu.preprocessMs + onCpu.inferenceMs + onCpu.postprocessMs} " +
+                                    "gpu=${onGpu.backend} coveredGpu=${onGpu.protectedFraction} " +
+                                    "gpuMs=${onGpu.preprocessMs + onGpu.inferenceMs + onGpu.postprocessMs} " +
+                                    "gpuFallback=${onGpu.fallbackReason ?: "none"} " +
+                                    "maskDisagreement=$disagreement/$compared center=${onCpu.classAt(0.5f, 0.5f)}")
+                                val masks = linkedMapOf<String, ((Float, Float) -> Float)?>(
+                                    "pixel" to null, "semantic" to onCpu::protectionAt)
+                                var totalWeight = 0.0
+                                for (y in 0 until source.height) for (x in 0 until source.width) {
+                                    totalWeight += onCpu.protectionAt((x + 0.5f) / source.width, (y + 0.5f) / source.height)
+                                }
+                                val meanWeight = (totalWeight / (source.width * source.height)).toFloat()
+                                if (meanWeight > 0f) masks["uniform"] = { _, _ -> meanWeight }
+                                for ((variant, mask) in masks) NativeRestorer.restore(runner.targetContext,
+                                    source, zoom, 800, scale, {}, { false }, protectLocalStructure = true,
+                                    semanticProtection = mask).use { result ->
+                                    assertEquals(truth.width, result.bitmap.width)
+                                    assertEquals(truth.height, result.bitmap.height)
+                                    assertTrue(result.usedNeuralModel)
+                                    sendEvidence(runner, "HC_SEMANTIC_QUALITY fixture=$fixture zoom=$zoom variant=$variant " +
+                                        "psnr=${psnr(result.bitmap, truth)} backend=${result.backend} " +
+                                        "wallMs=${result.elapsedMs} pssKiB=${android.os.Debug.getPss()}")
+                                }
+                            } finally { source.recycle() }
+                        }
+                    } finally { truth.recycle() }
+                }
+            }
+        }
+    }
+
+    private fun sendEvidence(runner: android.app.Instrumentation, line: String) =
+        runner.sendStatus(0, Bundle().apply { putString("stream", "\n$line\n") })
+
+    private fun matchedTruth(runner: android.app.Instrumentation, fixture: String): Bitmap {
+        if (fixture == "chart") return mixedContrastChart(192, 256)
+        val asset = runner.context.assets.open("quality/astronaut_$fixture-truth.png").use(BitmapFactory::decodeStream)
+        val resized = Bitmap.createScaledBitmap(asset, 192, 256, true)
+        if (asset !== resized) asset.recycle()
+        return resized
     }
 
     private fun mixedContrastChart(width: Int, height: Int): Bitmap {

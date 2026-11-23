@@ -24,7 +24,8 @@ object NativeRestorer {
 
     fun restore(context: Context, original: Bitmap, zoom: Float, iso: Int, upscale: Int,
                 onProgress: (AiProgress) -> Unit, cancelled: () -> Boolean, exposureSeconds: Double = 0.0,
-                protectLocalStructure: Boolean = false): Result {
+                protectLocalStructure: Boolean = false,
+                semanticProtection: ((xNormalized: Float, yNormalized: Float) -> Float)? = null): Result {
         check(Looper.myLooper() != Looper.getMainLooper())
         require(upscale == 1 || upscale == 2 || upscale == 4)
         val width = original.width * upscale
@@ -146,7 +147,7 @@ object NativeRestorer {
             val result=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888)
             try {
                 compose(original,guide,neural,priorMean,result,scene,zoom,plan.prior==PhotoPrior.MAX,
-                    protectLocalStructure) { stripe ->
+                    protectLocalStructure, semanticProtection) { stripe ->
                     checkActive(); onProgress(AiProgress(plan.tileCount+stripe,total))
                 }
                 return Result(result,guide.width,guide.height,(System.nanoTime()-start)/1_000_000,
@@ -182,7 +183,8 @@ object NativeRestorer {
 
     private const val BAND=48
     private fun compose(source: Bitmap, low: Bitmap, prediction: Bitmap, priorMean: Bitmap?, out: Bitmap, scene: SceneEvidence,
-                        zoom: Float, blind: Boolean, protectLocalStructure: Boolean, progress: (Int)->Unit) {
+                        zoom: Float, blind: Boolean, protectLocalStructure: Boolean,
+                        semanticProtection: ((Float, Float) -> Float)?, progress: (Int)->Unit) {
         val w=out.width
         val rows=Bitmap.createBitmap(w,BAND+2,Bitmap.Config.ARGB_8888)
         try {
@@ -205,6 +207,7 @@ object NativeRestorer {
             val structures = if (protectLocalStructure && !nativeSampling) {
                 Array(sourcePixels.size) { DetailTransfer.LocalStructure.UNKNOWN }
             } else null
+            val semanticWeights = if (semanticProtection != null && !nativeSampling) FloatArray(sourcePixels.size) else null
             val noiseFloor = (scene.noise * 3f).toInt().coerceIn(8, 24)
             fun read(map: Bitmap, y: Int, h: Int, buf: IntArray) {
                 canvas.drawBitmap(map,null,RectF(0f,-y.toFloat(),w.toFloat(),(out.height-y).toFloat()),filter)
@@ -249,6 +252,11 @@ object NativeRestorer {
                                 sourceLum[above + right], sourceLum[below + left], sourceLum[below + right],
                                 hi - lo, noiseFloor)
                         }
+                        if (semanticProtection != null && semanticWeights != null) {
+                            val weight = semanticProtection((sx + 0.5f) / source.width,
+                                (sourceTop + sy + 0.5f) / source.height)
+                            semanticWeights[index] = if (weight.isFinite()) weight.coerceIn(0f, 1f) else 0f
+                        }
                     }
                 }
                 for (j in 0 until h) {
@@ -265,7 +273,8 @@ object NativeRestorer {
                             if(nativeSampling) 0 else envelopeMin[envelopeIndex],
                             if(nativeSampling) 255 else envelopeMax[envelopeIndex],
                             if (mean == null) -1 else mean[i] and 255,
-                            structures?.get(envelopeIndex) ?: DetailTransfer.LocalStructure.UNKNOWN)
+                            structures?.get(envelopeIndex) ?: DetailTransfer.LocalStructure.UNKNOWN,
+                            semanticWeights?.get(envelopeIndex) ?: 0f)
                     }
                 }
                 out.setPixels(result,0,w,0,y,w,h)

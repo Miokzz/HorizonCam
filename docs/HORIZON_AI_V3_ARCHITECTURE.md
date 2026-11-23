@@ -91,3 +91,20 @@ O protótipo de composição calcula um mapa a partir do recorte original. Regi�
 Os valores são PSNR em dB. O candidato melhorou oito das nove comparações com a produção e perdeu 0,63 dB na carta em 10×. Em carta e detalhe de 20×/30×, o bilinear ainda teve maior PSNR. A variante permanece disponível apenas para replay e ensaio instrumentado. O próximo A/B deve comparar a proteção contra uma atenuação uniforme, medir erro de caracteres e halos e usar cenas de vegetação, insetos e arquitetura com referência independente. O reaproveitamento dos mesmos JPEGs em `FieldReplayTest` agora permite especificar `upscale`, `iso` e `structure`.
 
 Build de campo, lint, 110 testes JVM e três testes instrumentados passaram. Os dois ensaios de publicação cobriram callback duplicado com recuperação e falha de captura. O A/B usou QuickSRNet na GPU com precisão estrita solicitada em 0,6×/1×, e Real-ESRGAN com FP16 permitido nos recortes ampliados. A calibração fria e a ordem fixa das variantes afetam o tempo. As leituras pontuais de PSS não medem pico. O SHA-256 do APK foi `89ed012bc514eafae8d333cab0ba599c3da8cab5dd2659e81fcc83cdbfda7555`.
+
+### Ablação de segmentação semântica
+
+A instrumentação executou DeepLab-v3 `257 × 257 × 3 → 257 × 257 × 21` em LiteRT. Normalização e rótulos foram conferidos nos metadados do binário. O adaptador devolve máscaras nas coordenadas do recorte original e aceita proteção para pessoa, cão, gato e planta em vaso com limiar de confiança e margem entre classes. A máscara reduz somente a contribuição do residual. Regiões sem classe utilizável conservam a composição por pixels. Um controle uniforme aplica o mesmo peso médio sem usar localização semântica. O peso no formato TFLite ficou no armazenamento privado. [DeepLab-v3 no MediaPipe](https://developers.google.com/edge/mediapipe/solutions/vision/image_segmenter#deeplab-v3-model) · [Artefato do modelo](https://huggingface.co/litert-community/MediaPipe-ImageSegmenter-DeepLab-V3)
+
+O ensaio de 10×, 20× e 30× usou a carta e os recortes NASA da prova anterior mais gato, grama e tijolos de `skimage.data`, mantidos como fixtures privadas. No S24, a máscara protegeu 81–82% do recorte de rosto e 95%, 97% e 18% do gato conforme a degradação. Carta, grama e tijolos ficaram sem proteção e tiveram PSNR igual ao controle por pixels. O rótulo planta em vaso tem cobertura diferente de vegetação em geral. O modelo também carece de classes úteis para glifos, partes de insetos e janelas.
+
+| Recorte | Proteção por pixels | Pixels + semântica | Pixels + atenuação uniforme |
+| --- | ---: | ---: | ---: |
+| Rosto 20× | 32,85 | 33,01 | 32,97 |
+| Rosto 30× | 32,10 | 32,05 | 32,08 |
+| Detalhe NASA 20× | 31,20 | 31,49 | 31,72 |
+| Gato 10× | 29,85 | 29,73 | 29,73 |
+
+O controle uniforme foi melhor em sete das oito comparações com cobertura semântica. Na grade de 16 × 16, CPU e GPU ficaram dentro de 0,10 de diferença no peso de todos os pontos com proteção. A mediana da segmentação completa foi 152 ms em CPU e 133 ms em GPU. A inicialização observada custou 29 ms em CPU e 850 ms em GPU. Um ensaio separado no host marcou 0,19% de um quadro cinza uniforme como cão. O experimento continua restrito a instrumentação. A próxima arquitetura deve usar dados pareados e destilação para verificar se uma representação menor e específica de restauração supera o controle uniforme.
+
+Build, lint, 111 testes JVM e o teste instrumentado de segmentação passaram. O APK de campo foi `689fba391df8d8866812df86c8bc96bf67a5cb29fa930642258dedac7bc159b9`. `horizonSemantic=yes` ativa a prova e `semanticFixtures=yes` habilita os três arquivos adicionais privados. A prova exige `quality-deeplab-v3.tflite`, SHA-256 `ff36e24d40547fe9e645e2f4e8745d1876d6e38b332d39a82f0bf0f5d1d561b3`, no diretório `files` do pacote de campo. As fixtures extras esperadas usam os nomes `quality-matched-cat.png`, `quality-matched-grass.png` e `quality-matched-brick.png` no mesmo diretório.
