@@ -38,7 +38,9 @@ A fila prepara um JPEG privado final, preserva o EXIF e usa a reserva `IS_PENDIN
 | `0/6` | 3648 × 2736 | tele física, 7,0 mm | 1023 | quatro pares, preto dinâmico |
 | `0` com pedido de 3× | 4080 × 3060 | principal 5, 5,4 mm | 4095 | quatro pares, preto dinâmico |
 
-O caminho candidato para RAW tele é `0/6`, com a focal verificada em cada sessão. A tele lógica foi provada anteriormente em saídas JPEG. O modo avançado existente usa CameraX RAW quando a capacidade do binding e o mapa físico permitem. A prova acima valida a entrega Camera2, e a sessão combinada `prévia + RAW` e o DNG do produto ainda exigem provas próprias.
+O caminho candidato para RAW tele é `0/6`, com a focal verificada em cada sessão. A tele lógica foi provada anteriormente em saídas JPEG. O modo avançado existente usa CameraX RAW quando a capacidade do binding e o mapa físico permitem.
+
+O ensaio seguinte, `TeleRawPairFieldTest#capturePairedTeleOutputs`, confirmou no S24 uma única sessão `0/6` com prévia PRIVATE 1440 × 1080, RAW 3648 × 2736 e JPEG 3648 × 2736. O mesmo pedido gerou RAW e JPEG com timestamp idêntico. O resultado físico e o EXIF do JPEG indicaram 7,0 mm. A exposição foi 30,0 ms, ISO 707, e os dois buffers chegaram em 292 ms na amostra. `DngCreator` com características e metadados de `6` escreveu 19.989.196 bytes em um contador. Nenhum arquivo de imagem foi gravado. A prova confirma aquisição pareada para pesquisa. A cadência de um burst RAW, o custo de decodificação/renderização e a comparação com uma referência limpa ainda precisam ser medidos. Build de instrumentação e lint passaram.
 
 ## Referências de engenharia
 
