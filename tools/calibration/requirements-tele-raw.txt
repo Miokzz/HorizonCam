@@ -1,0 +1,4 @@
+# Host-side RAW lab, Python 3.12. No Android dependencies.
+-r requirements.txt
+rawpy==0.28.0
+tifffile==2026.11.16

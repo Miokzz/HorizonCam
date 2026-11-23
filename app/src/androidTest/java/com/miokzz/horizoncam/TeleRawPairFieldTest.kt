@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.graphics.ImageFormat
 import android.hardware.HardwareBuffer
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureFailure
@@ -21,13 +22,18 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
+import androidx.annotation.RequiresApi
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.io.OutputStream
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
@@ -36,17 +42,23 @@ class TeleRawPairFieldTest {
     @Test fun capturePairedTeleOutputs() {
         val args = InstrumentationRegistry.getArguments()
         assumeTrue(args.getString("rawPair") == "yes")
-        assumeTrue(Build.MODEL == "SM-S9210" && Build.VERSION.SDK_INT >= 33)
+        assumeTrue(Build.MODEL == "SM-S9210")
+        if (Build.VERSION.SDK_INT < 33) {
+            assumeTrue("O ensaio precisa de timestamps de sensor por saída.", false)
+            return
+        }
         val runner = InstrumentationRegistry.getInstrumentation()
         val manager = runner.targetContext.getSystemService(CameraManager::class.java)
         fun report(line: String) = runner.sendStatus(0, Bundle().apply {
             putString("stream", "\nHC_RAW_PAIR $line\n")
         })
         val cache = runner.targetContext.cacheDir.takeIf { args.getString("retainPair") == "yes" }
-        if (!attempt(manager, true, cache, ::report)) attempt(manager, false, cache, ::report)
+        assertTrue("Nenhuma sessão entregou um par RAW/JPEG confirmado da teleobjetiva.",
+            attempt(manager, true, cache, ::report) || attempt(manager, false, cache, ::report))
     }
 
     @SuppressLint("MissingPermission")
+    @RequiresApi(33)
     private fun attempt(manager: CameraManager, withPreview: Boolean, cache: File?, report: (String) -> Unit): Boolean {
         val thread = HandlerThread("hc-paired-tele").apply { start() }
         val handler = Handler(thread.looper)
@@ -91,7 +103,10 @@ class TeleRawPairFieldTest {
                     val focal = exif.getAttributeDouble(ExifInterface.TAG_FOCAL_LENGTH, -1.0)
                     val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
                         .takeIf { it in 1..8 } ?: ExifInterface.ORIENTATION_NORMAL
-                    Jpeg(image.timestamp, image.width, image.height, focal, orientation, bytes.takeIf { cache != null })
+                    val iso = exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 0).takeIf { it > 0 }
+                    val exposure = exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0).takeIf { it > 0.0 }
+                    Jpeg(image.timestamp, image.width, image.height, focal, orientation, iso, exposure,
+                        bytes.takeIf { cache != null })
                 }.fold(jpeg::complete, jpeg::completeExceptionally)
             } }, handler)
 
@@ -99,7 +114,7 @@ class TeleRawPairFieldTest {
             val config = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, readers.map { reader ->
                 OutputConfiguration(reader.surface).apply {
                     setPhysicalCameraId("6")
-                    if (Build.VERSION.SDK_INT >= 33) timestampBase = OutputConfiguration.TIMESTAMP_BASE_SENSOR
+                    timestampBase = OutputConfiguration.TIMESTAMP_BASE_SENSOR
                 }
             }, { handler.post(it) }, object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) { configured.complete(session) }
@@ -124,48 +139,53 @@ class TeleRawPairFieldTest {
                 preview?.let { addTarget(it.surface) }
                 set(CaptureRequest.JPEG_QUALITY, 95.toByte())
             }.build()
-            val meta = CompletableFuture<TotalCaptureResult>()
+            val meta = CompletableFuture<CaptureMetadata>()
             val started = SystemClock.elapsedRealtime()
             session.capture(request, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
-                    if (Build.VERSION.SDK_INT >= 31) result.physicalCameraTotalResults["6"]?.let(meta::complete)
+                    result.physicalCameraTotalResults["6"]?.let {
+                        meta.complete(CaptureMetadata(result, it))
+                    }
                     if (!meta.isDone) meta.completeExceptionally(IllegalStateException("missing_tele_result"))
                 }
                 override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
                     meta.completeExceptionally(IllegalStateException("capture_failed_${failure.reason}"))
                 }
             }, handler)
-            val physical = meta.get(3, TimeUnit.SECONDS)
+            val metadata = meta.get(3, TimeUnit.SECONDS)
+            val physical = metadata.physical
             val still = jpeg.get(4, TimeUnit.SECONDS)
             val image = raw.get(3, TimeUnit.SECONDS)
             val acquisitionMs = SystemClock.elapsedRealtime() - started
             val exposureStart = physical[CaptureResult.SENSOR_TIMESTAMP]
             val focal = physical[CaptureResult.LENS_FOCAL_LENGTH]
-            val verified = exposureStart == image.timestamp && exposureStart == still.timestamp &&
+            val iso = physical[CaptureResult.SENSOR_SENSITIVITY]
+            val exposure = physical[CaptureResult.SENSOR_EXPOSURE_TIME]
+            val verified = exposureStart != null && exposureStart > 0L &&
+                exposureStart == image.timestamp && exposureStart == still.timestamp &&
                 focal != null && abs(focal - 7f) <= 0.05f && abs(still.focalMm - 7.0) <= 0.05 &&
+                iso != null && iso > 0 && exposure != null && exposure > 0L &&
                 image.width == still.width && image.height == still.height && image.format == ImageFormat.RAW_SENSOR
-            val output = ByteCount()
-            val info = manager.getCameraCharacteristics("6")
-            DngCreator(info, physical).use { it.setOrientation(still.orientation).writeImage(output, image) }
-            val dngVerified = output.bytes >= 2L * image.width * image.height
-            if (verified && dngVerified && cache != null) {
-                val token = UUID.randomUUID().toString()
-                val directory = File(cache, "quality-pair-$token")
-                check(directory.mkdir())
-                File(directory, "source.dng").outputStream().use { rawFile ->
-                    DngCreator(info, physical).use { it.setOrientation(still.orientation).writeImage(rawFile, image) }
-                }
-                File(directory, "source.jpg").writeBytes(checkNotNull(still.bytes))
-                File(directory, "exposure.txt").writeText("${physical[CaptureResult.SENSOR_SENSITIVITY] ?: 0}\n" +
-                    "${physical[CaptureResult.SENSOR_EXPOSURE_TIME] ?: 0L}\n")
-                report("privateCalibration=$token")
+            if (!verified) {
+                report("preview=$withPreview status=unverified rawTimestamp=${image.timestamp} " +
+                    "jpegTimestamp=${still.timestamp} resultTimestamp=$exposureStart focalRaw=$focal focalJpeg=${still.focalMm}")
+                return false
             }
-            report("preview=$withPreview status=${if (verified && dngVerified) "verified" else "unverified"} " +
+            val info = manager.getCameraCharacteristics("6")
+            val bundle = if (cache == null) null else retain(cache, info, metadata, request,
+                image, still, checkNotNull(focal), checkNotNull(iso), checkNotNull(exposure), withPreview, acquisitionMs)
+            val dngBytes = bundle?.dngBytes ?: ByteCount().also { output ->
+                DngCreator(info, physical).use { it.setOrientation(still.orientation).writeImage(output, image) }
+            }.bytes
+            val dngVerified = dngBytes >= 2L * image.width * image.height
+            if (bundle != null && dngVerified) {
+                report("privateCalibration=${bundle.id}")
+            }
+            report("preview=$withPreview status=${if (dngVerified) "verified" else "unverified"} " +
                 "raw=${image.width}x${image.height} jpeg=${still.width}x${still.height} focalRaw=$focal " +
-                "focalJpeg=${still.focalMm} equalTimestamps=${exposureStart == image.timestamp && image.timestamp == still.timestamp} " +
-                "exposureNs=${physical[CaptureResult.SENSOR_EXPOSURE_TIME]} iso=${physical[CaptureResult.SENSOR_SENSITIVITY]} " +
-                "rawAndJpegMs=$acquisitionMs dngBytes=${output.bytes}")
-            return verified && dngVerified
+                "focalJpeg=${still.focalMm} equalTimestamps=true timestampNs=$exposureStart " +
+                "exposureNs=$exposure iso=$iso rawAndJpegMs=$acquisitionMs dngBytes=$dngBytes")
+            return dngVerified
         } catch (error: Exception) {
             report("preview=$withPreview status=failed reason=${error.cause?.message ?: error.javaClass.simpleName}")
             return false
@@ -179,8 +199,75 @@ class TeleRawPairFieldTest {
         }
     }
 
+    private data class CaptureMetadata(val logical: TotalCaptureResult, val physical: TotalCaptureResult)
+    private data class RetainedPair(val id: String, val dngBytes: Long)
+
+    @RequiresApi(33)
+    private fun retain(cache: File, info: CameraCharacteristics, result: CaptureMetadata,
+                       request: CaptureRequest, raw: Image, jpeg: Jpeg, focal: Float, iso: Int,
+                       exposure: Long, preview: Boolean, acquisitionMs: Long): RetainedPair {
+        val id = UUID.randomUUID().toString()
+        val directory = File(cache, "quality-pair-$id")
+        check(directory.mkdir())
+        val dngFile = File(directory, "source.dng")
+        dngFile.outputStream().use { output ->
+            DngCreator(info, result.physical).use { it.setOrientation(jpeg.orientation).writeImage(output, raw) }
+        }
+        check(dngFile.length() >= 2L * raw.width * raw.height)
+        val jpegFile = File(directory, "source.jpg")
+        jpegFile.writeBytes(checkNotNull(jpeg.bytes))
+        // Keep the existing calibration replay input alongside the versioned bundle.
+        File(directory, "exposure.txt").writeText("$iso\n$exposure\n")
+
+        val physical = result.physical
+        val crop = physical[CaptureResult.SCALER_CROP_REGION]?.let {
+            JSONArray(listOf(it.left, it.top, it.right, it.bottom))
+        }
+        val noise = physical[CaptureResult.SENSOR_NOISE_PROFILE]?.let { pairs ->
+            JSONArray(pairs.map { JSONArray(listOf(it.first, it.second)) })
+        }
+        val manifest = JSONObject()
+            .put("schemaVersion", 1).put("pairId", id)
+            .put("deviceModel", Build.MODEL).put("firmware", Build.VERSION.INCREMENTAL)
+            .put("logicalCameraId", "0").put("physicalCameraId", "6")
+            .put("logicalActivePhysicalId", result.logical[CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID] ?: JSONObject.NULL)
+            .put("focalLengthMm", focal.toDouble()).put("iso", iso).put("exposureNs", exposure)
+            .put("sensorTimestampNs", raw.timestamp).put("frameNumber", result.logical.frameNumber)
+            .put("timestampSource", info[CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE] ?: JSONObject.NULL)
+            .put("nominalOpticalZoom", 3.0)
+            .put("digitalZoomRequested", request[CaptureRequest.CONTROL_ZOOM_RATIO]?.toDouble() ?: 1.0)
+            .put("logicalZoomRatio", result.logical[CaptureResult.CONTROL_ZOOM_RATIO]?.toDouble() ?: JSONObject.NULL)
+            .put("physicalZoomRatio", physical[CaptureResult.CONTROL_ZOOM_RATIO]?.toDouble() ?: JSONObject.NULL)
+            .put("sensorCropRegion", crop ?: JSONObject.NULL).put("previewEnabled", preview)
+            .put("previewDimensions", if (preview) JSONArray(listOf(1440, 1080)) else JSONObject.NULL)
+            .put("rawAndJpegMs", acquisitionMs).put("sensorNoiseProfile", noise ?: JSONObject.NULL)
+            .put("dng", artifact(dngFile, raw.width, raw.height, raw.timestamp, jpeg.orientation))
+            .put("jpeg", artifact(jpegFile, jpeg.width, jpeg.height, jpeg.timestamp, jpeg.orientation)
+                .put("focalLengthMm", jpeg.focalMm).put("exifIso", jpeg.iso ?: JSONObject.NULL)
+                .put("exifExposureSeconds", jpeg.exposureSeconds ?: JSONObject.NULL))
+        val temporary = File(directory, "manifest.tmp")
+        temporary.writeText(manifest.toString(2) + "\n")
+        check(temporary.renameTo(File(directory, "manifest.json")))
+        return RetainedPair(id, dngFile.length())
+    }
+
+    private fun artifact(file: File, width: Int, height: Int, timestamp: Long, orientation: Int): JSONObject {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return JSONObject().put("filename", file.name).put("width", width).put("height", height)
+            .put("timestampNs", timestamp).put("orientation", orientation).put("bytes", file.length())
+            .put("sha256", digest.digest().joinToString("") { "%02x".format(it) })
+    }
+
     private data class Jpeg(val timestamp: Long, val width: Int, val height: Int, val focalMm: Double,
-                            val orientation: Int, val bytes: ByteArray?)
+                            val orientation: Int, val iso: Int?, val exposureSeconds: Double?, val bytes: ByteArray?)
 
     private class ByteCount : OutputStream() {
         var bytes = 0L
