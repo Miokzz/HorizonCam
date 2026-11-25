@@ -163,7 +163,7 @@ def orient_rgb(array, orientation):
     raise ValueError("Invalid EXIF orientation")
 
 
-def develop_raw(path, manifest):
+def develop_raw(path, manifest, demosaic=rawpy.DemosaicAlgorithm.AHD):
     metadata = dng_tags(path, manifest)
     with rawpy.imread(str(path)) as raw:
         visible = raw.raw_image_visible
@@ -180,7 +180,7 @@ def develop_raw(path, manifest):
                         cameraWhiteBalance=wb, activeWidth=visible.shape[1], activeHeight=visible.shape[0],
                         defaultCrop=[raw.sizes.crop_left_margin, raw.sizes.crop_top_margin,
                                      raw.sizes.crop_width, raw.sizes.crop_height])
-        linear = raw.postprocess(demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD, half_size=False,
+        linear = raw.postprocess(demosaic_algorithm=demosaic, half_size=False,
                                  output_color=rawpy.ColorSpace.sRGB, output_bps=16, gamma=(1, 1), user_flip=0,
                                  use_camera_wb=True, use_auto_wb=False, no_auto_bright=True, bright=1.0,
                                  adjust_maximum_thr=0.0, highlight_mode=rawpy.HighlightMode.Clip,
