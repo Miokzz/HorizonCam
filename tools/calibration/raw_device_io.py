@@ -64,6 +64,44 @@ def parity(observed, reference):
             "max": float(difference.max())}
 
 
+def recorded_pairs(directory):
+    record = json.loads((directory / "timing.json").read_text(encoding="utf-8"))
+    return {item["label"]: item for item in record["pairs"]}
+
+
+def compare_implementations(args):
+    fixtures = json.loads(args.fixtures.read_text(encoding="utf-8"))
+    output = {}
+    for mode in args.modes:
+        java = args.runs / "java" / mode
+        native = args.runs / "native" / mode
+        earlier, optimized = recorded_pairs(java), recorded_pairs(native)
+        require(earlier.keys() == optimized.keys(), "A/B runs need identical fixtures")
+        mode_data = {}
+        for row in fixtures:
+            label = row["label"]
+            if label not in earlier:
+                continue
+            shape = tuple(row["packedShape"])
+            reference = java / f"{label}.f32"
+            candidate = native / f"{label}.f32"
+            size = int(np.prod(shape)) * 4
+            require(reference.stat().st_size == candidate.stat().st_size == size, "RAW output size differs")
+            identical = file_digest(reference) == file_digest(candidate)
+            difference = {"mae": 0., "p95": 0., "max": 0.}
+            if not identical:
+                a = np.memmap(reference, dtype="<f4", mode="r", shape=shape)
+                b = np.memmap(candidate, dtype="<f4", mode="r", shape=shape)
+                difference = parity(b, a)
+            rgb_equal = earlier[label]["rgbSha256"] == optimized[label]["rgbSha256"]
+            mode_data[label] = {"rawBitwiseEqual": identical, "androidRgbBitwiseEqual": rgb_equal,
+                                "rawDifference": difference}
+        require(mode_data.keys() == earlier.keys(), "Unrecognized A/B fixture")
+        output[mode] = mode_data
+    with args.output.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(output, indent=2, allow_nan=False) + "\n")
+
+
 def score(args):
     require(args.modes[0] == "cpu" and len(set(args.modes)) == len(args.modes),
             "List each mode once, starting with CPU")
@@ -129,5 +167,10 @@ if __name__ == "__main__":
         report.add_argument(f"--{name}", type=Path, required=True)
     report.add_argument("--modes", nargs="+", required=True)
     report.set_defaults(action=score)
+    compare = sub.add_parser("compare")
+    for name in ("fixtures", "runs", "output"):
+        compare.add_argument(f"--{name}", type=Path, required=True)
+    compare.add_argument("--modes", nargs="+", required=True)
+    compare.set_defaults(action=compare_implementations)
     args = parser.parse_args()
     args.action(args)

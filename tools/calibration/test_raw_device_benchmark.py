@@ -1,5 +1,11 @@
+import json
+from pathlib import Path
+import struct
+import tempfile
+from types import SimpleNamespace
 import unittest
 
+from raw_device_io import compare_implementations
 from raw_device_run import battery_window, delegation, distribution
 
 
@@ -32,6 +38,23 @@ class RawDeviceReportingTest(unittest.TestCase):
 
     def test_percentile_is_interpolated(self):
         self.assertEqual(distribution([1, 2, 3, 4, 5])["p95"], 4.8)
+
+    def test_raw_parity_does_not_mask_a_render_difference(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            fixtures = root / "fixtures.json"
+            fixtures.write_text(json.dumps([{"label": "detail-a", "packedShape": [1, 1, 4]}]))
+            for implementation in ("java", "native"):
+                directory = root / implementation / "gpu"
+                directory.mkdir(parents=True)
+                (directory / "detail-a.f32").write_bytes(struct.pack("<4f", -.02, .1, .2, 1.))
+                record = {"pairs": [{"label": "detail-a", "rgbSha256": implementation}]}
+                (directory / "timing.json").write_text(json.dumps(record))
+            output = root / "parity.json"
+            compare_implementations(SimpleNamespace(fixtures=fixtures, runs=root, output=output, modes=["gpu"]))
+            result = json.loads(output.read_text())["gpu"]["detail-a"]
+            self.assertTrue(result["rawBitwiseEqual"])
+            self.assertFalse(result["androidRgbBitwiseEqual"])
 
 
 if __name__ == "__main__":

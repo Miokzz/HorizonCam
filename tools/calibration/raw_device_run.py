@@ -31,7 +31,9 @@ def digest(source):
 def install(args):
     adb(args, "install", "-r", "--no-incremental", str(args.apk))
     adb(args, "shell", "run-as", PACKAGE, "mkdir", "-p", "files/bench-input")
-    paths = {"model.tflite": args.model, "int8.tflite": args.int8}
+    paths = {"model.tflite": args.model}
+    if args.int8 is not None:
+        paths["int8.tflite"] = args.int8
     paths.update({f"{label}.rawbench": args.fixtures / f"{label}.rawbench" for label in LABELS})
     stage = f"/data/local/tmp/rawbench-{uuid.uuid4().hex}"
     adb(args, "shell", f"umask 077; mkdir {stage}")
@@ -49,13 +51,14 @@ def install(args):
         adb(args, "shell", f"rm -f {' '.join(f'{stage}/{name}' for name in paths)}; rmdir {stage}")
 
 
-def collect_one(args, mode, output, pairs, repeats, seconds, save):
+def collect_one(args, mode, output, pairs, repeats, seconds, save, implementation="java"):
     output.mkdir(parents=True, exist_ok=False)
     run = "raw-" + uuid.uuid4().hex
     adb(args, "shell", "am", "force-stop", PACKAGE)
     instrument = adb(args, "shell", "am", "instrument", "-w", "-r", "-e", "mode", mode,
                      "-e", "run", run, "-e", "pairs", ",".join(pairs), "-e", "repeats", str(repeats),
                      "-e", "energySeconds", str(seconds), "-e", "save", str(save).lower(),
+                     "-e", "implementation", implementation,
                      f"{PACKAGE}/.RawBench", capture_output=True, text=True, timeout=360)
     (output / "instrumentation.txt").write_text(instrument.stdout + instrument.stderr, encoding="utf-8")
     match = re.search(r"(?m)^(?:INSTRUMENTATION_STATUS|INSTRUMENTATION_RESULT): pid=(\d+)\s*$", instrument.stdout)
@@ -138,16 +141,32 @@ def summarize(primary, cold):
     warm = primary["loops"][1:]
     sections = ("noiseNs", "packNs", "assemblyNs", "rawToRestoredNs", "gainNs", "ispNs", "totalNs")
     evidence = {"graphBytes": primary["graphBytes"], "graphSha256": primary["graphSha256"],
+                "implementation": primary.get("implementation", "java"),
                 "coldMs": {part: distribution([report[part] / 1e6 for report in cold])
                            for part in ("engineNs", "delegateNs", "interpreterNs", "allocateNs") if part in primary},
                 "firstFrameMs": distribution([report["loops"][0]["totalNs"] / 1e6 for report in cold]),
                 "firstTileMs": distribution([report["loops"][0]["inferenceNs"][0] / 1e6 for report in cold]),
                 "warmMs": {part: distribution([loop[part] / 1e6 for loop in warm]) for part in sections},
                 "peakRssKiB": primary["finalMemory"].get("peakRssKiB"),
+                "finalPssKiB": primary["finalMemory"]["pssKiB"],
+                "maxWarmPssKiB": max(loop["memory"]["pssKiB"] for loop in warm),
                 "maxSampledPssKiB": max([primary["finalMemory"]["pssKiB"],
                                          *[loop["memory"]["pssKiB"] for loop in primary["loops"]]])}
     evidence["warmMs"]["invokePerTile"] = distribution([part / 1e6 for loop in warm for part in loop["inferenceNs"]])
     evidence["warmMs"]["allInvokesPerFrame"] = distribution([sum(loop["inferenceNs"]) / 1e6 for loop in warm])
+    if all(loop.get("nativeInvokeNs") and len(loop["nativeInvokeNs"]) == len(loop["inferenceNs"])
+           and min(loop["nativeInvokeNs"]) >= 0 for loop in warm):
+        evidence["warmMs"]["nativeInvokesPerFrame"] = distribution(
+            [sum(loop["nativeInvokeNs"]) / 1e6 for loop in warm])
+        evidence["warmMs"]["outsideNativeInvokePerFrame"] = distribution(
+            [(sum(loop["inferenceNs"]) - sum(loop["nativeInvokeNs"])) / 1e6 for loop in warm])
+    if all(report.get("pairs") for report in cold):
+        evidence["firstFixtureLoadMs"] = distribution([report["pairs"][0]["fixtureLoadNs"] / 1e6 for report in cold])
+    power = [loop["power"] for loop in primary["loops"] if "power" in loop]
+    temperatures = [sample["temperatureDeciC"] / 10 for sample in power if sample.get("temperatureDeciC", -1) >= 0]
+    evidence["batteryTempRangeC"] = [min(temperatures), max(temperatures)] if temperatures else None
+    evidence["thermalStatuses"] = sorted({sample["thermalStatus"] for sample in power})
+    evidence["interactiveStates"] = sorted({sample["interactive"] for sample in power if "interactive" in sample})
     for label in ("idleWindow", "loadWindow"):
         if label in primary:
             evidence[label] = battery_window(primary[label])
@@ -167,15 +186,21 @@ def summarize_folder(output, mode):
 
 def collect(args):
     failures = []
-    for mode in args.modes:
-        output = args.out / mode
+    jobs = []
+    for index, mode in enumerate(args.modes):
+        if args.implementation == "both":
+            order = ("java", "native") if index % 2 == 0 else ("native", "java")
+            jobs.extend((mode, implementation, args.out / implementation / mode) for implementation in order)
+        else:
+            jobs.append((mode, args.implementation, args.out / mode))
+    for mode, implementation, output in jobs:
         try:
-            collect_one(args, mode, output, args.pairs, args.repeats, args.energy_seconds, True)
+            collect_one(args, mode, output, args.pairs, args.repeats, args.energy_seconds, True, implementation)
             for index in range(1, args.cold):
-                collect_one(args, mode, output / f"cold-{index + 1}", args.pairs[:1], 1, 0, False)
+                collect_one(args, mode, output / f"cold-{index + 1}", args.pairs[:1], 1, 0, False, implementation)
             summary = summarize_folder(output, mode)
             (output / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-            print(mode, summary["warmMs"]["totalNs"], flush=True)
+            print(implementation, mode, summary["warmMs"]["totalNs"], flush=True)
         except (RuntimeError, subprocess.SubprocessError) as error:
             failures.append(str(error))
             print(str(error), flush=True)
@@ -195,16 +220,18 @@ if __name__ == "__main__":
     parser.add_argument("--serial")
     sub = parser.add_subparsers(required=True)
     upload = sub.add_parser("install")
-    for name in ("apk", "model", "int8", "fixtures"):
+    for name in ("apk", "model", "fixtures"):
         upload.add_argument(f"--{name}", type=Path, required=True)
+    upload.add_argument("--int8", type=Path, help="Historical Java-only INT8 control")
     upload.set_defaults(action=install)
     capture = sub.add_parser("collect")
     capture.add_argument("--out", type=Path, required=True)
-    capture.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
+    capture.add_argument("--modes", nargs="+", choices=MODES)
     capture.add_argument("--pairs", nargs="+", choices=LABELS, default=list(LABELS))
     capture.add_argument("--repeats", type=int, default=10)
     capture.add_argument("--energy-seconds", type=int, default=20)
     capture.add_argument("--cold", type=int, choices=(1, 2, 3, 4, 5), default=3)
+    capture.add_argument("--implementation", choices=("java", "native", "both"), default="java")
     capture.set_defaults(action=collect)
     offline = sub.add_parser("report")
     offline.add_argument("--runs", type=Path, required=True)
@@ -214,4 +241,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.action is not report and args.adb is None:
         parser.error("--adb is required for install and collect")
+    if args.action is collect:
+        if args.modes is None:
+            args.modes = list(MODES if args.implementation == "java" else MODES[:-1])
+        if args.implementation != "java" and "int8" in args.modes:
+            parser.error("INT8 is a historical control for the Java runner only")
     args.action(args)

@@ -6,6 +6,10 @@ final class RawIsp {
     static final float EXPOSURE = (float) Math.pow(2, 1.5);
     private static final byte[] SRGB = buildTable();
 
+    static void copyLookup(java.nio.ByteBuffer destination) {
+        destination.put(SRGB).rewind();
+    }
+
     static int reflect(int position, int size) {
         if (position < 0) return -position;
         return Math.min(position, 2 * size - 2 - position);

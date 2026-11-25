@@ -22,15 +22,16 @@ final class RawEngine implements AutoCloseable {
     final long delegateNs;
     final long interpreterNs;
     final long allocateNs;
-    final float[] restored = new float[RawFrame.SAMPLES];
-    final byte[] rgb = new byte[3 * RawFrame.SAMPLES];
-    private final float[] workspace = new float[RawFrame.SAMPLES];
+    final float[] restored;
+    final byte[] rgb;
+    final NativeIsp nativeIsp;
+    private final float[] workspace;
     private final ByteBuffer input;
     private final ByteBuffer output;
     private final FloatBuffer inputFloat;
     private final FloatBuffer outputFloat;
-    private final float[] inputTile = new float[EXTENT * EXTENT * 8];
-    private final float[] outputTile = new float[EXTENT * EXTENT * 4];
+    private final float[] inputTile;
+    private final float[] outputTile;
     private final boolean quantized;
     private final float inputScale;
     private final int inputZero;
@@ -39,7 +40,14 @@ final class RawEngine implements AutoCloseable {
     private final Interpreter interpreter;
     private final AutoCloseable delegate;
 
-    RawEngine(String mode, File graph, String nativeDir) throws Exception {
+    RawEngine(String mode, File graph, String nativeDir, boolean optimized) throws Exception {
+        if (optimized && mode.equals("int8")) throw new IllegalArgumentException("Optimized benchmark uses only FP32 I/O");
+        nativeIsp = optimized ? new NativeIsp() : null;
+        restored = optimized ? null : new float[RawFrame.SAMPLES];
+        rgb = optimized ? null : new byte[3 * RawFrame.SAMPLES];
+        workspace = optimized ? null : new float[RawFrame.SAMPLES];
+        inputTile = optimized ? null : new float[EXTENT * EXTENT * 8];
+        outputTile = optimized ? null : new float[EXTENT * EXTENT * 4];
         long start = System.nanoTime();
         Interpreter.Options options = new Interpreter.Options().setNumThreads(4)
                 .setUseXNNPACK(mode.equals("cpu") || mode.equals("int8"));
@@ -113,35 +121,53 @@ final class RawEngine implements AutoCloseable {
 
     Timing run(RawFrame frame) {
         long started = System.nanoTime();
-        RawIsp.noise(frame, workspace);
-        long mapsEnd = System.nanoTime();
+        if (nativeIsp == null) RawIsp.noise(frame, workspace);
+        long noiseNs = System.nanoTime() - started;
         long[] blocks = new long[TILE_COUNT];
+        long[] nativeInvokes = new long[TILE_COUNT];
         int cursor = 0;
         long packNs = 0;
         long assemblyNs = 0;
         for (int y = 0; y < RawFrame.HEIGHT; y += TILE) {
             for (int x = 0; x < RawFrame.WIDTH; x += TILE) {
                 long packStart = System.nanoTime();
-                copyIn(frame.source, y, x);
+                long tileNoise = 0;
+                if (nativeIsp == null) {
+                    copyIn(frame.source, y, x);
+                } else {
+                    tileNoise = nativeIsp.prepare(frame, input, y, x);
+                    noiseNs += tileNoise;
+                }
                 long inferStart = System.nanoTime();
                 input.rewind();
                 output.rewind();
                 interpreter.run(input, output);
                 long inferEnd = System.nanoTime();
-                copyOut(frame.source, y, x);
+                if (nativeIsp == null) {
+                    copyOut(frame.source, y, x);
+                } else {
+                    nativeIsp.restore(frame, output, y, x);
+                }
                 long assembled = System.nanoTime();
-                packNs += inferStart - packStart;
+                Long nativeNs = interpreter.getLastNativeInferenceDurationNanoseconds();
+                nativeInvokes[cursor] = nativeNs == null ? -1 : nativeNs;
+                packNs += Math.max(0, inferStart - packStart - tileNoise);
                 blocks[cursor++] = inferEnd - inferStart;
                 assemblyNs += assembled - inferEnd;
             }
         }
         long tilesEnd = System.nanoTime();
-        RawIsp.gain(frame, restored, workspace);
-        long gainsEnd = System.nanoTime();
-        RawIsp.display(workspace, frame.matrix, rgb);
+        long gainNs;
+        if (nativeIsp == null) {
+            RawIsp.gain(frame, restored, workspace);
+            gainNs = System.nanoTime() - tilesEnd;
+            RawIsp.display(workspace, frame.matrix, rgb);
+        } else {
+            gainNs = nativeIsp.render(frame);
+        }
         long rendered = System.nanoTime();
-        return new Timing(mapsEnd - started, packNs, blocks, assemblyNs, tilesEnd - started,
-                gainsEnd - tilesEnd, rendered - gainsEnd, rendered - started);
+        return new Timing(noiseNs, packNs, blocks, nativeInvokes, assemblyNs, tilesEnd - started,
+                gainNs, rendered - tilesEnd - gainNs, rendered - started);
     }
 
     private void copyIn(float[] source, int y, int x) {
@@ -195,7 +221,7 @@ final class RawEngine implements AutoCloseable {
         }
     }
 
-    record Timing(long noiseNs, long packNs, long[] inferenceNs, long assemblyNs,
+    record Timing(long noiseNs, long packNs, long[] inferenceNs, long[] nativeInvokeNs, long assemblyNs,
                   long rawToRestoredNs, long gainNs, long ispNs, long totalNs) {}
 
     @Override public void close() throws Exception {

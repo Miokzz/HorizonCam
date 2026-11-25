@@ -11,12 +11,13 @@ final class RawFrame {
     static final int HEIGHT = 1368;
     static final int WIDTH = 1824;
     static final int SAMPLES = HEIGHT * WIDTH * 4;
-    final float[] source = new float[SAMPLES];
+    final float[] source;
+    final ByteBuffer mappedSource;
     final float[] profile = new float[8];
     final float[] matrix = new float[9];
     final GainMap[] maps = new GainMap[4];
 
-    RawFrame(File file) throws IOException {
+    RawFrame(File file, boolean direct) throws IOException {
         try (FileInputStream stream = new FileInputStream(file)) {
             FileChannel channel = stream.getChannel();
             ByteBuffer reader = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size())
@@ -28,8 +29,15 @@ final class RawFrame {
             for (int i = 0; i < profile.length; i++) profile[i] = reader.getFloat();
             for (int i = 0; i < matrix.length; i++) matrix[i] = reader.getFloat();
             for (int i = 0; i < maps.length; i++) maps[i] = new GainMap(reader, i);
-            if (reader.remaining() != source.length * Float.BYTES) throw new IOException("Truncated raster");
-            reader.asFloatBuffer().get(source);
+            if (reader.remaining() != SAMPLES * Float.BYTES) throw new IOException("Truncated raster");
+            if (direct) {
+                source = null;
+                mappedSource = reader.slice().order(ByteOrder.LITTLE_ENDIAN);
+            } else {
+                source = new float[SAMPLES];
+                mappedSource = null;
+                reader.asFloatBuffer().get(source);
+            }
         }
     }
 

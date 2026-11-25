@@ -51,6 +51,11 @@ public final class RawBench extends Instrumentation {
 
     private void runBenchmark() throws Exception {
         String mode = arguments.getString("mode");
+        String implementation = arguments.getString("implementation", "java");
+        if (!implementation.equals("java") && !implementation.equals("native")) {
+            throw new IllegalArgumentException("Unknown ISP implementation");
+        }
+        boolean optimized = implementation.equals("native");
         String run = arguments.getString("run");
         String[] pairs = arguments.getString("pairs", String.join(",", PAIRS)).split(",");
         int repeats = Integer.parseInt(arguments.getString("repeats", "10"));
@@ -71,13 +76,13 @@ public final class RawBench extends Instrumentation {
         }
         PowerSamples samples = new PowerSamples(getTargetContext());
         JSONObject report = new JSONObject();
-        report.put("mode", mode).put("pid", Process.myPid()).put("graphSha256", sha)
+        report.put("mode", mode).put("implementation", implementation).put("pid", Process.myPid()).put("graphSha256", sha)
                 .put("graphBytes", graph.length()).put("initialMemory", memory())
                 .put("initialPower", samples.snapshot());
         JSONArray loops = new JSONArray();
         JSONArray pairsEvidence = new JSONArray();
         long engineStart = System.nanoTime();
-        try (RawEngine engine = new RawEngine(mode, graph, getTargetContext().getApplicationInfo().nativeLibraryDir)) {
+        try (RawEngine engine = new RawEngine(mode, graph, getTargetContext().getApplicationInfo().nativeLibraryDir, optimized)) {
             report.put("engineNs", System.nanoTime() - engineStart)
                     .put("delegateNs", engine.delegateNs).put("interpreterNs", engine.interpreterNs)
                     .put("allocateNs", engine.allocateNs).put("allocatedMemory", memory());
@@ -85,7 +90,7 @@ public final class RawBench extends Instrumentation {
                 String label = pairs[i];
                 if (!java.util.Arrays.asList(PAIRS).contains(label)) throw new IllegalArgumentException("Unknown fixture");
                 long start = System.nanoTime();
-                RawFrame frame = new RawFrame(new File(inputs, label + ".rawbench"));
+                RawFrame frame = new RawFrame(new File(inputs, label + ".rawbench"), optimized);
                 long loadNs = System.nanoTime() - start;
                 if (i == 0) {
                     for (int loop = 0; loop <= repeats; loop++) {
@@ -96,11 +101,9 @@ public final class RawBench extends Instrumentation {
                 } else {
                     engine.run(frame);
                 }
-                if (save) {
-                    writeFloats(new File(output, label + ".f32"), engine.restored);
-                    if (label.equals("detail-a")) Files.write(new File(output, label + ".rgb").toPath(), engine.rgb);
-                }
-                pairsEvidence.put(new JSONObject().put("label", label).put("fixtureLoadNs", loadNs));
+                JSONObject pair = new JSONObject().put("label", label).put("fixtureLoadNs", loadNs);
+                if (save) pair.put("rgbSha256", save(frame, engine, output, label));
+                pairsEvidence.put(pair);
                 if (i == 0 && energySeconds > 0) {
                     report.put("idleWindow", samples.window(energySeconds, null));
                     report.put("loadWindow", samples.window(energySeconds, () -> engine.run(frame)));
@@ -115,11 +118,40 @@ public final class RawBench extends Instrumentation {
     private static JSONObject timing(RawEngine.Timing time) throws Exception {
         JSONArray tiles = new JSONArray();
         for (long ns : time.inferenceNs()) tiles.put(ns);
+        JSONArray nativeInvokes = new JSONArray();
+        for (long ns : time.nativeInvokeNs()) nativeInvokes.put(ns);
         return new JSONObject().put("noiseNs", time.noiseNs()).put("packNs", time.packNs())
-                .put("inferenceNs", tiles).put("assemblyNs", time.assemblyNs())
+                .put("inferenceNs", tiles).put("nativeInvokeNs", nativeInvokes).put("assemblyNs", time.assemblyNs())
                 .put("rawToRestoredNs", time.rawToRestoredNs()).put("gainNs", time.gainNs())
                 .put("ispNs", time.ispNs()).put("totalNs", time.totalNs())
                 .put("elapsedRealtimeNs", SystemClock.elapsedRealtimeNanos());
+    }
+
+    private static String save(RawFrame frame, RawEngine engine, File output, String label) throws Exception {
+        File raw = new File(output, label + ".f32");
+        File rgb = new File(output, label + ".rgb");
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        if (frame.mappedSource == null) {
+            writeFloats(raw, engine.restored);
+            if (label.equals("detail-a")) Files.write(rgb.toPath(), engine.rgb);
+            digest.update(engine.rgb);
+        } else {
+            writeBuffer(raw, engine.nativeIsp.restored);
+            if (label.equals("detail-a")) writeBuffer(rgb, engine.nativeIsp.rgb);
+            ByteBuffer image = engine.nativeIsp.rgb.asReadOnlyBuffer();
+            image.rewind();
+            digest.update(image);
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static void writeBuffer(File target, ByteBuffer data) throws Exception {
+        ByteBuffer source = data.asReadOnlyBuffer();
+        source.rewind();
+        try (FileOutputStream stream = new FileOutputStream(target)) {
+            FileChannel channel = stream.getChannel();
+            while (source.hasRemaining()) channel.write(source);
+        }
     }
 
     private static JSONObject memory() throws Exception {
