@@ -1,0 +1,7 @@
+# Separate host environment, Python 3.12. Install CPU PyTorch as documented.
+numpy==2.5.5
+Pillow==13.0.0
+opencv-python==5.0.0.93
+rawpy==0.28.0
+tifffile==2026.11.16
+tensorflow-cpu==2.20.0
