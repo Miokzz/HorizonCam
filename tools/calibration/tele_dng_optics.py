@@ -208,6 +208,11 @@ class Optics:
         require(tuple(shape) == self.shape, "Optics require the full unrotated DNG raster")
         require(not any(not op["optional"] for op in self._unsupported), "Unsupported mandatory DNG opcode")
 
+    def gain_tables(self):
+        """Immutable stage-2 tables in the original full raster coordinates."""
+        self._check_applicable(self.shape)
+        return self._gains
+
     def gain_field(self, shape):
         """Multipliers for full-raster, already black-subtracted CFA values."""
         self._check_applicable(shape)
