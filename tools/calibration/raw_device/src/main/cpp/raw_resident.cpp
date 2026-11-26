@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <jni.h>
+#include "raw_fidelity.h"
 
 #include <litert/c/litert_compiled_model.h>
 #include <litert/c/litert_environment.h>
@@ -90,12 +91,12 @@ struct FrameEvents {
     cl_event* next() { return &events.at(count++); }
     OpenCl& api;
     size_t count = 0;
-    std::array<cl_event, 3 * tiles + 8> events{};
+    std::array<cl_event, 3 * tiles + 8 + fidelity::indices.size()> events{};
 };
 
 class Resident {
 public:
-    void init(const char* modelPath, const char* runtimeDir, const void* lutHost, bool external,
+    void init(const char* modelPath, const char* runtimeDir, const void* lutHost, bool external, bool audit, int math,
               std::array<jlong, 3>& times) {
         int64_t started = now();
         external_ = external;
@@ -155,7 +156,8 @@ public:
         check(LiteRtGetModelSignature(model, 0, &signature), "model signature");
         input = makeTensor(signature, true, inputCl);
         output = makeTensor(signature, false, outputCl);
-        makeKernels(device);
+        makeKernels(device, audit, math);
+        if (audit) scratch = allocate(sizeof(fidelity::Tile::noise), CL_MEM_READ_WRITE);
         source = allocate(rawBytes, CL_MEM_READ_ONLY);
         raw = allocate(rawBytes, CL_MEM_READ_WRITE);
         rgb = allocate(rgbBytes, CL_MEM_WRITE_ONLY);
@@ -170,11 +172,12 @@ public:
     }
 
     void frame(const void* sourceHost, const jfloat* profile, const float* maps, jint mapBytes,
-               void* rawHost, void* rgbHost, std::array<jlong, 13 + tiles>& result) {
+               void* rawHost, void* rgbHost, std::array<jlong, 13 + tiles>& result, fidelity::Trace* trace,
+               const fidelity::Trace* reference, const void* referenceRaw) {
         const int64_t started = now();
         FrameEvents events(cl);
         try {
-            work(sourceHost, profile, maps, mapBytes, rawHost, rgbHost, result, events, started);
+            work(sourceHost, profile, maps, mapBytes, rawHost, rgbHost, result, events, started, trace, reference, referenceRaw);
         } catch (...) {
             // Drain any commands that still reference the borrowed direct Java buffers.
             cl.clFinish(queue);
@@ -191,7 +194,7 @@ public:
         if (options) LiteRtDestroyOptions(options);
         if (model) LiteRtDestroyModel(model);
         if (environment) LiteRtDestroyEnvironment(environment);
-        for (auto memory : {source, raw, rgb, metadata, lut, invalid}) if (memory) cl.clReleaseMemObject(memory);
+        for (auto memory : {source, raw, rgb, metadata, lut, invalid, scratch}) if (memory) cl.clReleaseMemObject(memory);
         for (auto kernel : {prepare, restore, develop}) if (kernel) cl.clReleaseKernel(kernel);
         if (program) cl.clReleaseProgram(program);
         if (queue) cl.clReleaseCommandQueue(queue);
@@ -205,6 +208,7 @@ private:
     cl_program program = nullptr;
     cl_kernel prepare = nullptr, restore = nullptr, develop = nullptr;
     cl_mem source = nullptr, raw = nullptr, rgb = nullptr, metadata = nullptr, lut = nullptr, invalid = nullptr;
+    cl_mem scratch = nullptr;
     cl_mem inputCl = nullptr, outputCl = nullptr;
     LiteRtEnvironment environment = nullptr;
     LiteRtModel model = nullptr;
@@ -351,7 +355,7 @@ private:
         return value;
     }
 
-    void makeKernels(cl_device_id device) {
+    void makeKernels(cl_device_id device, bool audit, int math) {
         cl_int rc = CL_SUCCESS;
         const char* code = shader;
         program = cl.clCreateProgramWithSource(context, 1, &code, nullptr, &rc);
@@ -361,8 +365,9 @@ private:
               "precision capabilities");
         bool correctlyRounded = (fpConfig & CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT) != 0;
         __android_log_print(ANDROID_LOG_INFO, tag, "FP32 correctly-rounded divide/sqrt advertised=%d", correctlyRounded);
-        const char* flags = correctlyRounded ? "-cl-fp32-correctly-rounded-divide-sqrt" : "";
-        rc = cl.clBuildProgram(program, 1, &device, flags, nullptr, nullptr);
+        std::string flags = "-DAUDIT_CAPTURE=" + std::to_string(audit) + " -DISP_MATH=" + std::to_string(math);
+        if (correctlyRounded) flags += " -cl-fp32-correctly-rounded-divide-sqrt";
+        rc = cl.clBuildProgram(program, 1, &device, flags.c_str(), nullptr, nullptr);
         if (rc != CL_SUCCESS) {
             size_t length = 0;
             if (cl.clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &length) == CL_SUCCESS && length > 0) {
@@ -409,9 +414,23 @@ private:
         return profileTime(event, CL_PROFILING_COMMAND_END) - profileTime(event, CL_PROFILING_COMMAND_START);
     }
 
+    void clearAudit(size_t bytes) {
+        static constexpr cl_uint zero = 0;
+        check(cl.clEnqueueFillBuffer(queue, scratch, &zero, sizeof(zero), 0, bytes, 0, nullptr, nullptr),
+              "clear audit scratch");
+    }
+
+    void readAudit(cl_mem source, void* destination, size_t bytes) {
+        check(cl.clEnqueueReadBuffer(queue, source, CL_FALSE, 0, bytes, destination, 0, nullptr, nullptr),
+              "read audit snapshot");
+    }
+
     void work(const void* sourceHost, const jfloat* profile, const float* maps, jint mapBytes,
               void* rawHost, void* rgbHost, std::array<jlong, 13 + tiles>& result,
-              FrameEvents& events, int64_t started) {
+              FrameEvents& events, int64_t started, fidelity::Trace* trace,
+              const fidelity::Trace* reference, const void* referenceRaw) {
+        require((trace == nullptr) == (scratch == nullptr), "Audit build/frame mismatch");
+        require((reference == nullptr) == (referenceRaw == nullptr), "Replay inputs must be paired");
         require(mapBytes > 0 && static_cast<size_t>(mapBytes) <= parameterBytes, "Invalid metadata size");
         cl_int4 offsets{};
         int cursor = 9;
@@ -435,12 +454,26 @@ private:
         std::array<cl_event*, tiles> prepared{}, inferred{}, restored{};
         int index = 0;
         for (int y = 0; y < height; y += tile) for (int x = 0; x < width; x += tile, ++index) {
+            const int slot = trace ? fidelity::slot(index) : -1;
+            fidelity::Tile* sampled = slot >= 0 ? &trace->tiles[slot] : nullptr;
+            const cl_int capture = sampled && !reference;
             prepared[index] = events.next();
-            arguments(prepare, source, inputCl, slope, offset, y, x, external);
+            arguments(prepare, source, inputCl, slope, offset, y, x, external, scratch, capture);
             check(cl.clEnqueueNDRangeKernel(queue, prepare, 2, nullptr, inputRange, nullptr, 0, nullptr, prepared[index]),
                   "enqueue Bayer and noise tile");
+            if (capture) {
+                readAudit(scratch, sampled->noise, sizeof(sampled->noise));
+                readAudit(inputCl, sampled->input, sizeof(sampled->input));
+            }
+            cl_event* inputReady = prepared[index];
+            if (sampled && reference) {
+                inputReady = events.next();
+                check(cl.clEnqueueWriteBuffer(queue, inputCl, CL_FALSE, 0, sizeof(sampled->input),
+                          reference->tiles[slot].input, 0, nullptr, inputReady), "replay exact NEON tensor");
+                readAudit(inputCl, sampled->input, sizeof(sampled->input));
+            }
             LiteRtEvent ready = nullptr;
-            check(LiteRtCreateEventFromOpenClEvent(environment, *prepared[index], &ready), "wrap input readiness");
+            check(LiteRtCreateEventFromOpenClEvent(environment, *inputReady, &ready), "wrap input readiness");
             const auto status = LiteRtSetTensorBufferEvent(input, ready);
             if (status != kLiteRtStatusOk) LiteRtDestroyEvent(ready);
             check(status, "attach input readiness");
@@ -461,20 +494,36 @@ private:
             inferred[index] = events.next();
             check(cl.clEnqueueMarkerWithWaitList(queue, fence ? 1 : 0, fence ? &fence : nullptr, inferred[index]),
                   "reuse tile after network fence");
+            if (sampled) {
+                readAudit(outputCl, sampled->prediction, sizeof(sampled->prediction));
+                if (reference) {
+                    // The CNN snapshot above precedes this overwrite. Feed the
+                    // baseline prediction to isolate correction and clipping.
+                    check(cl.clEnqueueWriteBuffer(queue, outputCl, CL_FALSE, 0, sizeof(sampled->prediction),
+                          reference->tiles[slot].prediction, 0, nullptr, nullptr), "replay exact NEON prediction");
+                }
+            }
             const size_t useful[] = {static_cast<size_t>(std::min(tile, width - x)),
                                      static_cast<size_t>(std::min(tile, height - y))};
             restored[index] = events.next();
-            arguments(restore, source, inputCl, outputCl, raw, invalid, y, x, external);
+            if (sampled) clearAudit(sizeof(sampled->correction));
+            arguments(restore, source, inputCl, outputCl, raw, invalid, y, x, external, scratch, cl_int(sampled != nullptr));
             check(cl.clEnqueueNDRangeKernel(queue, restore, 2, nullptr, useful, nullptr, 0, nullptr, restored[index]),
                   "enqueue Bayer reconstruction");
+            if (sampled) readAudit(scratch, sampled->correction, sizeof(sampled->correction));
             clearTensorEvents();
+        }
+        if (referenceRaw) {
+            check(cl.clEnqueueWriteBuffer(queue, raw, CL_FALSE, 0, rawBytes, referenceRaw, 0, nullptr, nullptr),
+                  "replay exact NEON restored mosaic");
         }
         const size_t renderRange[] = {2 * width, 2 * height};
         const size_t group[] = {16, 16};
         cl_event* rendered = events.next();
-        arguments(develop, raw, metadata, offsets, lut, rgb);
+        arguments(develop, raw, metadata, offsets, lut, rgb, scratch);
         check(cl.clEnqueueNDRangeKernel(queue, develop, 2, nullptr, renderRange, group, 0, nullptr, rendered),
               "enqueue fused GainMaps and MHC");
+        if (trace) readAudit(scratch, trace->display, sizeof(trace->display));
         cl_event* rawRead = events.next();
         cl_event* rgbRead = events.next();
         cl_event* validRead = events.next();
@@ -518,13 +567,13 @@ std::string stringArg(JNIEnv* env, jstring value) {
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_miokzz_rawbench_ResidentIsp_create(JNIEnv* env, jclass, jstring model, jstring runtimeDir,
-                                           jobject lut, jboolean external, jlongArray timing) {
+                                           jobject lut, jboolean external, jboolean audit, jint math, jlongArray timing) {
     try {
         std::array<jlong, 3> metrics{};
         auto resident = std::make_unique<Resident>();
         const auto modelPath = stringArg(env, model);
         const auto libraryPath = stringArg(env, runtimeDir);
-        resident->init(modelPath.c_str(), libraryPath.c_str(), env->GetDirectBufferAddress(lut), external, metrics);
+        resident->init(modelPath.c_str(), libraryPath.c_str(), env->GetDirectBufferAddress(lut), external, audit, math, metrics);
         env->SetLongArrayRegion(timing, 0, metrics.size(), metrics.data());
         return reinterpret_cast<jlong>(resident.release());
     } catch (const std::exception& error) {
@@ -535,14 +584,18 @@ Java_com_miokzz_rawbench_ResidentIsp_create(JNIEnv* env, jclass, jstring model, 
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_miokzz_rawbench_ResidentIsp_runFrame(JNIEnv* env, jclass, jlong handle, jobject input, jfloatArray profile,
-                                             jobject maps, jint mapBytes, jobject raw, jobject rgb, jlongArray timing) {
+                                             jobject maps, jint mapBytes, jobject raw, jobject rgb, jlongArray timing,
+                                             jobject trace, jobject reference, jobject referenceRaw) {
     try {
         std::array<jlong, 13 + tiles> metrics{};
         jfloat coefficients[8];
         env->GetFloatArrayRegion(profile, 0, 8, coefficients);
         reinterpret_cast<Resident*>(handle)->frame(env->GetDirectBufferAddress(input), coefficients,
                 static_cast<const float*>(env->GetDirectBufferAddress(maps)), mapBytes,
-                env->GetDirectBufferAddress(raw), env->GetDirectBufferAddress(rgb), metrics);
+                env->GetDirectBufferAddress(raw), env->GetDirectBufferAddress(rgb), metrics,
+                trace ? static_cast<fidelity::Trace*>(env->GetDirectBufferAddress(trace)) : nullptr,
+                reference ? static_cast<const fidelity::Trace*>(env->GetDirectBufferAddress(reference)) : nullptr,
+                referenceRaw ? env->GetDirectBufferAddress(referenceRaw) : nullptr);
         env->SetLongArrayRegion(timing, 0, metrics.size(), metrics.data());
     } catch (const std::exception& error) {
         throwToJava(env, error);

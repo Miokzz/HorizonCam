@@ -24,22 +24,22 @@ final class NativeIsp {
         RawIsp.copyLookup(srgb);
     }
 
-    long prepare(RawFrame frame, ByteBuffer input, int y, int x) {
-        return nativePrepare(frame.mappedSource, frame.profile, sigma, input, y, x);
+    long prepare(RawFrame frame, ByteBuffer input, int y, int x, ByteBuffer trace) {
+        return nativePrepare(frame.mappedSource, frame.profile, sigma, input, y, x, trace);
     }
 
-    void restore(RawFrame frame, ByteBuffer output, int y, int x) {
-        if (!nativeRestore(frame.mappedSource, sigma, output, restored, y, x)) {
+    void restore(RawFrame frame, ByteBuffer output, int y, int x, ByteBuffer trace) {
+        if (!nativeRestore(frame.mappedSource, sigma, output, restored, y, x, trace)) {
             throw new IllegalArgumentException("Nonfinite neural prediction");
         }
     }
 
-    long render(RawFrame frame) {
+    long render(RawFrame frame, ByteBuffer trace) {
         if (bound != frame) {
             writeParameters(maps, frame);
             bound = frame;
         }
-        return nativeRender(restored, maps, rows, srgb, rgb);
+        return nativeRender(restored, maps, rows, srgb, rgb, trace);
     }
 
     static int writeParameters(ByteBuffer target, RawFrame frame) {
@@ -64,9 +64,9 @@ final class NativeIsp {
     }
 
     private static native long nativePrepare(ByteBuffer source, float[] profile, ByteBuffer sigma,
-                                             ByteBuffer input, int y, int x);
+                                             ByteBuffer input, int y, int x, ByteBuffer trace);
     private static native boolean nativeRestore(ByteBuffer source, ByteBuffer sigma, ByteBuffer output,
-                                                ByteBuffer restored, int y, int x);
+                                                ByteBuffer restored, int y, int x, ByteBuffer trace);
     private static native long nativeRender(ByteBuffer restored, ByteBuffer maps, ByteBuffer rows,
-                                            ByteBuffer srgb, ByteBuffer rgb);
+                                            ByteBuffer srgb, ByteBuffer rgb, ByteBuffer trace);
 }

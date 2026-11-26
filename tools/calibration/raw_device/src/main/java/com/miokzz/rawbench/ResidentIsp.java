@@ -18,11 +18,12 @@ final class ResidentIsp implements RawPipeline {
     private final Setup setup;
     private long handle;
 
-    ResidentIsp(File model, String libraryDir, boolean external) {
+    ResidentIsp(File model, String libraryDir, boolean external, boolean audit, int math) {
+        if (audit && external) throw new IllegalArgumentException("Fidelity audit requires NHWC");
         ByteBuffer lookup = direct(65536);
         RawIsp.copyLookup(lookup);
         long[] durations = new long[3];
-        handle = create(model.getAbsolutePath(), libraryDir, lookup, external, durations);
+        handle = create(model.getAbsolutePath(), libraryDir, lookup, external, audit, math, durations);
         setup = new Setup(durations[0], durations[1], durations[2]);
     }
 
@@ -35,9 +36,14 @@ final class ResidentIsp implements RawPipeline {
     }
 
     @Override public RawEngine.Timing run(RawFrame frame) {
+        return run(frame, null, null, null);
+    }
+
+    RawEngine.Timing run(RawFrame frame, RawFidelity trace, RawFidelity reference, ByteBuffer referenceRaw) {
         long start = System.nanoTime();
         int metadataBytes = NativeIsp.writeParameters(parameters, frame);
-        runFrame(handle, frame.mappedSource, frame.profile, parameters, metadataBytes, raw, rgb, values);
+        runFrame(handle, frame.mappedSource, frame.profile, parameters, metadataBytes, raw, rgb, values,
+                trace == null ? null : trace.data, reference == null ? null : reference.data, referenceRaw);
         long elapsed = System.nanoTime() - start;
         long[] tileGpuSpans = Arrays.copyOfRange(values, FIRST_TILE, values.length);
         long[] hostInvoke = new long[RawEngine.TILE_COUNT];
@@ -61,8 +67,9 @@ final class ResidentIsp implements RawPipeline {
     }
 
     private static native long create(String model, String libraryDir, ByteBuffer lookup,
-                                      boolean external, long[] durations);
+                                      boolean external, boolean audit, int math, long[] durations);
     private static native void runFrame(long handle, ByteBuffer input, float[] profile, ByteBuffer metadata,
-                                        int metadataBytes, ByteBuffer raw, ByteBuffer rgb, long[] timing);
+                                        int metadataBytes, ByteBuffer raw, ByteBuffer rgb, long[] timing,
+                                        ByteBuffer trace, ByteBuffer reference, ByteBuffer referenceRaw);
     private static native void destroy(long handle);
 }

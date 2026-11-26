@@ -58,7 +58,7 @@ def collect_one(args, mode, output, pairs, repeats, seconds, save, implementatio
     instrument = adb(args, "shell", "am", "instrument", "-w", "-r", "-e", "mode", mode,
                      "-e", "run", run, "-e", "pairs", ",".join(pairs), "-e", "repeats", str(repeats),
                      "-e", "energySeconds", str(seconds), "-e", "save", str(save).lower(),
-                     "-e", "implementation", implementation,
+                     "-e", "implementation", implementation, "-e", "ispMath", args.isp_math,
                      f"{PACKAGE}/.RawBench", capture_output=True, text=True, timeout=360)
     (output / "instrumentation.txt").write_text(instrument.stdout + instrument.stderr, encoding="utf-8")
     match = re.search(r"(?m)^(?:INSTRUMENTATION_STATUS|INSTRUMENTATION_RESULT): pid=(\d+)\s*$", instrument.stdout)
@@ -145,7 +145,7 @@ def summarize(primary, cold):
     warm = primary["loops"][1:]
     sections = ("noiseNs", "packNs", "assemblyNs", "rawToRestoredNs", "gainNs", "ispNs", "totalNs")
     evidence = {"graphBytes": primary["graphBytes"], "graphSha256": primary["graphSha256"],
-                "implementation": primary.get("implementation", "java"),
+                "implementation": primary.get("implementation", "java"), "ispMath": primary.get("ispMath", "stock"),
                 "coldMs": {part: distribution([report[part] / 1e6 for report in cold])
                            for part in ("engineNs", "delegateNs", "interpreterNs", "allocateNs") if part in primary},
                 "firstFrameMs": distribution([report["loops"][0]["totalNs"] / 1e6 for report in cold]),
@@ -243,6 +243,7 @@ if __name__ == "__main__":
     capture.add_argument("--cold", type=int, choices=(1, 2, 3, 4, 5), default=3)
     capture.add_argument("--implementation", choices=("java", "native", "both", "resident", "resident-direct"),
                          default="java")
+    capture.add_argument("--isp-math", choices=("stock", "divide9", "noise"), default="stock")
     capture.set_defaults(action=collect)
     offline = sub.add_parser("report")
     offline.add_argument("--runs", type=Path, required=True)
@@ -256,6 +257,8 @@ if __name__ == "__main__":
         if args.modes is None:
             args.modes = ["gpu"] if args.implementation.startswith("resident") else list(
                 MODES if args.implementation == "java" else MODES[:-1])
+        if args.isp_math != "stock" and args.implementation != "resident":
+            parser.error("Experimental ISP math requires the resident NHWC implementation")
         if args.implementation.startswith("resident") and args.modes != ["gpu"]:
             parser.error("Resident ISP is qualified for strict GPU mode only")
         if args.implementation != "java" and "int8" in args.modes:

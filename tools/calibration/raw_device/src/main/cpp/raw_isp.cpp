@@ -1,4 +1,5 @@
 #include <jni.h>
+#include "raw_fidelity.h"
 #include <arm_neon.h>
 
 #include <algorithm>
@@ -75,15 +76,15 @@ void applyGainRow(const float* restored, const std::array<GainMap, 4>& maps, int
     }
 }
 
-uint8_t encode(float v, const uint8_t* lut) {
-    const float scaled = std::clamp(v * exposure, 0.0f, 1.0f) * 65535.0f;
+uint8_t encode(float exposed, const uint8_t* lut) {
+    const float scaled = exposed * 65535.0f;
     const int offset = static_cast<int>(scaled);
     // Float Math.round semantics, including values immediately below a half.
     return lut[offset + (scaled - static_cast<float>(offset) >= 0.5f)];
 }
 
 void demosaicRow(const std::array<const float*, 5>& rows, int y, const float* matrix,
-                 const uint8_t* lut, uint8_t* output) {
+                 const uint8_t* lut, uint8_t* output, float* trace) {
     const float* middle = rows[2];
     const float* above = rows[1];
     const float* below = rows[3];
@@ -109,9 +110,22 @@ void demosaicRow(const std::array<const float*, 5>& rows, int y, const float* ma
             r = (y & 1) == 0 ? opposite : c;
             b = (y & 1) == 0 ? c : opposite;
         }
+        const int at = trace ? fidelity::displayIndex(x, y) : -1;
+        if (at >= 0) {
+            trace[at] = c;
+            trace[at + 1] = r;
+            trace[at + 2] = g;
+            trace[at + 3] = b;
+        }
         for (int channel = 0; channel < 3; channel++) {
             const float* weights = matrix + 3 * channel;
-            output[x * 3 + channel] = encode(weights[0] * r + weights[1] * g + weights[2] * b, lut);
+            const float linear = weights[0] * r + weights[1] * g + weights[2] * b;
+            const float exposed = std::clamp(linear * exposure, 0.0f, 1.0f);
+            if (at >= 0) {
+                trace[at + 4 + channel] = linear;
+                trace[at + 7 + channel] = exposed;
+            }
+            output[x * 3 + channel] = encode(exposed, lut);
         }
     }
 }
@@ -120,7 +134,8 @@ void demosaicRow(const std::array<const float*, 5>& rows, int y, const float* ma
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_miokzz_rawbench_NativeIsp_nativePrepare(JNIEnv* env, jclass, jobject sourceBuffer,
                                                jfloatArray profileArray, jobject sigmaBuffer,
-                                               jobject inputBuffer, jint y, jint x) {
+                                               jobject inputBuffer, jint y, jint x, jobject traceBuffer) {
+    float* trace = traceBuffer ? direct<float>(env, traceBuffer) : nullptr;
     const float* source = direct<const float>(env, sourceBuffer);
     float* sigma = direct<float>(env, sigmaBuffer);
     float* input = direct<float>(env, inputBuffer);
@@ -154,9 +169,16 @@ Java_com_miokzz_rawbench_NativeIsp_nativePrepare(JNIEnv* env, jclass, jobject so
             sum = vaddq_f32(sum, vld1q_f32(below + prev));
             sum = vaddq_f32(sum, vld1q_f32(below + col));
             sum = vaddq_f32(sum, vld1q_f32(below + next));
-            const float32x4_t mean = vmaxq_f32(zero, vdivq_f32(sum, nine));
+            const float32x4_t quotient = vdivq_f32(sum, nine);
+            const float32x4_t mean = vmaxq_f32(zero, quotient);
             const float32x4_t variance = vaddq_f32(vmulq_f32(mean, coefficients.val[0]), coefficients.val[1]);
             vst1q_f32(result, vsqrtq_f32(variance));
+            if (trace) {
+                float* at = trace + 12 * (i * extent + j);
+                vst1q_f32(at, sum);
+                vst1q_f32(at + 4, quotient);
+                vst1q_f32(at + 8, variance);
+            }
         }
     }
     const int64_t noiseNs = nanos() - start;
@@ -177,7 +199,8 @@ Java_com_miokzz_rawbench_NativeIsp_nativePrepare(JNIEnv* env, jclass, jobject so
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_miokzz_rawbench_NativeIsp_nativeRestore(JNIEnv* env, jclass, jobject sourceBuffer,
                                                jobject sigmaBuffer, jobject outputBuffer,
-                                               jobject restoredBuffer, jint y, jint x) {
+                                               jobject restoredBuffer, jint y, jint x, jobject traceBuffer) {
+    float* trace = traceBuffer ? direct<float>(env, traceBuffer) : nullptr;
     const float* source = direct<const float>(env, sourceBuffer);
     const float* sigma = direct<const float>(env, sigmaBuffer);
     const float* output = direct<const float>(env, outputBuffer);
@@ -193,7 +216,15 @@ Java_com_miokzz_rawbench_NativeIsp_nativeRestore(JNIEnv* env, jclass, jobject so
             finite &= std::isfinite(prediction);
             const float raw = source[dst + j];
             const float weight = std::clamp((.99f - raw) / .09f, 0.0f, 1.0f);
-            restored[dst + j] = raw + std::clamp(prediction, -3.0f, 3.0f) * sigma[start + j] * weight;
+            const float clamped = std::clamp(prediction, -3.0f, 3.0f);
+            const float delta = clamped * sigma[start + j] * weight;
+            restored[dst + j] = raw + delta;
+            if (trace) {
+                float* at = trace + (i * tile * 4 + j) * 3;
+                at[0] = clamped;
+                at[1] = weight;
+                at[2] = delta;
+            }
         }
     }
     return finite;
@@ -202,7 +233,8 @@ Java_com_miokzz_rawbench_NativeIsp_nativeRestore(JNIEnv* env, jclass, jobject so
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_miokzz_rawbench_NativeIsp_nativeRender(JNIEnv* env, jclass, jobject restoredBuffer,
                                               jobject fieldsBuffer, jobject rowsBuffer,
-                                              jobject lutBuffer, jobject rgbBuffer) {
+                                              jobject lutBuffer, jobject rgbBuffer, jobject traceBuffer) {
+    float* trace = traceBuffer ? direct<float>(env, traceBuffer) : nullptr;
     const float* restored = direct<const float>(env, restoredBuffer);
     const float* matrix = direct<const float>(env, fieldsBuffer);
     const float* fields = matrix + 9;
@@ -227,7 +259,7 @@ Java_com_miokzz_rawbench_NativeIsp_nativeRender(JNIEnv* env, jclass, jobject res
             }
             neighborhood[k] = raster;
         }
-        demosaicRow(neighborhood, y, matrix, lut, rgb + y * width * 3);
+        demosaicRow(neighborhood, y, matrix, lut, rgb + y * width * 3, trace);
     }
     return gainNs;
 }

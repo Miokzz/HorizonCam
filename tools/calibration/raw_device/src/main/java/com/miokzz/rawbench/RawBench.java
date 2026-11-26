@@ -59,6 +59,14 @@ public final class RawBench extends Instrumentation {
         }
         if (resident && !"gpu".equals(mode)) throw new IllegalArgumentException("Resident ISP requires strict GPU mode");
         boolean optimized = !implementation.equals("java");
+        String ispMath = arguments.getString("ispMath", "stock");
+        int math = switch (ispMath) {
+            case "stock" -> 0;
+            case "divide9" -> 1;
+            case "noise" -> 2;
+            default -> throw new IllegalArgumentException("Unknown ISP math");
+        };
+        if (math != 0 && (!resident || external)) throw new IllegalArgumentException("ISP math requires NHWC");
         String run = arguments.getString("run");
         String[] pairs = arguments.getString("pairs", String.join(",", PAIRS)).split(",");
         int repeats = Integer.parseInt(arguments.getString("repeats", "10"));
@@ -77,16 +85,22 @@ public final class RawBench extends Instrumentation {
         if (!sha.equals(mode.equals("int8") ? QUANT_SHA : MODEL_SHA)) {
             throw new IllegalArgumentException("Graph differs from the audited benchmark model");
         }
+        if (Boolean.parseBoolean(arguments.getString("fidelity", "false"))) {
+            if (!"gpu".equals(mode)) throw new IllegalArgumentException("Fidelity audit requires strict GPU");
+            if (external || !optimized) throw new IllegalArgumentException("Audit requires native or resident");
+            auditFidelity(graph, inputs, output, pairs, sha, resident, ispMath, math);
+            return;
+        }
         PowerSamples samples = new PowerSamples(getTargetContext());
         JSONObject report = new JSONObject();
         report.put("mode", mode).put("implementation", implementation).put("pid", Process.myPid()).put("graphSha256", sha)
-                .put("graphBytes", graph.length()).put("initialMemory", memory())
+                .put("graphBytes", graph.length()).put("ispMath", ispMath).put("initialMemory", memory())
                 .put("initialPower", samples.snapshot());
         JSONArray loops = new JSONArray();
         JSONArray pairsEvidence = new JSONArray();
         long engineStart = System.nanoTime();
         String libraryDir = getTargetContext().getApplicationInfo().nativeLibraryDir;
-        try (RawPipeline engine = resident ? new ResidentIsp(graph, libraryDir, external)
+        try (RawPipeline engine = resident ? new ResidentIsp(graph, libraryDir, external, false, math)
                 : new RawEngine(mode, graph, libraryDir, optimized)) {
             RawPipeline.Setup setup = engine.setup();
             report.put("engineNs", System.nanoTime() - engineStart)
@@ -119,6 +133,81 @@ public final class RawBench extends Instrumentation {
         report.put("loops", loops).put("pairs", pairsEvidence)
                 .put("finalMemory", memory()).put("finalPower", samples.snapshot());
         Files.write(new File(output, "timing.json").toPath(), report.toString(2).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void auditFidelity(File graph, File inputs, File output, String[] pairs, String sha, boolean resident,
+                               String ispMath, int math) throws Exception {
+        String libraryDir = getTargetContext().getApplicationInfo().nativeLibraryDir;
+        String referenceName = arguments.getString("reference");
+        File reference = null;
+        if (resident) {
+            if (referenceName == null || !referenceName.matches("[a-z0-9_-]{1,50}")) {
+                throw new IllegalArgumentException("Resident audit requires a native reference run");
+            }
+            reference = new File(output.getParentFile(), referenceName);
+        }
+        JSONArray report = new JSONArray();
+        RawFidelity trace = new RawFidelity();
+        RawFidelity referenceTrace = resident ? new RawFidelity() : null;
+        RawFidelity replay = resident ? new RawFidelity() : null;
+        try (RawPipeline engine = resident ? new ResidentIsp(graph, libraryDir, false, true, math)
+                : new RawEngine("gpu", graph, libraryDir, true)) {
+            for (String label : pairs) {
+                if (!java.util.Arrays.asList(PAIRS).contains(label)) throw new IllegalArgumentException("Unknown fixture");
+                RawFrame frame = new RawFrame(new File(inputs, label + ".rawbench"), true);
+                String prefix = label + (resident ? "-resident" : "-native");
+                JSONObject evidence = new JSONObject().put("label", label);
+                if (engine instanceof ResidentIsp gpu) {
+                    gpu.run(frame, trace, null, null);
+                    evidence.put("resident", saveFidelity(gpu.output(), output, prefix));
+                    loadTrace(new File(reference, label + "-native.trace"), referenceTrace.data);
+                    try (var stream = new java.io.FileInputStream(new File(reference, label + "-native.f32"))) {
+                        FileChannel channel = stream.getChannel();
+                        if (channel.size() != (long) RawFrame.SAMPLES * Float.BYTES) {
+                            throw new IllegalArgumentException("Unexpected replay mosaic length");
+                        }
+                        ByteBuffer source = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size());
+                        gpu.run(frame, replay, referenceTrace, source);
+                    }
+                    writeBuffer(new File(output, label + "-replay.trace"), replay.data);
+                    evidence.put("replayRgb", saveFidelityBuffer(gpu.output().directRgb(), output, label + "-replay.rgb"));
+                } else {
+                    ((RawEngine) engine).run(frame, trace);
+                    evidence.put("native", saveFidelity(engine.output(), output, prefix));
+                }
+                writeBuffer(new File(output, prefix + ".trace"), trace.data);
+                report.put(evidence);
+            }
+        }
+        JSONArray tileIndices = new JSONArray();
+        for (int tile : RawFidelity.TILES) tileIndices.put(tile);
+        JSONObject result = new JSONObject().put("graphSha256", sha).put("ispMath", ispMath)
+                .put("traceVersion", 3).put("tileIndices", tileIndices).put("pairs", report);
+        Files.write(new File(output, "fidelity.json").toPath(), result.toString(2).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void loadTrace(File source, ByteBuffer target) throws Exception {
+        try (var stream = new java.io.FileInputStream(source)) {
+            FileChannel channel = stream.getChannel();
+            target.clear();
+            if (channel.size() != target.remaining()) throw new IllegalArgumentException("Unexpected replay trace length");
+            while (target.hasRemaining()) {
+                if (channel.read(target) < 0) throw new java.io.EOFException("Incomplete replay trace");
+            }
+            target.rewind();
+        }
+    }
+
+    private static JSONObject saveFidelity(RawPipeline.Output image, File output, String prefix) throws Exception {
+        return new JSONObject().put("raw", saveFidelityBuffer(image.directRaw(), output, prefix + ".f32"))
+                .put("rgb", saveFidelityBuffer(image.directRgb(), output, prefix + ".rgb"));
+    }
+
+    private static String saveFidelityBuffer(ByteBuffer data, File output, String name) throws Exception {
+        writeBuffer(new File(output, name), data);
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        digest.update(RawFidelity.full(data));
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     private static JSONObject timing(RawEngine.Timing time) throws Exception {

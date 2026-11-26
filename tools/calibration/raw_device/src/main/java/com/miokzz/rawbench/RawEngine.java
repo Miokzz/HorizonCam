@@ -129,6 +129,13 @@ final class RawEngine implements RawPipeline {
     }
 
     @Override public Timing run(RawFrame frame) {
+        return run(frame, null);
+    }
+
+    Timing run(RawFrame frame, RawFidelity trace) {
+        if (trace != null && (nativeIsp == null || quantized)) {
+            throw new IllegalArgumentException("Fidelity trace requires the native FP32 pipeline");
+        }
         long started = System.nanoTime();
         if (nativeIsp == null) RawIsp.noise(frame, workspace);
         long noiseNs = System.nanoTime() - started;
@@ -139,23 +146,26 @@ final class RawEngine implements RawPipeline {
         long assemblyNs = 0;
         for (int y = 0; y < RawFrame.HEIGHT; y += TILE) {
             for (int x = 0; x < RawFrame.WIDTH; x += TILE) {
+                int traceSlot = trace == null ? -1 : RawFidelity.tileSlot(cursor);
                 long packStart = System.nanoTime();
                 long tileNoise = 0;
                 if (nativeIsp == null) {
                     copyIn(frame.source, y, x);
                 } else {
-                    tileNoise = nativeIsp.prepare(frame, input, y, x);
+                    tileNoise = nativeIsp.prepare(frame, input, y, x, traceSlot < 0 ? null : trace.noise(traceSlot));
                     noiseNs += tileNoise;
                 }
+                if (traceSlot >= 0) trace.input(traceSlot).put(RawFidelity.full(input));
                 long inferStart = System.nanoTime();
                 input.rewind();
                 output.rewind();
                 interpreter.run(input, output);
                 long inferEnd = System.nanoTime();
+                if (traceSlot >= 0) trace.prediction(traceSlot).put(RawFidelity.full(output));
                 if (nativeIsp == null) {
                     copyOut(frame.source, y, x);
                 } else {
-                    nativeIsp.restore(frame, output, y, x);
+                    nativeIsp.restore(frame, output, y, x, traceSlot < 0 ? null : trace.correction(traceSlot));
                 }
                 long assembled = System.nanoTime();
                 Long nativeNs = interpreter.getLastNativeInferenceDurationNanoseconds();
@@ -172,7 +182,7 @@ final class RawEngine implements RawPipeline {
             gainNs = System.nanoTime() - tilesEnd;
             RawIsp.display(workspace, frame.matrix, rgb);
         } else {
-            gainNs = nativeIsp.render(frame);
+            gainNs = nativeIsp.render(frame, trace == null ? null : trace.display());
         }
         long rendered = System.nanoTime();
         return new Timing(noiseNs, packNs, blocks, nativeInvokes, assemblyNs, tilesEnd - started,
