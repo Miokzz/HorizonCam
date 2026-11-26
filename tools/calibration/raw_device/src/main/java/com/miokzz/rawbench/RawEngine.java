@@ -13,7 +13,7 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.Arrays;
 
-final class RawEngine implements AutoCloseable {
+final class RawEngine implements RawPipeline {
     static final int TILE = 128;
     static final int HALO = 4;
     static final int EXTENT = TILE + 2 * HALO;
@@ -119,7 +119,16 @@ final class RawEngine implements AutoCloseable {
         }
     }
 
-    Timing run(RawFrame frame) {
+    @Override public Setup setup() {
+        return new Setup(delegateNs, interpreterNs, allocateNs);
+    }
+
+    @Override public Output output() {
+        return nativeIsp == null ? new Output(restored, rgb, null, null)
+                : new Output(null, null, nativeIsp.restored, nativeIsp.rgb);
+    }
+
+    @Override public Timing run(RawFrame frame) {
         long started = System.nanoTime();
         if (nativeIsp == null) RawIsp.noise(frame, workspace);
         long noiseNs = System.nanoTime() - started;
@@ -167,7 +176,7 @@ final class RawEngine implements AutoCloseable {
         }
         long rendered = System.nanoTime();
         return new Timing(noiseNs, packNs, blocks, nativeInvokes, assemblyNs, tilesEnd - started,
-                gainNs, rendered - tilesEnd - gainNs, rendered - started);
+                gainNs, rendered - tilesEnd - gainNs, rendered - started, null);
     }
 
     private void copyIn(float[] source, int y, int x) {
@@ -222,7 +231,11 @@ final class RawEngine implements AutoCloseable {
     }
 
     record Timing(long noiseNs, long packNs, long[] inferenceNs, long[] nativeInvokeNs, long assemblyNs,
-                  long rawToRestoredNs, long gainNs, long ispNs, long totalNs) {}
+                  long rawToRestoredNs, long gainNs, long ispNs, long totalNs, ResidentStats resident) {}
+
+    record ResidentStats(long uploadGpuNs, long readbackGpuNs, long waitHostNs, long enqueueHostNs,
+                         long inferenceGpuSpanNs, long demosaicGpuNs, int asyncTiles, int sameQueueTiles,
+                         long allocatedClBytes, int uploads, int readbacks) {}
 
     @Override public void close() throws Exception {
         try {

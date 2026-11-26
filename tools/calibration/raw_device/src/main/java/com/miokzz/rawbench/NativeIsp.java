@@ -10,13 +10,14 @@ final class NativeIsp {
     }
 
     private static final int WIDTH = 2 * RawFrame.WIDTH;
+    static final int PARAMETER_BYTES = (9 + 4 * (2 + 256 * 256 + 3 * (RawFrame.HEIGHT + RawFrame.WIDTH))) * Float.BYTES;
     final ByteBuffer restored = allocateFloats(RawFrame.SAMPLES);
     final ByteBuffer rgb = ByteBuffer.allocateDirect(3 * RawFrame.SAMPLES);
     private final ByteBuffer sigma = allocateFloats(RawEngine.EXTENT * RawEngine.EXTENT * 4);
     private final ByteBuffer rows = allocateFloats(WIDTH * 5);
     private final ByteBuffer srgb = ByteBuffer.allocateDirect(65536);
     // Four maps, each with two dimensions, up to 256x256 gains, and two axis tables.
-    private final ByteBuffer maps = allocateFloats(9 + 4 * (2 + 256 * 256 + 3 * (RawFrame.HEIGHT + RawFrame.WIDTH)));
+    private final ByteBuffer maps = ByteBuffer.allocateDirect(PARAMETER_BYTES).order(ByteOrder.nativeOrder());
     private RawFrame bound;
 
     NativeIsp() {
@@ -35,16 +36,21 @@ final class NativeIsp {
 
     long render(RawFrame frame) {
         if (bound != frame) {
-            FloatBuffer table = maps.asFloatBuffer();
-            table.put(frame.matrix);
-            for (RawFrame.GainMap map : frame.maps) {
-                table.put(map.columns).put(map.gains.length / map.columns).put(map.gains);
-                putAxis(table, map.y);
-                putAxis(table, map.x);
-            }
+            writeParameters(maps, frame);
             bound = frame;
         }
         return nativeRender(restored, maps, rows, srgb, rgb);
+    }
+
+    static int writeParameters(ByteBuffer target, RawFrame frame) {
+        FloatBuffer table = target.asFloatBuffer();
+        table.put(frame.matrix);
+        for (RawFrame.GainMap map : frame.maps) {
+            table.put(map.columns).put(map.gains.length / map.columns).put(map.gains);
+            putAxis(table, map.y);
+            putAxis(table, map.x);
+        }
+        return table.position() * Float.BYTES;
     }
 
     private static void putAxis(FloatBuffer buffer, RawFrame.Axis axis) {

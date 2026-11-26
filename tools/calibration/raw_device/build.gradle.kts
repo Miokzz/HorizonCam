@@ -20,6 +20,10 @@ android {
         path = file("src/main/cpp/CMakeLists.txt")
         version = "3.22.1"
     }
+    providers.gradleProperty("rawResidentSdk").orNull?.let { sdk ->
+        defaultConfig.externalNativeBuild.cmake.arguments += "-DRAW_RESIDENT_SDK=$sdk"
+        sourceSets.getByName("main").jniLibs.srcDir("$sdk/runtime")
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

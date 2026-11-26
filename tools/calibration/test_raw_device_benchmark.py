@@ -20,6 +20,11 @@ class RawDeviceReportingTest(unittest.TestCase):
         trace = "INFO: [Qnn Delegate] QNN HTP delegate: 4 nodes delegated out of 4 nodes with 1 partitions."
         self.assertEqual(delegation(trace, "qnn")["acceleratorNodes"], 4)
 
+    def test_compiled_model_evidence_counts_the_actual_gpu_partition(self):
+        trace = "I/HorizonRawResident: CompiledModel GPU OpenCL nodes=4 total=4 partitions=1"
+        result = delegation(trace, "gpu")
+        self.assertEqual((result["acceleratorNodes"], result["cpuNodes"], result["partitions"]), (4, 0, 1))
+
     def test_delegate_creation_alone_is_inconclusive(self):
         self.assertIsNone(delegation("Created 1 GPU delegate kernels.", "gpu")["acceleratorNodes"])
         self.assertEqual(delegation("INFO: Created TensorFlow Lite XNNPACK delegate for CPU.", "cpu")["cpuNodes"], 4)
@@ -55,6 +60,25 @@ class RawDeviceReportingTest(unittest.TestCase):
             result = json.loads(output.read_text())["gpu"]["detail-a"]
             self.assertTrue(result["rawBitwiseEqual"])
             self.assertFalse(result["androidRgbBitwiseEqual"])
+
+    def test_can_compare_resident_rgb_against_native(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            fixtures = root / "fixtures.json"
+            fixtures.write_text(json.dumps([{"label": "detail-a", "packedShape": [1, 1, 4]}]))
+            for implementation, last_channel in (("native", 40), ("resident", 38)):
+                directory = root / implementation / "gpu"
+                directory.mkdir(parents=True)
+                (directory / "detail-a.f32").write_bytes(struct.pack("<4f", 0., .1, .2, 1.))
+                (directory / "detail-a.rgb").write_bytes(bytes([20, 30, last_channel] * 4))
+                record = {"pairs": [{"label": "detail-a", "rgbSha256": implementation}]}
+                (directory / "timing.json").write_text(json.dumps(record))
+            output = root / "parity.json"
+            args = SimpleNamespace(fixtures=fixtures, runs=root, output=output, modes=["gpu"])
+            compare_implementations(args, "native", "resident")
+            result = json.loads(output.read_text())["gpu"]["detail-a"]
+            self.assertTrue(result["rawBitwiseEqual"])
+            self.assertEqual(result["androidRgbDifference"]["max"], 2.)
 
 
 if __name__ == "__main__":

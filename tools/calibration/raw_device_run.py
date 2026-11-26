@@ -119,6 +119,10 @@ def battery_window(window):
 
 
 def delegation(logs, mode):
+    compiled = re.search(r"CompiledModel GPU OpenCL nodes=(\d+) total=(\d+) partitions=(\d+)", logs)
+    if compiled and mode == "gpu":
+        return {"acceleratorNodes": int(compiled[1]), "cpuNodes": int(compiled[2]) - int(compiled[1]),
+                "partitions": int(compiled[3]), "backend": "LiteRT CompiledModel OpenCL"}
     if mode in ("cpu", "int8"):
         return {"acceleratorNodes": 0, "cpuNodes": GRAPH_OPS,
                 "xnnpackLogged": "XNNPACK delegate" in logs}
@@ -146,7 +150,8 @@ def summarize(primary, cold):
                            for part in ("engineNs", "delegateNs", "interpreterNs", "allocateNs") if part in primary},
                 "firstFrameMs": distribution([report["loops"][0]["totalNs"] / 1e6 for report in cold]),
                 "firstTileMs": distribution([report["loops"][0]["inferenceNs"][0] / 1e6 for report in cold]),
-                "warmMs": {part: distribution([loop[part] / 1e6 for loop in warm]) for part in sections},
+                "warmMs": {part: distribution([loop[part] / 1e6 for loop in warm]) for part in sections
+                           if all(loop[part] >= 0 for loop in warm)},
                 "peakRssKiB": primary["finalMemory"].get("peakRssKiB"),
                 "finalPssKiB": primary["finalMemory"]["pssKiB"],
                 "maxWarmPssKiB": max(loop["memory"]["pssKiB"] for loop in warm),
@@ -167,6 +172,11 @@ def summarize(primary, cold):
     evidence["batteryTempRangeC"] = [min(temperatures), max(temperatures)] if temperatures else None
     evidence["thermalStatuses"] = sorted({sample["thermalStatus"] for sample in power})
     evidence["interactiveStates"] = sorted({sample["interactive"] for sample in power if "interactive" in sample})
+    if all(loop.get("resident") for loop in warm):
+        stages = ("uploadGpuNs", "readbackGpuNs", "waitHostNs", "enqueueHostNs", "inferenceGpuSpanNs", "demosaicGpuNs")
+        evidence["residentMs"] = {key: distribution([loop["resident"][key] / 1e6 for loop in warm]) for key in stages}
+        evidence["residentCounts"] = {key: sorted({loop["resident"][key] for loop in warm}) for key in
+                                     ("asyncTiles", "sameQueueTiles", "allocatedClBytes", "uploads", "readbacks")}
     for label in ("idleWindow", "loadWindow"):
         if label in primary:
             evidence[label] = battery_window(primary[label])
@@ -231,7 +241,8 @@ if __name__ == "__main__":
     capture.add_argument("--repeats", type=int, default=10)
     capture.add_argument("--energy-seconds", type=int, default=20)
     capture.add_argument("--cold", type=int, choices=(1, 2, 3, 4, 5), default=3)
-    capture.add_argument("--implementation", choices=("java", "native", "both"), default="java")
+    capture.add_argument("--implementation", choices=("java", "native", "both", "resident", "resident-direct"),
+                         default="java")
     capture.set_defaults(action=collect)
     offline = sub.add_parser("report")
     offline.add_argument("--runs", type=Path, required=True)
@@ -243,7 +254,10 @@ if __name__ == "__main__":
         parser.error("--adb is required for install and collect")
     if args.action is collect:
         if args.modes is None:
-            args.modes = list(MODES if args.implementation == "java" else MODES[:-1])
+            args.modes = ["gpu"] if args.implementation.startswith("resident") else list(
+                MODES if args.implementation == "java" else MODES[:-1])
+        if args.implementation.startswith("resident") and args.modes != ["gpu"]:
+            parser.error("Resident ISP is qualified for strict GPU mode only")
         if args.implementation != "java" and "int8" in args.modes:
             parser.error("INT8 is a historical control for the Java runner only")
     args.action(args)

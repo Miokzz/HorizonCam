@@ -69,13 +69,13 @@ def recorded_pairs(directory):
     return {item["label"]: item for item in record["pairs"]}
 
 
-def compare_implementations(args):
+def compare_implementations(args, reference_implementation="java", candidate_implementation="native"):
     fixtures = json.loads(args.fixtures.read_text(encoding="utf-8"))
     output = {}
     for mode in args.modes:
-        java = args.runs / "java" / mode
-        native = args.runs / "native" / mode
-        earlier, optimized = recorded_pairs(java), recorded_pairs(native)
+        reference_run = args.runs / reference_implementation / mode
+        candidate_run = args.runs / candidate_implementation / mode
+        earlier, optimized = recorded_pairs(reference_run), recorded_pairs(candidate_run)
         require(earlier.keys() == optimized.keys(), "A/B runs need identical fixtures")
         mode_data = {}
         for row in fixtures:
@@ -83,8 +83,8 @@ def compare_implementations(args):
             if label not in earlier:
                 continue
             shape = tuple(row["packedShape"])
-            reference = java / f"{label}.f32"
-            candidate = native / f"{label}.f32"
+            reference = reference_run / f"{label}.f32"
+            candidate = candidate_run / f"{label}.f32"
             size = int(np.prod(shape)) * 4
             require(reference.stat().st_size == candidate.stat().st_size == size, "RAW output size differs")
             identical = file_digest(reference) == file_digest(candidate)
@@ -96,6 +96,14 @@ def compare_implementations(args):
             rgb_equal = earlier[label]["rgbSha256"] == optimized[label]["rgbSha256"]
             mode_data[label] = {"rawBitwiseEqual": identical, "androidRgbBitwiseEqual": rgb_equal,
                                 "rawDifference": difference}
+            reference_rgb, candidate_rgb = [run / f"{label}.rgb" for run in (reference_run, candidate_run)]
+            if reference_rgb.is_file() and candidate_rgb.is_file():
+                rgb_size = int(np.prod(shape)) * 3
+                require(reference_rgb.stat().st_size == candidate_rgb.stat().st_size == rgb_size,
+                        "Android RGB output size differs")
+                reference_pixels, candidate_pixels = [np.memmap(rgb, dtype=np.uint8, mode="r")
+                                                       for rgb in (reference_rgb, candidate_rgb)]
+                mode_data[label]["androidRgbDifference"] = parity(candidate_pixels, reference_pixels)
         require(mode_data.keys() == earlier.keys(), "Unrecognized A/B fixture")
         output[mode] = mode_data
     with args.output.open("x", encoding="utf-8") as handle:
@@ -171,6 +179,8 @@ if __name__ == "__main__":
     for name in ("fixtures", "runs", "output"):
         compare.add_argument(f"--{name}", type=Path, required=True)
     compare.add_argument("--modes", nargs="+", required=True)
-    compare.set_defaults(action=compare_implementations)
+    compare.add_argument("--reference", default="java", choices=("java", "native"))
+    compare.add_argument("--candidate", default="native", choices=("native", "resident", "resident-direct"))
+    compare.set_defaults(action=lambda args: compare_implementations(args, args.reference, args.candidate))
     args = parser.parse_args()
     args.action(args)

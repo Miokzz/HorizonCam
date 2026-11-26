@@ -2,6 +2,7 @@
     <application android:allowBackup="false" android:label="Horizon RAW Benchmark">
         <!-- QNN HTP's packaged V75 stub loads this public vendor library on SM8650. -->
         <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
     </application>
     <instrumentation
         android:name=".RawBench"

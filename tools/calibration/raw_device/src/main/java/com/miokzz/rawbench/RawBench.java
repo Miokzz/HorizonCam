@@ -52,10 +52,13 @@ public final class RawBench extends Instrumentation {
     private void runBenchmark() throws Exception {
         String mode = arguments.getString("mode");
         String implementation = arguments.getString("implementation", "java");
-        if (!implementation.equals("java") && !implementation.equals("native")) {
+        boolean external = implementation.equals("resident-direct");
+        boolean resident = implementation.equals("resident") || external;
+        if (!resident && !implementation.equals("java") && !implementation.equals("native")) {
             throw new IllegalArgumentException("Unknown ISP implementation");
         }
-        boolean optimized = implementation.equals("native");
+        if (resident && !"gpu".equals(mode)) throw new IllegalArgumentException("Resident ISP requires strict GPU mode");
+        boolean optimized = !implementation.equals("java");
         String run = arguments.getString("run");
         String[] pairs = arguments.getString("pairs", String.join(",", PAIRS)).split(",");
         int repeats = Integer.parseInt(arguments.getString("repeats", "10"));
@@ -82,10 +85,13 @@ public final class RawBench extends Instrumentation {
         JSONArray loops = new JSONArray();
         JSONArray pairsEvidence = new JSONArray();
         long engineStart = System.nanoTime();
-        try (RawEngine engine = new RawEngine(mode, graph, getTargetContext().getApplicationInfo().nativeLibraryDir, optimized)) {
+        String libraryDir = getTargetContext().getApplicationInfo().nativeLibraryDir;
+        try (RawPipeline engine = resident ? new ResidentIsp(graph, libraryDir, external)
+                : new RawEngine(mode, graph, libraryDir, optimized)) {
+            RawPipeline.Setup setup = engine.setup();
             report.put("engineNs", System.nanoTime() - engineStart)
-                    .put("delegateNs", engine.delegateNs).put("interpreterNs", engine.interpreterNs)
-                    .put("allocateNs", engine.allocateNs).put("allocatedMemory", memory());
+                    .put("delegateNs", setup.delegateNs()).put("interpreterNs", setup.interpreterNs())
+                    .put("allocateNs", setup.allocateNs()).put("allocatedMemory", memory());
             for (int i = 0; i < pairs.length; i++) {
                 String label = pairs[i];
                 if (!java.util.Arrays.asList(PAIRS).contains(label)) throw new IllegalArgumentException("Unknown fixture");
@@ -102,7 +108,7 @@ public final class RawBench extends Instrumentation {
                     engine.run(frame);
                 }
                 JSONObject pair = new JSONObject().put("label", label).put("fixtureLoadNs", loadNs);
-                if (save) pair.put("rgbSha256", save(frame, engine, output, label));
+                if (save) pair.put("rgbSha256", save(engine.output(), output, label));
                 pairsEvidence.put(pair);
                 if (i == 0 && energySeconds > 0) {
                     report.put("idleWindow", samples.window(energySeconds, null));
@@ -120,25 +126,35 @@ public final class RawBench extends Instrumentation {
         for (long ns : time.inferenceNs()) tiles.put(ns);
         JSONArray nativeInvokes = new JSONArray();
         for (long ns : time.nativeInvokeNs()) nativeInvokes.put(ns);
-        return new JSONObject().put("noiseNs", time.noiseNs()).put("packNs", time.packNs())
+        JSONObject record = new JSONObject().put("noiseNs", time.noiseNs()).put("packNs", time.packNs())
                 .put("inferenceNs", tiles).put("nativeInvokeNs", nativeInvokes).put("assemblyNs", time.assemblyNs())
                 .put("rawToRestoredNs", time.rawToRestoredNs()).put("gainNs", time.gainNs())
                 .put("ispNs", time.ispNs()).put("totalNs", time.totalNs())
                 .put("elapsedRealtimeNs", SystemClock.elapsedRealtimeNanos());
+        RawEngine.ResidentStats gpu = time.resident();
+        if (gpu != null) {
+            record.put("resident", new JSONObject().put("uploadGpuNs", gpu.uploadGpuNs())
+                    .put("readbackGpuNs", gpu.readbackGpuNs()).put("waitHostNs", gpu.waitHostNs())
+                    .put("enqueueHostNs", gpu.enqueueHostNs()).put("inferenceGpuSpanNs", gpu.inferenceGpuSpanNs())
+                    .put("demosaicGpuNs", gpu.demosaicGpuNs()).put("asyncTiles", gpu.asyncTiles())
+                    .put("sameQueueTiles", gpu.sameQueueTiles()).put("allocatedClBytes", gpu.allocatedClBytes())
+                    .put("uploads", gpu.uploads()).put("readbacks", gpu.readbacks()));
+        }
+        return record;
     }
 
-    private static String save(RawFrame frame, RawEngine engine, File output, String label) throws Exception {
+    private static String save(RawPipeline.Output snapshot, File output, String label) throws Exception {
         File raw = new File(output, label + ".f32");
         File rgb = new File(output, label + ".rgb");
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        if (frame.mappedSource == null) {
-            writeFloats(raw, engine.restored);
-            if (label.equals("detail-a")) Files.write(rgb.toPath(), engine.rgb);
-            digest.update(engine.rgb);
+        if (snapshot.directRaw() == null) {
+            writeFloats(raw, snapshot.raw());
+            if (label.equals("detail-a")) Files.write(rgb.toPath(), snapshot.rgb());
+            digest.update(snapshot.rgb());
         } else {
-            writeBuffer(raw, engine.nativeIsp.restored);
-            if (label.equals("detail-a")) writeBuffer(rgb, engine.nativeIsp.rgb);
-            ByteBuffer image = engine.nativeIsp.rgb.asReadOnlyBuffer();
+            writeBuffer(raw, snapshot.directRaw());
+            if (label.equals("detail-a")) writeBuffer(rgb, snapshot.directRgb());
+            ByteBuffer image = snapshot.directRgb().asReadOnlyBuffer();
             image.rewind();
             digest.update(image);
         }
