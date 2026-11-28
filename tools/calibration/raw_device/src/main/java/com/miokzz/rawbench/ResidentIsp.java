@@ -11,15 +11,17 @@ final class ResidentIsp implements RawPipeline {
     }
 
     private static final int FIRST_TILE = 13;
-    private final ByteBuffer raw = direct(RawFrame.SAMPLES * Float.BYTES);
+    private final ByteBuffer raw;
     private final ByteBuffer rgb = direct(RawFrame.SAMPLES * 3);
     private final ByteBuffer parameters = direct(NativeIsp.PARAMETER_BYTES);
     private final long[] values = new long[FIRST_TILE + RawEngine.TILE_COUNT];
     private final Setup setup;
     private long handle;
 
-    ResidentIsp(File model, String libraryDir, boolean external, boolean audit, int math) {
+    ResidentIsp(File model, String libraryDir, boolean external, boolean audit, int math, boolean exportRaw) {
         if (audit && external) throw new IllegalArgumentException("Fidelity audit requires NHWC");
+        if (audit && !exportRaw) throw new IllegalArgumentException("Fidelity audit requires the restored Bayer");
+        raw = exportRaw ? direct(RawFrame.SAMPLES * Float.BYTES) : null;
         ByteBuffer lookup = direct(65536);
         RawIsp.copyLookup(lookup);
         long[] durations = new long[3];

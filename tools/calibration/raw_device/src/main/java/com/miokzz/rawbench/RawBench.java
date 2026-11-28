@@ -59,6 +59,11 @@ public final class RawBench extends Instrumentation {
         }
         if (resident && !"gpu".equals(mode)) throw new IllegalArgumentException("Resident ISP requires strict GPU mode");
         boolean optimized = !implementation.equals("java");
+        String outputMode = arguments.getString("ispOutput", "full");
+        if (!outputMode.equals("full") && (!outputMode.equals("rgb") || !resident || external)) {
+            throw new IllegalArgumentException("RGB-only is available for the resident NHWC path");
+        }
+        boolean exportRaw = outputMode.equals("full");
         String ispMath = arguments.getString("ispMath", "stock");
         int math = switch (ispMath) {
             case "stock" -> 0;
@@ -87,21 +92,24 @@ public final class RawBench extends Instrumentation {
         }
         if (Boolean.parseBoolean(arguments.getString("fidelity", "false"))) {
             if (!"gpu".equals(mode)) throw new IllegalArgumentException("Fidelity audit requires strict GPU");
-            if (external || !optimized) throw new IllegalArgumentException("Audit requires native or resident");
+            if (!exportRaw || external || !optimized) throw new IllegalArgumentException("Audit requires native or resident");
             auditFidelity(graph, inputs, output, pairs, sha, resident, ispMath, math);
             return;
         }
+        boolean measureJpeg = Boolean.parseBoolean(arguments.getString("measureJpeg", "false"));
         PowerSamples samples = new PowerSamples(getTargetContext());
         JSONObject report = new JSONObject();
         report.put("mode", mode).put("implementation", implementation).put("pid", Process.myPid()).put("graphSha256", sha)
-                .put("graphBytes", graph.length()).put("ispMath", ispMath).put("initialMemory", memory())
+                .put("graphBytes", graph.length()).put("ispMath", ispMath).put("ispOutput", outputMode)
+                .put("initialMemory", memory())
                 .put("initialPower", samples.snapshot());
         JSONArray loops = new JSONArray();
         JSONArray pairsEvidence = new JSONArray();
         long engineStart = System.nanoTime();
         String libraryDir = getTargetContext().getApplicationInfo().nativeLibraryDir;
-        try (RawPipeline engine = resident ? new ResidentIsp(graph, libraryDir, external, false, math)
-                : new RawEngine(mode, graph, libraryDir, optimized)) {
+        try (RawPipeline engine = resident ? new ResidentIsp(graph, libraryDir, external, false, math, exportRaw)
+                : new RawEngine(mode, graph, libraryDir, optimized);
+             RawJpegProbe jpegProbe = measureJpeg ? new RawJpegProbe(getTargetContext(), output) : null) {
             RawPipeline.Setup setup = engine.setup();
             report.put("engineNs", System.nanoTime() - engineStart)
                     .put("delegateNs", setup.delegateNs()).put("interpreterNs", setup.interpreterNs())
@@ -114,7 +122,9 @@ public final class RawBench extends Instrumentation {
                 long loadNs = System.nanoTime() - start;
                 if (i == 0) {
                     for (int loop = 0; loop <= repeats; loop++) {
+                        long frameStarted = System.nanoTime();
                         JSONObject evidence = timing(engine.run(frame));
+                        if (jpegProbe != null) evidence.put("jpeg", jpegProbe.publish(engine.output(), frameStarted));
                         evidence.put("memory", memory()).put("power", samples.snapshot());
                         loops.put(evidence);
                     }
@@ -150,7 +160,7 @@ public final class RawBench extends Instrumentation {
         RawFidelity trace = new RawFidelity();
         RawFidelity referenceTrace = resident ? new RawFidelity() : null;
         RawFidelity replay = resident ? new RawFidelity() : null;
-        try (RawPipeline engine = resident ? new ResidentIsp(graph, libraryDir, false, true, math)
+        try (RawPipeline engine = resident ? new ResidentIsp(graph, libraryDir, false, true, math, true)
                 : new RawEngine("gpu", graph, libraryDir, true)) {
             for (String label : pairs) {
                 if (!java.util.Arrays.asList(PAIRS).contains(label)) throw new IllegalArgumentException("Unknown fixture");
@@ -236,12 +246,12 @@ public final class RawBench extends Instrumentation {
         File raw = new File(output, label + ".f32");
         File rgb = new File(output, label + ".rgb");
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        if (snapshot.directRaw() == null) {
+        if (snapshot.directRgb() == null) {
             writeFloats(raw, snapshot.raw());
             if (label.equals("detail-a")) Files.write(rgb.toPath(), snapshot.rgb());
             digest.update(snapshot.rgb());
         } else {
-            writeBuffer(raw, snapshot.directRaw());
+            if (snapshot.directRaw() != null) writeBuffer(raw, snapshot.directRaw());
             if (label.equals("detail-a")) writeBuffer(rgb, snapshot.directRgb());
             ByteBuffer image = snapshot.directRgb().asReadOnlyBuffer();
             image.rewind();

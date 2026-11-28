@@ -524,10 +524,13 @@ private:
         check(cl.clEnqueueNDRangeKernel(queue, develop, 2, nullptr, renderRange, group, 0, nullptr, rendered),
               "enqueue fused GainMaps and MHC");
         if (trace) readAudit(scratch, trace->display, sizeof(trace->display));
-        cl_event* rawRead = events.next();
+        cl_event* rawRead = rawHost ? events.next() : nullptr;
+        if (rawRead) {
+            check(cl.clEnqueueReadBuffer(queue, raw, CL_FALSE, 0, rawBytes, rawHost, 0, nullptr, rawRead),
+                  "read restored Bayer for audit");
+        }
         cl_event* rgbRead = events.next();
         cl_event* validRead = events.next();
-        check(cl.clEnqueueReadBuffer(queue, raw, CL_FALSE, 0, rawBytes, rawHost, 0, nullptr, rawRead), "read RAW result");
         check(cl.clEnqueueReadBuffer(queue, rgb, CL_FALSE, 0, rgbBytes, rgbHost, 0, nullptr, rgbRead), "read RGB result");
         // Blocking final read reclaims the last host destination before returning, even on failure.
         const int64_t wait = now();
@@ -538,10 +541,10 @@ private:
         result[6] = wait - started;
         result[1] = duration(*pixelsUpload) + duration(*metadataUpload);
         result[3] = duration(*rendered);
-        result[4] = duration(*rawRead) + duration(*rgbRead) + duration(*validRead);
+        result[4] = (rawRead ? duration(*rawRead) : 0) + duration(*rgbRead) + duration(*validRead);
         result[10] = allocatedBytes;
         result[11] = 2;
-        result[12] = 3;
+        result[12] = rawRead ? 3 : 2;
         for (int i = 0; i < tiles; ++i) {
             result[0] += duration(*prepared[i]);
             result[2] += duration(*restored[i]);
@@ -592,7 +595,7 @@ Java_com_miokzz_rawbench_ResidentIsp_runFrame(JNIEnv* env, jclass, jlong handle,
         env->GetFloatArrayRegion(profile, 0, 8, coefficients);
         reinterpret_cast<Resident*>(handle)->frame(env->GetDirectBufferAddress(input), coefficients,
                 static_cast<const float*>(env->GetDirectBufferAddress(maps)), mapBytes,
-                env->GetDirectBufferAddress(raw), env->GetDirectBufferAddress(rgb), metrics,
+                raw ? env->GetDirectBufferAddress(raw) : nullptr, env->GetDirectBufferAddress(rgb), metrics,
                 trace ? static_cast<fidelity::Trace*>(env->GetDirectBufferAddress(trace)) : nullptr,
                 reference ? static_cast<const fidelity::Trace*>(env->GetDirectBufferAddress(reference)) : nullptr,
                 referenceRaw ? env->GetDirectBufferAddress(referenceRaw) : nullptr);

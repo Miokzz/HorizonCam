@@ -59,6 +59,7 @@ def collect_one(args, mode, output, pairs, repeats, seconds, save, implementatio
                      "-e", "run", run, "-e", "pairs", ",".join(pairs), "-e", "repeats", str(repeats),
                      "-e", "energySeconds", str(seconds), "-e", "save", str(save).lower(),
                      "-e", "implementation", implementation, "-e", "ispMath", args.isp_math,
+                     "-e", "ispOutput", args.isp_output, "-e", "measureJpeg", str(args.measure_jpeg).lower(),
                      f"{PACKAGE}/.RawBench", capture_output=True, text=True, timeout=360)
     (output / "instrumentation.txt").write_text(instrument.stdout + instrument.stderr, encoding="utf-8")
     match = re.search(r"(?m)^(?:INSTRUMENTATION_STATUS|INSTRUMENTATION_RESULT): pid=(\d+)\s*$", instrument.stdout)
@@ -69,7 +70,10 @@ def collect_one(args, mode, output, pairs, repeats, seconds, save, implementatio
         raise RuntimeError(f"{mode} did not complete; see {output / 'instrumentation.txt'}")
     files = ["timing.json"]
     if save:
-        files.extend(f"{label}.f32" for label in pairs)
+        if args.isp_output == "full":
+            files.extend(f"{label}.f32" for label in pairs)
+        if args.measure_jpeg:
+            files.append("display.jpg")
         if "detail-a" in pairs:
             files.append("detail-a.rgb")
     for name in files:
@@ -146,6 +150,7 @@ def summarize(primary, cold):
     sections = ("noiseNs", "packNs", "assemblyNs", "rawToRestoredNs", "gainNs", "ispNs", "totalNs")
     evidence = {"graphBytes": primary["graphBytes"], "graphSha256": primary["graphSha256"],
                 "implementation": primary.get("implementation", "java"), "ispMath": primary.get("ispMath", "stock"),
+                "ispOutput": primary.get("ispOutput", "full"),
                 "coldMs": {part: distribution([report[part] / 1e6 for report in cold])
                            for part in ("engineNs", "delegateNs", "interpreterNs", "allocateNs") if part in primary},
                 "firstFrameMs": distribution([report["loops"][0]["totalNs"] / 1e6 for report in cold]),
@@ -177,6 +182,10 @@ def summarize(primary, cold):
         evidence["residentMs"] = {key: distribution([loop["resident"][key] / 1e6 for loop in warm]) for key in stages}
         evidence["residentCounts"] = {key: sorted({loop["resident"][key] for loop in warm}) for key in
                                      ("asyncTiles", "sameQueueTiles", "allocatedClBytes", "uploads", "readbacks")}
+    if all(loop.get("jpeg") for loop in warm):
+        evidence["jpegMs"] = {key: distribution([loop["jpeg"][key] / 1e6 for loop in warm])
+                              for key in ("rgbToBitmapNs", "jpegEncodeNs", "galleryPublishNs", "ispToGalleryNs")}
+        evidence["firstIspToGalleryMs"] = distribution([r["loops"][0]["jpeg"]["ispToGalleryNs"] / 1e6 for r in cold])
     for label in ("idleWindow", "loadWindow"):
         if label in primary:
             evidence[label] = battery_window(primary[label])
@@ -244,6 +253,8 @@ if __name__ == "__main__":
     capture.add_argument("--implementation", choices=("java", "native", "both", "resident", "resident-direct"),
                          default="java")
     capture.add_argument("--isp-math", choices=("stock", "divide9", "noise"), default="stock")
+    capture.add_argument("--isp-output", choices=("full", "rgb"), default="full")
+    capture.add_argument("--measure-jpeg", action="store_true", help="Probe JPEG encode and temporary MediaStore rows")
     capture.set_defaults(action=collect)
     offline = sub.add_parser("report")
     offline.add_argument("--runs", type=Path, required=True)
@@ -257,6 +268,8 @@ if __name__ == "__main__":
         if args.modes is None:
             args.modes = ["gpu"] if args.implementation.startswith("resident") else list(
                 MODES if args.implementation == "java" else MODES[:-1])
+        if args.isp_output != "full" and args.implementation != "resident":
+            parser.error("RGB-only output requires the resident NHWC implementation")
         if args.isp_math != "stock" and args.implementation != "resident":
             parser.error("Experimental ISP math requires the resident NHWC implementation")
         if args.implementation.startswith("resident") and args.modes != ["gpu"]:
