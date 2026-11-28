@@ -69,48 +69,117 @@ internal object FusionRegistration {
         return normal.firstOrNull { quality(it) >= best * 0.93 } ?: normal.maxBy(::quality)
     }
 
-    private fun correlation(
-        reference: FloatArray,
-        candidate: FloatArray,
-        width: Int,
-        height: Int,
-        dx: Double,
-        dy: Double,
-        margin: Int,
-        brightnessGain: Double,
-    ): Double {
-        val step = max(1, max(width, height) / 160)
-        var sumReference = 0.0
-        var sumCandidate = 0.0
-        var squareReference = 0.0
-        var squareCandidate = 0.0
-        var product = 0.0
-        var count = 0
-        var possible = 0
-        for (y in margin until height - margin step step) for (x in
-            margin until width - margin step step) {
-            val a = reference[y * width + x].toDouble()
-            val b = FusionMath.sample(candidate, width, height, x + dx, y + dy)
-            if (a < 8 || a > 247 || b < 4 || b > 251) continue
-            possible++
-            // Gross photometric disagreement is usually a moving object.
-            // Trim it before it can drag a correct global translation.
-            if (abs(a - b * brightnessGain) > 40.0) continue
-            sumReference += a
-            sumCandidate += b
-            squareReference += a * a
-            squareCandidate += b * b
-            product += a * b
-            count++
+    internal class Correlation(
+        private val reference: FloatArray,
+        private val candidate: FloatArray,
+        private val width: Int,
+        private val height: Int,
+        private val margin: Int,
+        private val brightnessGain: Double,
+    ) {
+        private val step = max(1, max(width, height) / 160)
+
+        private class Columns(width: Int) {
+            val left = IntArray(width)
+            val right = IntArray(width)
+            val firstWeight = DoubleArray(width)
+            val secondWeight = DoubleArray(width)
         }
-        if (count < 32 || count < possible * 0.60) return -1.0
-        val varianceReference = squareReference - sumReference * sumReference / count
-        val varianceCandidate = squareCandidate - sumCandidate * sumCandidate / count
-        if (varianceReference <= 1 || varianceCandidate <= 1) return -1.0
-        val correlation =
-            (product - sumReference * sumCandidate / count) /
-                kotlin.math.sqrt(varianceReference * varianceCandidate)
-        return correlation - 0.08 * (1.0 - count.toDouble() / max(1, possible))
+
+        private var columns: Columns? = null
+
+        fun score(dx: Double, dy: Double): Double {
+            val wholeX = dx.toInt()
+            val wholeY = dy.toInt()
+            if (dx == wholeX.toDouble() && dy == wholeY.toDouble()) {
+                // A whole-pixel translation has zero bilinear fractions. The luma plane is finite.
+                var rowOffset = 0
+                return if (margin + wholeX >= 0 && width - margin - 1 + wholeX < width) {
+                    score(
+                        row = { y -> rowOffset = (y + wholeY).coerceIn(0, height - 1) * width + wholeX },
+                        sample = { x -> candidate[rowOffset + x].toDouble() },
+                    )
+                } else {
+                    score(
+                        row = { y -> rowOffset = (y + wholeY).coerceIn(0, height - 1) * width },
+                        sample = { x -> candidate[rowOffset + (x + wholeX).coerceIn(0, width - 1)].toDouble() },
+                    )
+                }
+            }
+
+            val weights = columns ?: Columns(width).also { columns = it }
+            for (x in margin until width - margin step step) {
+                // Calculate each coordinate the same way as FusionMath.sample. Consecutive
+                // coordinates can have different fractional bits after adding the shift.
+                val xx = (x + dx).coerceIn(0.0, width - 1.0)
+                val left = xx.toInt()
+                val fx = xx - left
+                weights.left[x] = left
+                weights.right[x] = (left + 1).coerceAtMost(width - 1)
+                weights.firstWeight[x] = 1 - fx
+                weights.secondWeight[x] = fx
+            }
+            var topOffset = 0
+            var bottomOffset = 0
+            var fy = 0.0
+            var firstYWeight = 0.0
+            return score(
+                row = { y ->
+                    val yy = (y + dy).coerceIn(0.0, height - 1.0)
+                    val top = yy.toInt()
+                    topOffset = top * width
+                    bottomOffset = (top + 1).coerceAtMost(height - 1) * width
+                    fy = yy - top
+                    firstYWeight = 1 - fy
+                },
+                sample = { x ->
+                    val left = weights.left[x]
+                    val right = weights.right[x]
+                    val first = weights.firstWeight[x]
+                    val second = weights.secondWeight[x]
+                    (candidate[topOffset + left] * first + candidate[topOffset + right] * second) * firstYWeight +
+                        (candidate[bottomOffset + left] * first + candidate[bottomOffset + right] * second) * fy
+                },
+            )
+        }
+
+        private inline fun score(row: (Int) -> Unit, sample: (Int) -> Double): Double {
+            var sumReference = 0.0
+            var sumCandidate = 0.0
+            var squareReference = 0.0
+            var squareCandidate = 0.0
+            var product = 0.0
+            var count = 0
+            var possible = 0
+            for (y in margin until height - margin step step) {
+                row(y)
+                val offset = y * width
+                for (x in margin until width - margin step step) {
+                    val a = reference[offset + x].toDouble()
+                    if (a < 8 || a > 247) continue
+                    val b = sample(x)
+                    if (b < 4 || b > 251) continue
+                    possible++
+                    // Gross photometric disagreement is usually a moving object.
+                    // Trim it before it can drag a correct global translation.
+                    if (abs(a - b * brightnessGain) > 40.0) continue
+                    sumReference += a
+                    sumCandidate += b
+                    squareReference += a * a
+                    squareCandidate += b * b
+                    product += a * b
+                    count++
+                }
+            }
+            if (count < 32 || count < possible * 0.60) return -1.0
+            val varianceReference = squareReference - sumReference * sumReference / count
+            val varianceCandidate = squareCandidate - sumCandidate * sumCandidate / count
+            if (varianceReference <= 1 || varianceCandidate <= 1) return -1.0
+            val correlation =
+                (product - sumReference * sumCandidate / count) /
+                    kotlin.math.sqrt(varianceReference * varianceCandidate)
+            return correlation - 0.08 * (1.0 - count.toDouble() / max(1, possible))
+        }
     }
 
     private fun gain(
@@ -187,18 +256,11 @@ internal object FusionRegistration {
         var coarseX = 0
         var coarseY = 0
         val coarseScores = mutableListOf<Triple<Int, Int, Double>>()
+        val coarseCorrelation = Correlation(
+            reference.coarse, candidate.coarse, reference.coarseWidth, reference.coarseHeight, coarseMargin, brightnessGain,
+        )
         for (dy in -coarseRadius..coarseRadius) for (dx in -coarseRadius..coarseRadius) {
-            val score =
-                correlation(
-                    reference.coarse,
-                    candidate.coarse,
-                    reference.coarseWidth,
-                    reference.coarseHeight,
-                    dx.toDouble(),
-                    dy.toDouble(),
-                    coarseMargin,
-                    brightnessGain,
-                )
+            val score = coarseCorrelation.score(dx.toDouble(), dy.toDouble())
             coarseScores.add(Triple(dx, dy, score))
             if (score > best) {
                 best = score
@@ -214,6 +276,7 @@ internal object FusionRegistration {
         val width = reference.source.width
         val height = reference.source.height
         val margin = min(maxShift + 3, min(width, height) / 4)
+        val fineCorrelation = Correlation(reference.gray, candidate.gray, width, height, margin, brightnessGain)
         var bestX = (coarseX * reference.coarseScale).coerceIn(-maxShift, maxShift).toDouble()
         var bestY = (coarseY * reference.coarseScale).coerceIn(-maxShift, maxShift).toDouble()
         best = -2.0
@@ -222,17 +285,7 @@ internal object FusionRegistration {
         val centerY = bestY.roundToInt()
         for (dy in max(-maxShift, centerY - radius)..min(maxShift, centerY + radius)) {
             for (dx in max(-maxShift, centerX - radius)..min(maxShift, centerX + radius)) {
-                val score =
-                    correlation(
-                        reference.gray,
-                        candidate.gray,
-                        width,
-                        height,
-                        dx.toDouble(),
-                        dy.toDouble(),
-                        margin,
-                        brightnessGain,
-                    )
+                val score = fineCorrelation.score(dx.toDouble(), dy.toDouble())
                 if (score > best) {
                     best = score
                     bestX = dx.toDouble()
@@ -248,17 +301,7 @@ internal object FusionRegistration {
                 val dx = anchorX + i * increment
                 val dy = anchorY + j * increment
                 if (abs(dx) > maxShift || abs(dy) > maxShift) continue
-                val score =
-                    correlation(
-                        reference.gray,
-                        candidate.gray,
-                        width,
-                        height,
-                        dx,
-                        dy,
-                        margin,
-                        brightnessGain,
-                    )
+                val score = fineCorrelation.score(dx, dy)
                 if (score > best) {
                     best = score
                     bestX = dx
